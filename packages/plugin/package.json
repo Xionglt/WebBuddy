@@ -1,0 +1,31 @@
+{
+  "name": "playwright-mcp-server",
+  "version": "1.0.0",
+  "description": "A Playwright MCP Server for browser automation — navigate, screenshot, extract data, fill forms, and more.",
+  "main": "dist/index.js",
+  "bin": {
+    "playwright-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "playwright",
+    "mcp",
+    "browser-automation",
+    "web-scraping",
+    "screenshot"
+  ],
+  "author": "Xionglt",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "playwright": "^1.52.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

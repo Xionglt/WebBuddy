@@ -1,0 +1,9 @@
+{
+  "name": "multi-functional-agent",
+  "private": true,
+  "scripts": {
+    "build": "cd packages/plugin && npx tsc && cd ../web-buddy && npm run build",
+    "start": "cd packages/web-buddy && npm start",
+    "dev": "cd packages/web-buddy && npm run dev"
+  }
+}
