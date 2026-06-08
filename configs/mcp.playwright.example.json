@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "node",
+      "args": ["packages/playwright-mcp/dist/server.js"],
+      "env": {
+        "PLAYWRIGHT_HEADLESS": "false",
+        "PLAYWRIGHT_BLOCK_LOCALHOST": "false"
+      }
+    }
+  }
+}
