@@ -14,10 +14,32 @@
  * 2. Call registerBuiltinPlugin() with the plugin definition here
  */
 
+import { fileURLToPath } from 'node:url'
+import { join, dirname } from 'node:path'
+import { registerBuiltinPlugin } from '../builtinPlugins.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const pluginEntry = join(__dirname, '../../../../../plugin/dist/index.js')
+
 /**
  * Initialize built-in plugins. Called during CLI startup.
  */
 export function initBuiltinPlugins(): void {
-  // No built-in plugins registered yet — this is the scaffolding for
-  // migrating bundled skills that should be user-toggleable.
+  registerBuiltinPlugin({
+    name: 'playwright',
+    description:
+      'Playwright 浏览器自动化 — 打开网页、截图、提取数据、填表、点击',
+    version: '1.0.0',
+    mcpServers: {
+      playwright: {
+        type: 'stdio',
+        command: 'node',
+        args: [pluginEntry],
+        env: {
+          HEADED: '1',
+        },
+      },
+    },
+    defaultEnabled: true,
+  })
 }
