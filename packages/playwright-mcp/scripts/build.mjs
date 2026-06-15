@@ -31,6 +31,11 @@ await esbuild.build({
   sourcemap: true,
 })
 
+// Bundled, executable entry points. play* heavy deps stay external:
+//  - playwright (the browser driver, already a runtime dep)
+//  - pdfjs-dist (dynamic-imported by the resume parser at runtime)
+const EXTERNAL = ['playwright', 'pdfjs-dist']
+
 await esbuild.build({
   entryPoints: ['src/server.ts'],
   bundle: true,
@@ -38,8 +43,17 @@ await esbuild.build({
   format: 'esm',
   target: 'node18',
   outfile: 'dist/server.js',
-  banner: {
-    js: '#!/usr/bin/env node',
-  },
-  external: ['playwright'],
+  banner: { js: '#!/usr/bin/env node' },
+  external: EXTERNAL,
+})
+
+await esbuild.build({
+  entryPoints: ['src/cli/demo.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node18',
+  outfile: 'dist/cli/demo.js',
+  banner: { js: '#!/usr/bin/env node' },
+  external: EXTERNAL,
 })

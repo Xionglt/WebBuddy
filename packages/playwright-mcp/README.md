@@ -1,114 +1,188 @@
-# Playwright MCP Server
+# Playwright MCP Server + Visual Job-Application Agent SDK
 
-Phase 1 browser automation MCP server for [multi-functional-agent](../../README.md).
+A **generic, visual browser job-application agent**. Give it **any recruitment
+site + a resume** and it logs in (via saved cookies), reads the page, and fills
+the application form — with the **LLM driving the browser itself** through a
+tool-calling loop. Every sensitive step (login, captcha, upload, save, submit)
+waits for a human, and **nothing is ever submitted for real**. The whole run is
+recorded as a replayable trace of reasoning, actions, screenshots, URLs, and
+risk tiers.
 
-Exposes ref-based Playwright tools to `web-buddy` over MCP stdio.
+Two layers in one package:
 
-## Tools (Phase 1)
+1. **Agent engine** (`src/core/` + `src/sdk/`) — generic ReAct loop, tool
+   registry, LLM tool-use, cookie login, PDF resume, matcher, trace, highlight,
+   human gates. Plus a demo CLI (`src/cli/demo.ts`).
+2. **Playwright MCP server** (`src/server.ts`) — the same ref-based browser
+   tools exposed over MCP stdio for any MCP client.
 
-| Tool | Description |
-|------|-------------|
-| `browser_open` | Open a URL and create/reuse a browser session |
-| `browser_snapshot` | Capture interactive page structure with stable refs (`e1`, `e2`, ...) |
-| `browser_click` | Click an element by ref |
-| `browser_type` | Type into an input by ref |
-| `browser_select` | Select an option by ref |
-| `browser_wait` | Wait for load state, URL, text, or delay |
+> **Safety contract.** The agent never logs in, never solves a captcha, never
+> uploads a resume, never saves a draft, and never submits an application
+> without a human at each of those five checkpoints. The final-submit gate
+> *refuses* to auto-submit even when approved.
 
-## Quick Start
+---
+
+## Quick start
 
 ```bash
 cd packages/playwright-mcp
-npm install
+npm install            # also runs `playwright install chromium`
 npm run build
-npm start
+
+# 1) Offline demo — mock Alibaba form, visible LLM/heuristic fill (no key needed):
+npm run demo
+
+# 2) The headline: ANY site + resume → cookie login + LLM-driven fill:
+npm run login -- https://your-recruiting-site.com/   # log in once, save cookies
+MODEL_API_KEY=sk-... npm run fill -- https://your-recruiting-site.com/apply
+
+# 3) Alibaba scrape + match (read-only):
+npm run demo:match
 ```
 
-## web-buddy Integration
+No resume? A sample is generated automatically at `tmp/pdfs/resume.pdf`. Drop
+your own `resume.pdf` / `resume.json` / `resume.txt` there (or `--resume path`).
 
-Add to your MCP config (project or user scope):
+### Configure your model
 
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "node",
-      "args": ["/absolute/path/to/multi-functional-agent/packages/playwright-mcp/dist/server.js"],
-      "env": {
-        "PLAYWRIGHT_HEADLESS": "false",
-        "PLAYWRIGHT_ALLOWED_DOMAINS": "example.com,*.example.com"
-      }
-    }
-  }
-}
+`fill` needs an OpenAI-compatible model that supports **function/tool-calling**.
+
+```bash
+cp configs/agent.env.example .env
+# edit .env: set MODEL_API_KEY (and MODEL_BASE_URL / MODEL_NAME if not OpenAI)
 ```
 
-Or from repo root after build:
+---
 
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npm",
-      "args": ["--prefix", "packages/playwright-mcp", "start"]
-    }
-  }
-}
+## Commands
+
+```bash
+node dist/cli/demo.js <command> [options]
 ```
 
-## Typical Agent Flow
+| Command | What it does | Needs key? |
+|---------|--------------|------------|
+| `fill <url>` | **Generic.** Cookie-login the site, then the LLM-driven agent loop fills the application form from the resume. Never submits. | ✅ |
+| `login <url>` | Open the site, let you log in manually, **save cookies** so later `fill` runs skip login. | ❌ |
+| `match [--list-url]` | Alibaba preset: scrape list + details, match to resume, hand off at the gate (read-only). | optional |
+| `demo-form` | Offline mock form; visible fill via the agent loop (or heuristic fallback). Always works. | optional |
+
+Options: `--resume`, `--headful`/`--headless`, `--auto-gate`, `--model-key`,
+`--base-url`, `--model-name`, `--storage-state`, `--max-jobs`, `-h/--help`.
+
+---
+
+## Architecture
 
 ```text
-browser_open(url)
-browser_snapshot()
-browser_type(ref=e1, text="张三")
-browser_type(ref=e2, text="zhangsan@example.com")
-browser_snapshot()
-# stop before clicking submit (risk L3)
+src/
+  core/                    ★ generic agent engine (the brain)
+    agent-loop.ts          ReAct loop: LLM picks browser tools itself (tool-calling)
+    tool-registry.ts       schema-driven tool registry → OpenAI function schemas
+    page-view.ts           snapshot → LLM-readable text ([e1]/[e2] refs + risk)
+    login.ts               cookie login (storageState save/load) + login-wall detect
+  sdk/                     domain logic + runtime
+    orchestrator.ts        runJobApplicationAgent() — unified pipeline (fill/match/demo-form)
+    llm.ts                 OpenAI-compatible client: chat + chatWithTools (tool-use)
+    config.ts / human.ts / trace.ts / highlight.ts / resume.ts / matcher.ts / alibaba.ts / form-fill.ts
+  browser/ snapshot/ session/ policy/ tools/   MCP server core (ref-based browser tools)
+  cli/demo.ts              the demo CLI (fill / login / match / demo-form)
+  server.ts                the MCP server entry
 ```
 
-## Environment Variables
+### How the generic fill works (the key idea)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PLAYWRIGHT_HEADLESS` | `true` | Set `false` to show browser window |
-| `PLAYWRIGHT_ALLOWED_DOMAINS` | empty | Comma-separated domain allowlist |
-| `PLAYWRIGHT_BLOCK_LOCALHOST` | `true` | Block localhost navigation |
-| `PLAYWRIGHT_VIEWPORT_WIDTH` | `1280` | Browser viewport width |
-| `PLAYWRIGHT_VIEWPORT_HEIGHT` | `800` | Browser viewport height |
-| `PLAYWRIGHT_NAVIGATION_TIMEOUT_MS` | `30000` | Navigation timeout |
-| `PLAYWRIGHT_ACTION_TIMEOUT_MS` | `10000` | Action timeout |
+There is **no hardcoded field mapping**. Instead:
 
-## Response Format
+1. The page is snapshotted into a compact, LLM-readable text view listing every
+   interactive element with a stable ref (`[e1] input "姓名 Name" risk=L2`).
+2. That view + the parsed resume go to the model as a system prompt, with the
+   browser tools available as **function calls**.
+3. The model decides the next action — `browser_type ref=e1 text="Zhang San"`,
+   `browser_click ref=e4`, … — and the loop executes it, feeds the updated page
+   view back, and repeats until the model calls `agent_done`.
+4. Risky actions (L3/L4) are intercepted by the **human gate** before they run.
 
-All tools return JSON text content:
+This is the hermes/openclaw-style "LLM drives the browser via tool calls" loop,
+in TypeScript, with visualization and a hard safety contract.
 
-```json
-{
-  "ok": true,
-  "observation": "Typed into ref e1 (Full Name): \"张三\"",
-  "data": { "ref": "e1", "risk": "L2", "chars": 2 },
-  "pageChanged": true
-}
+### Cookie login
+
+`login <url>` opens the site, hands the window to you to log in (+ solve any
+captcha), then persists cookies via Playwright `storageState` to
+`output/auth/<host>.json`. Subsequent `fill` runs load that file, so you log in
+once and the agent reuses the session — no credentials stored in code.
+
+---
+
+## Human-in-the-loop gates
+
+| Gate | When |
+|------|------|
+| `login` | A login wall appears |
+| `captcha` | A verification challenge appears |
+| `upload_resume` | Attaching the resume PDF |
+| `save_resume` | Persisting the on-site draft |
+| `final_submit` | Submitting — **MVP refuses to auto-submit even if approved** |
+
+Every step is recorded under `output/<runId>/` (`trace.jsonl` + `summary.json`
++ PNG screenshots) with action, timestamp, URL, and risk tier.
+
+---
+
+## Use it as a library
+
+```ts
+import { runJobApplicationAgent, loadConfig } from '@multi-functional-agent/playwright-mcp/dist/sdk/orchestrator.js'
+
+const result = await runJobApplicationAgent({
+  config: loadConfig(),
+  mode: 'fill',
+  startUrl: 'https://your-site.com/apply',
+  onEvent: (e) => console.log(e.phase, e.message),
+})
+console.log(result.finalState, result.summary.tracePath)
 ```
 
-On failure:
+Lower level: build a `ToolRegistry`, point a `LlmGateway` at your model, and run
+`runAgentLoop({ goal, resume, llm, registry, ctx, gate })` directly for any
+browser task — not just job applications.
 
-```json
-{
-  "ok": false,
-  "observation": "Ref \"e9\" is stale or no longer visible.",
-  "error": {
-    "code": "REF_STALE",
-    "message": "Ref \"e9\" is stale or no longer visible.",
-    "recoverable": true,
-    "suggestedNextActions": ["browser_snapshot"]
-  }
-}
+---
+
+## Risk tiers
+
+| Tier | Meaning | Gate |
+|------|---------|------|
+| L0–L1 | Info / safe navigation | none |
+| L2 | Form inputs | auto-filled |
+| L3 | Submit-like buttons (提交/投递/申请/submit/apply) | `confirmed=true` + human gate |
+| L4 | `password` / `file` inputs | always gated |
+
+## MCP server
+
+The same browser tools are exposed over MCP stdio (`dist/server.js`):
+`browser_open`, `browser_snapshot`, `browser_click`, `browser_type`,
+`browser_select`, `browser_wait`, `browser_screenshot`. See
+[`configs/mcp.playwright.example.json`](../../configs/mcp.playwright.example.json).
+
+## Scripts
+
+```bash
+npm run build              # compile src → dist (server + cli + core + sdk)
+npm run demo               # offline demo-form (visible)
+npm run demo:match         # Alibaba scrape + match (headful)
+npm run fill / login       # generic fill / interactive cookie login
+npm run test:smoke         # browser tools + risk gating
+npm run test:resume        # PDF → ResumeProfile
+npm run test:matcher       # deterministic heuristic ranking
+npm run test:agent-loop    # generic agent loop (mock LLM, no key needed)
+npm run test:alibaba-probe # live Alibaba read-only probe (never submits)
 ```
 
-## Notes
+## Environment variables
 
-- Always call `browser_snapshot` before using refs.
-- Refs are invalidated after navigation or page-changing actions.
-- Submit-like buttons are tagged with risk level `L3`.
+See [`configs/agent.env.example`](../../configs/agent.env.example) for the full
+list (model, resume, cookie login, browser/visualization, agent loop, safety,
+trace).

@@ -1,0 +1,29 @@
+{
+  "name": "Zhang San",
+  "email": "zhangsan@example.com",
+  "phone": "13800001234",
+  "location": "Hangzhou, CN",
+  "summary": "Senior frontend engineer with 6 years building large-scale web apps.",
+  "skills": [
+    "typescript", "javascript", "react", "vue", "next.js", "node.js",
+    "playwright", "docker", "kubernetes", "aws"
+  ],
+  "experience": [
+    {
+      "company": "Ant Group",
+      "title": "Senior Frontend Engineer",
+      "period": "2021.05-Present",
+      "summary": "Built an internal tooling platform with React and TypeScript."
+    },
+    {
+      "company": "ByteDance",
+      "title": "Frontend Engineer",
+      "period": "2019.07-2021.04",
+      "summary": "Component library and automated E2E tests with Playwright."
+    }
+  ],
+  "education": [
+    { "school": "Zhejiang University", "degree": "Bachelor", "major": "Computer Science", "period": "2015-2019" }
+  ],
+  "keywords": ["typescript", "react", "frontend", "engineer"]
+}

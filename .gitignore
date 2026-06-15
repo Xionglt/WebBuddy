@@ -22,6 +22,7 @@ yarn-error.log*
 *.log
 .session_tmps/
 output/
+tmp/
 
 # Test & coverage
 coverage/

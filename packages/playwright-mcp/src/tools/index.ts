@@ -1,6 +1,7 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import { browserClick } from '../browser/click.js'
 import { browserOpen } from '../browser/open.js'
+import { browserScreenshot } from '../browser/screenshot.js'
 import { browserSelect } from '../browser/select.js'
 import { browserSnapshot } from '../browser/snapshot.js'
 import { browserType } from '../browser/type.js'
@@ -46,6 +47,8 @@ export const TOOL_DEFINITIONS: Tool[] = [
         ref: { type: 'string', description: 'Element ref from browser_snapshot, e.g. e4' },
         sessionId: { type: 'string' },
         timeoutMs: { type: 'number', description: 'Action timeout in milliseconds.' },
+        confirmed: { type: 'boolean', description: 'Required as true for high-risk L3 actions after user confirmation.' },
+        highlight: { type: 'boolean', description: 'When true and headful, move the mouse to the element and flash an outline before clicking.' },
       },
       required: ['ref'],
     },
@@ -61,6 +64,8 @@ export const TOOL_DEFINITIONS: Tool[] = [
         sessionId: { type: 'string' },
         clear: { type: 'boolean', description: 'Clear existing value before typing. Default: true.' },
         timeoutMs: { type: 'number' },
+        highlight: { type: 'boolean', description: 'When true and headful, flash the field and type char-by-char so the fill is visible.' },
+        typeDelayMs: { type: 'number', description: 'Per-character delay (ms) when highlight is on. Default: 12.' },
       },
       required: ['ref', 'text'],
     },
@@ -97,6 +102,19 @@ export const TOOL_DEFINITIONS: Tool[] = [
       },
     },
   },
+  {
+    name: 'browser_screenshot',
+    description: 'Capture a PNG screenshot of the current page and save it under outDir. Returns the file path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        label: { type: 'string', description: 'Filename slug for the screenshot.' },
+        outDir: { type: 'string', description: 'Directory to write the PNG into. Default: ./output/screenshots.' },
+        fullPage: { type: 'boolean', description: 'Capture full scrollable page. Default: false.' },
+      },
+    },
+  },
 ]
 
 const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
@@ -106,6 +124,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknow
   browser_type: (args) => browserType(args as Parameters<typeof browserType>[0]),
   browser_select: (args) => browserSelect(args as Parameters<typeof browserSelect>[0]),
   browser_wait: (args) => browserWait(args as Parameters<typeof browserWait>[0]),
+  browser_screenshot: (args) => browserScreenshot(args as Parameters<typeof browserScreenshot>[0]),
 }
 
 export async function callBrowserTool(name: string, args: Record<string, unknown>) {
