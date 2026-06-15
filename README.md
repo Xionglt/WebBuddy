@@ -6,10 +6,13 @@
 
 ```text
 multi-functional-agent/
+├── configs/
+│   └── mcp.playwright.example.json
 ├── docs/
 │   └── architecture/          # 架构设计、RFC、开发计划
 ├── packages/
-│   └── web-buddy/             # Agent Runtime（CLI + Agent Loop）
+│   ├── web-buddy/             # Agent Runtime（CLI + Agent Loop）
+│   └── playwright-mcp/        # Playwright MCP Server（浏览器工具）
 └── README.md
 ```
 
@@ -19,24 +22,36 @@ multi-functional-agent/
 
 - CLI 交互入口
 - Agent 循环与工具调用框架
-- MCP 集成能力（后续将接入 Playwright MCP 服务）
+- MCP 集成能力
+
+### packages/playwright-mcp
+
+`playwright-mcp` 是浏览器自动化 MCP Server，提供 ref 驱动的 Playwright 工具：
+
+- `browser_open` / `browser_snapshot`
+- `browser_click` / `browser_type` / `browser_select` / `browser_wait`
 
 快速开始：
 
 ```bash
+# Runtime
 cd packages/web-buddy
-cp .env.example .env   # 填入你的 API Key
-npm install
-npm run build
-npm start
+cp .env.example .env
+npm install && npm run build && npm start
+
+# Playwright MCP
+cd ../playwright-mcp
+npm install && npm run build && npm start
 ```
+
+MCP 配置示例见 [`configs/mcp.playwright.example.json`](./configs/mcp.playwright.example.json)。
 
 ## 路线图
 
 | 阶段 | 目标 |
 |------|------|
-| 当前 | 集成 `web-buddy` Runtime，跑通 CLI 基础能力 |
-| 近期 | 接入 Playwright MCP，实现网页表单自动填写 |
+| 当前 | `web-buddy` Runtime + `playwright-mcp` Phase 1 工具 |
+| 近期 | 跑通表单草稿填写闭环，完善 Policy Gate |
 | 后续 | 完善 Policy Gate、Trace 回放、多 Agent 协作 |
 
 ## 文档
