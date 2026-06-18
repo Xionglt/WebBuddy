@@ -17,6 +17,8 @@ const FIELD_MATCHERS: Array<{ key: keyof ResumeProfile; re: RegExp; label: strin
   { key: 'name', re: /name|姓名|全名|真实姓名/i, label: 'name' },
   { key: 'email', re: /email|邮箱|e-mail|电子邮箱/i, label: 'email' },
   { key: 'phone', re: /phone|tel|手机|电话|mobile/i, label: 'phone' },
+  { key: 'location', re: /city|location|城市|所在地|期望城市|地址/i, label: 'city' },
+  { key: 'summary', re: /summary|bio|intro|介绍|简介|个人简介|自我评价/i, label: 'summary' },
 ]
 
 function scoreElementForField(el: ElementRef, re: RegExp): number {
@@ -45,7 +47,12 @@ export interface FillResult {
   filled: Array<{ label: string; ref: string; ok: boolean; observation: string }>
   saveButton?: ElementRef
   submitButton?: ElementRef
-  stoppedAt: 'save' | 'submit' | 'complete' | 'no_fields'
+  stoppedAt: 'save' | 'submit' | 'submitted' | 'complete' | 'no_fields'
+}
+
+export interface FillResumeDraftOptions {
+  /** Only used by local/sandbox tests; real-site final submit still stops at the gate. */
+  allowFinalSubmit?: boolean
 }
 
 /**
@@ -63,6 +70,7 @@ export async function fillResumeDraft(
   gate: HumanGate,
   trace: TraceRecorder,
   highlight: boolean,
+  options: FillResumeDraftOptions = {},
 ): Promise<FillResult> {
   const snap = await browserSnapshot({ sessionId })
   if (!snap.ok) {
@@ -143,8 +151,24 @@ export async function fillResumeDraft(
     const decision = await gate.confirm(
       'final_submit',
       `Submit the application for real?`,
-      { detail: 'This is irreversible. The MVP will NOT auto-submit.' },
+      {
+        url: sessionManager.get(sessionId)?.page.url(),
+        risk: 'L3',
+        detail: options.allowFinalSubmit ? 'Local/sandbox final-submit test.' : 'This is irreversible. The MVP will NOT auto-submit.',
+      },
     )
+    if (decision === 'approve' && options.allowFinalSubmit) {
+      const click = await browserClick({ ref: submitButton.ref, sessionId, confirmed: true, highlight })
+      trace.record({
+        phase: 'fill_draft',
+        action: 'Final submit (approved local/sandbox run)',
+        url: sessionManager.get(sessionId)?.page.url(),
+        risk: 'L3',
+        status: click.ok ? 'ok' : 'warn',
+        observation: click.ok ? click.observation : click.error.message,
+      })
+      return { filled, saveButton, submitButton, stoppedAt: click.ok ? 'submitted' : 'submit' }
+    }
     trace.record({
       phase: 'fill_draft',
       action: `Final submit gate: ${decision}`,

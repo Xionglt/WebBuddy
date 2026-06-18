@@ -1,7 +1,10 @@
 /**
  * job-agent CLI — drive the visual browser job-application agent.
  *
+ *   job-agent raw <url>           RAW: LLM drives browser directly
  *   job-agent fill <url>          GENERIC: cookie-login + LLM-driven form fill
+ *   job-agent auto-apply <url>    Structured job board: match + fill + local submit
+ *   job-agent alibaba-apply       Alibaba official site: match + enter flow + fill
  *   job-agent match [--list-url]  Alibaba: scrape list+details, match, hand off
  *   job-agent demo-form           offline mock form, visible fill (always works)
  *   job-agent login <url>         interactive: log in once, save cookies
@@ -10,8 +13,10 @@
  * Visible by default when run from a terminal (headful + highlights). Add
  * --headless / --auto-gate for CI. See README for the safety contract.
  */
+import * as readline from 'node:readline/promises'
+import { stdin, stdout } from 'node:process'
 import { loadConfig, type AgentConfig } from '../sdk/config.js'
-import { runJobApplicationAgent, type AgentMode } from '../sdk/orchestrator.js'
+import { DEFAULT_ALIBABA_APPLY_PROMPT, runJobApplicationAgent, type AgentMode } from '../sdk/orchestrator.js'
 import { sessionManager } from '../session/manager.js'
 import { defaultAuthPath, ensureLogin } from '../core/login.js'
 import { AutoHumanGate, CliHumanGate } from '../sdk/human.js'
@@ -27,8 +32,10 @@ interface Flags {
   baseUrl?: string
   modelName?: string
   listUrl?: string
+  prompt?: string
   maxJobs: number
   storageState?: string
+  keepBrowserOpen?: boolean
 }
 
 interface ParsedArgs {
@@ -38,7 +45,7 @@ interface ParsedArgs {
 
 const VALUE_FLAGS = new Set([
   '--resume', '--model-key', '--base-url', '--model-name',
-  '--list-url', '--max-jobs', '--storage-state',
+  '--list-url', '--max-jobs', '--storage-state', '--prompt',
 ])
 
 /** Single-pass parser: value-flags consume their next token; others are positional. */
@@ -50,6 +57,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (a === '--headful') flags.headful = true
     else if (a === '--headless') flags.headless = true
     else if (a === '--auto-gate') flags.autoGate = true
+    else if (a === '--keep-browser-open' || a === '--keep-open') flags.keepBrowserOpen = true
     else if (VALUE_FLAGS.has(a)) {
       const v = argv[++i]
       if (v === undefined) { console.error(`Option ${a} requires a value`); process.exit(2) }
@@ -59,6 +67,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         case '--base-url': flags.baseUrl = v; break
         case '--model-name': flags.modelName = v; break
         case '--list-url': flags.listUrl = v; break
+        case '--prompt': flags.prompt = v; break
         case '--max-jobs': flags.maxJobs = Number(v); break
         case '--storage-state': flags.storageState = v; break
       }
@@ -77,6 +86,47 @@ function applyFlags(config: AgentConfig, f: Flags): AgentConfig {
   if (f.autoGate) config.human.mode = 'auto'
   if (f.storageState) config.auth.storageStatePath = f.storageState
   return config
+}
+
+function loadConfigWithFlags(f: Flags): AgentConfig {
+  return applyFlags(loadConfig({
+    resumePath: f.resume,
+    alibabaCareersUrl: f.listUrl,
+    maxJobsToDetail: f.maxJobs,
+    model: { apiKey: f.modelKey, baseUrl: f.baseUrl!, name: f.modelName! },
+  }), f)
+}
+
+function shouldKeepBrowserOpen(f: Flags, config: AgentConfig): boolean {
+  return Boolean(
+    f.keepBrowserOpen ||
+      config.browser.keepBrowserOpen ||
+      process.env.PLAYWRIGHT_KEEP_BROWSER_OPEN === 'true' ||
+      process.env.KEEP_BROWSER_OPEN === 'true',
+  )
+}
+
+async function finishBrowser(f: Flags, config: AgentConfig): Promise<void> {
+  if (!shouldKeepBrowserOpen(f, config)) {
+    await sessionManager.closeAll()
+    return
+  }
+
+  console.log('')
+  console.log('Browser kept open at the final page.')
+  if (!stdin.isTTY) {
+    console.log('No TTY is attached; this process will stay alive so the browser remains open. Stop the process to close it.')
+    await new Promise(() => {})
+    return
+  }
+
+  const rl = readline.createInterface({ input: stdin, output: stdout })
+  try {
+    await rl.question('Press Enter here to close the browser and exit...')
+  } finally {
+    rl.close()
+    await sessionManager.closeAll()
+  }
 }
 
 function printHeader(title: string, config: AgentConfig, mode: AgentMode, extra?: Record<string, string>) {
@@ -101,21 +151,21 @@ const ICON: Record<string, string> = {
 }
 
 async function run(mode: AgentMode, f: Flags, startUrl?: string) {
-  const config = applyFlags(loadConfig({
-    resumePath: f.resume,
-    alibabaCareersUrl: f.listUrl,
-    maxJobsToDetail: f.maxJobs,
-    model: { apiKey: f.modelKey, baseUrl: f.baseUrl!, name: f.modelName! },
-  }), f)
+  const config = loadConfigWithFlags(f)
 
   printHeader(
-    mode === 'fill' ? 'generic form fill' : mode === 'match' ? 'alibaba match' : 'offline demo form',
+    mode === 'raw' ? 'raw browser agent'
+      : mode === 'fill' ? 'generic form fill'
+      : mode === 'match' ? 'alibaba match'
+        : mode === 'alibaba-apply' ? 'alibaba apply'
+          : mode === 'auto-apply' ? 'structured auto apply'
+            : 'offline demo form',
     config, mode,
     startUrl ? { target: startUrl } : undefined,
   )
 
   const result = await runJobApplicationAgent({
-    config, mode, startUrl,
+    config, mode, startUrl, taskPrompt: f.prompt,
     onEvent: (e) => console.log(`${ICON[e.level] || '• '}${e.phase.padEnd(12)} ${e.message}`),
   })
 
@@ -127,11 +177,11 @@ async function run(mode: AgentMode, f: Flags, startUrl?: string) {
   console.log(` trace       : ${result.summary.tracePath}`)
   console.log(`             : ${result.summary.steps} steps, ${result.summary.screenshots} screenshots, max risk ${result.summary.maxRiskReached ?? '—'}`)
   console.log('━'.repeat(64))
-  await sessionManager.closeAll()
+  await finishBrowser(f, config)
 }
 
 async function loginCommand(url: string, f: Flags) {
-  const config = applyFlags(loadConfig(), f)
+  const config = loadConfigWithFlags(f)
   config.browser.headless = false // login must be visible
   process.env.PLAYWRIGHT_HEADLESS = 'false'
   const trace = new TraceRecorder(config.trace.outDir)
@@ -143,7 +193,7 @@ async function loginCommand(url: string, f: Flags) {
   })
   console.log(res.loggedIn ? `✅ Logged in. Cookies saved to ${authPath}` : `⚠️  Login not confirmed (cookies ${res.usedSavedCookies ? 'were' : 'NOT'} saved).`)
   console.log(`trace: ${trace.finish().tracePath}`)
-  await sessionManager.closeAll()
+  await finishBrowser(f, config)
 }
 
 const HELP = `
@@ -153,10 +203,19 @@ USAGE
   job-agent <command> [options]
 
 COMMANDS
+  raw <url>             RAW. Open the URL and let the LLM drive the browser
+                        directly from your prompt and resume. No scraper,
+                        matcher, or fixed job-application workflow.
   fill <url>            GENERIC. Open any recruitment site, log in via saved
                         cookies (or interactively), then let the LLM-driven
                         agent loop fill the application form from your resume.
-                        Requires MODEL_API_KEY. Never submits.
+                        Requires a model key. Never submits.
+  auto-apply <url>      Structured job board. Find the best matching
+                        [data-job-card], open its application form, fill it,
+                        and submit only on localhost/sandbox test sites.
+  alibaba-apply [url]   Shortcut for raw Alibaba run. Opens Alibaba careers
+                        and lets the LLM drive the browser directly from your
+                        prompt and resume.
   match [--list-url U]  Alibaba preset. Scrape the position list + details,
                         match to your resume, hand off at the gate (read-only).
   demo-form             Offline mock form, visible fill. Always works, no key.
@@ -166,19 +225,26 @@ COMMANDS
 OPTIONS
   --resume <path>       .pdf / .json / .txt resume (default tmp/pdfs/resume.pdf)
   --headful / --headless   show or hide Chromium (default headful in a TTY)
+  --keep-browser-open  keep Chromium open on the final page until Enter
   --auto-gate           non-interactive: hand off sensitive steps automatically
   --model-key <key>     OpenAI-compatible API key (or MODEL_API_KEY)
   --base-url <url>      endpoint base (default https://api.openai.com/v1)
   --model-name <name>   model id (default gpt-4o-mini)
   --list-url <url>      Alibaba position-list URL (match)
   --storage-state <p>   cookie file path (fill/login)
+  --prompt <text>       task prompt for LLM-driven fill modes
   --max-jobs <n>        top-N jobs to open for detail (match, default 3)
   -h, --help            show this help
 
 EXAMPLES
   job-agent demo-form                              # 30s offline demo
+  job-agent raw https://talent-holding.alibaba.com/off-campus/position-list?lang=zh --resume ./resume.pdf
   job-agent login https://talent-holding.alibaba.com/...
   MODEL_API_KEY=sk-... job-agent fill https://talent-holding.alibaba.com/...
+  MODEL_API_KEY=sk-... job-agent alibaba-apply --resume ./resume.pdf --headful
+  job-agent alibaba-apply --resume ./resume.pdf --headful --keep-browser-open
+  job-agent alibaba-apply --prompt "${DEFAULT_ALIBABA_APPLY_PROMPT}"
+  job-agent auto-apply http://localhost:5199/jobs --resume ./resume.json --headless --auto-gate
   job-agent match --headful
 `
 
@@ -205,16 +271,46 @@ async function main() {
   const { flags: f, positionals } = parseArgs(argv.slice(1))
 
   switch (cmd) {
+    case 'raw': {
+      const url = positionals[0]
+      if (!url) { console.error('raw requires a URL: job-agent raw <url>'); process.exit(2) }
+      const llm = new LlmGateway(loadConfigWithFlags(f).model)
+      if (!llm.hasKey) {
+        console.error('⚠️  raw needs a model key. Set MODEL_API_KEY/OPENAI_API_KEY, ANTHROPIC_AUTH_TOKEN, or pass --model-key.')
+        process.exit(2)
+      }
+      await run('raw', f, url)
+      break
+    }
     case 'fill': {
       const url = positionals[0]
       if (!url) { console.error('fill requires a URL: job-agent fill <url>'); process.exit(2) }
-      const llm = new LlmGateway(applyFlags(loadConfig(), f).model)
+      const llm = new LlmGateway(loadConfigWithFlags(f).model)
       if (!llm.hasKey) {
-        console.error('⚠️  fill needs a model key. Set MODEL_API_KEY or pass --model-key.')
+        console.error('⚠️  fill needs a model key. Set MODEL_API_KEY/OPENAI_API_KEY, ANTHROPIC_AUTH_TOKEN, or pass --model-key.')
         console.error('    For an offline demo without a key, run: job-agent demo-form')
         process.exit(2)
       }
       await run('fill', f, url)
+      break
+    }
+    case 'auto-apply': {
+      const url = positionals[0]
+      if (!url) { console.error('auto-apply requires a URL: job-agent auto-apply <url>'); process.exit(2) }
+      await run('auto-apply', f, url)
+      break
+    }
+    case 'alibaba-apply': {
+      const llm = new LlmGateway(loadConfigWithFlags(f).model)
+      if (!llm.hasKey) {
+        console.error('⚠️  alibaba-apply needs a model key. Set MODEL_API_KEY/OPENAI_API_KEY, ANTHROPIC_AUTH_TOKEN, or pass --model-key.')
+        console.error('    For read-only matching without a key, run: job-agent match')
+        process.exit(2)
+      }
+      await run('raw', {
+        ...f,
+        prompt: f.prompt || DEFAULT_ALIBABA_APPLY_PROMPT,
+      }, positionals[0] ?? loadConfigWithFlags(f).alibabaCareersUrl)
       break
     }
     case 'match': await run('match', f); break

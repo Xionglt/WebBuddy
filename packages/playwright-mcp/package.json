@@ -9,7 +9,8 @@
   },
   "bin": {
     "playwright-mcp": "dist/server.js",
-    "job-agent": "dist/cli/demo.js"
+    "job-agent": "dist/cli/demo.js",
+    "job-agent-web": "dist/web/server.js"
   },
   "files": [
     "dist"
@@ -23,8 +24,14 @@
     "demo:form": "npm run build && node ./dist/cli/demo.js demo-form --headful",
     "demo:auto": "npm run build && node ./dist/cli/demo.js demo-form --headless --auto-gate",
     "demo:match": "npm run build && node ./dist/cli/demo.js match --headful",
+    "alibaba:apply": "npm run build && npm --prefix ../web-buddy run build && node ./scripts/claude-runtime-alibaba.mjs",
+    "alibaba:apply:raw": "npm run build && node ./dist/cli/demo.js alibaba-apply --headful",
+    "alibaba:claude": "npm run build && npm --prefix ../web-buddy run build && node ./scripts/claude-runtime-alibaba.mjs",
     "fill": "npm run build && node ./dist/cli/demo.js fill",
     "login": "npm run build && node ./dist/cli/demo.js login",
+    "web": "npm run build && node ./dist/web/server.js",
+    "test:e2e-auto-apply": "npm run build && node ./scripts/e2e-auto-apply.mjs",
+    "test:e2e-web-auto-apply": "npm run build && node ./scripts/e2e-web-auto-apply.mjs",
     "test:smoke": "npm run build && node ./scripts/smoke-test.mjs",
     "test:resume": "node ./scripts/resume-test.mjs",
     "test:matcher": "node ./scripts/matcher-test.mjs",

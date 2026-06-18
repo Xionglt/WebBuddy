@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { browserOpen } from '../browser/open.js'
 import { sessionManager } from '../session/manager.js'
 import { ToolRegistry } from '../core/tool-registry.js'
@@ -8,19 +9,25 @@ import { loadConfig, hasModelKey, type AgentConfig } from './config.js'
 import { fillResumeDraft } from './form-fill.js'
 import { AutoHumanGate, CliHumanGate, type HumanGate } from './human.js'
 import { LlmGateway } from './llm.js'
-import { refineMatchesWithLlm, matchJobs, type JobPosting, type MatchScore } from './matcher.js'
+import { refineMatchesWithLlm, matchJobs, tokenize, type JobPosting, type MatchScore } from './matcher.js'
 import { readResume, writeSampleResumePdf, type ResumeProfile } from './resume.js'
-import { scrapeJobDetail, scrapeJobList, type ScrapedJob } from './alibaba.js'
+import { attemptApply, scrapeJobDetail, scrapeJobList, waitForAlibabaLoginClear, type ScrapedJob } from './alibaba.js'
 import { TraceRecorder, type TraceSummary } from './trace.js'
 
 /**
- * Unified job-application agent. One pipeline, three presets:
+ * Unified job-application agent. One pipeline, five presets:
  *
  *   fill       — GENERIC: open any site (cookie login) and let the LLM-driven
  *                agent loop fill the application form from the resume. The
  *                headline "give a website + a resume" mode.
  *   match      — Alibaba preset: scrape list + details, match, then hand off
  *                at the application gate (read-only).
+ *   raw       — open a target URL and let the LLM drive the browser directly.
+ *   alibaba-apply — legacy Alibaba structured flow: scrape + match, enter the
+ *                gated application flow, then let the LLM fill the draft.
+ *   auto-apply — generic structured job board: open a list URL, pick the best
+ *                matching job, open its application form, fill it, and submit
+ *                only when the target is localhost/sandbox.
  *   demo-form  — offline mock form; fills via the agent loop (or heuristic
  *                fallback when no model key), gated at submit. Never submits.
  *
@@ -28,7 +35,10 @@ import { TraceRecorder, type TraceSummary } from './trace.js'
  * there is no hardcoded field mapping for the generic path.
  */
 
-export type AgentMode = 'fill' | 'match' | 'demo-form'
+export type AgentMode = 'raw' | 'fill' | 'match' | 'alibaba-apply' | 'demo-form' | 'auto-apply'
+
+export const DEFAULT_ALIBABA_APPLY_PROMPT =
+  '这是我的个人简历文件，然后现在我想去阿里官方招聘网站进行投递，然后请帮我找到适合我的岗位，然后帮我进行投递，填写表单，充分利用网站信息'
 
 export type FinalState =
   | 'resume_parsed'
@@ -37,6 +47,7 @@ export type FinalState =
   | 'login_required'
   | 'login_ok'
   | 'filled'
+  | 'submitted'
   | 'stopped_at_submit'
   | 'blocked'
   | 'error'
@@ -65,6 +76,10 @@ export interface RunOptions {
   gate?: HumanGate
   llm?: LlmGateway
   onEvent?: (event: AgentEvent) => void
+  /** Natural-language task prompt for LLM-driven fill modes. */
+  taskPrompt?: string
+  /** Fixed run id (names the trace dir output/<runId>). Generated if absent. */
+  runId?: string
 }
 
 function mockApplicationFormUrl(profile: ResumeProfile): string {
@@ -109,6 +124,14 @@ function applyBrowserEnv(config: AgentConfig): void {
   }
   if (config.browser.slowMoMs > 0 && !env.PLAYWRIGHT_SLOWMO_MS) env.PLAYWRIGHT_SLOWMO_MS = String(config.browser.slowMoMs)
   if (config.browser.typeDelayMs > 0 && !env.PLAYWRIGHT_TYPE_DELAY_MS) env.PLAYWRIGHT_TYPE_DELAY_MS = String(config.browser.typeDelayMs)
+  if (!env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS) env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS = String(config.browser.navigationTimeoutMs)
+  if (!env.PLAYWRIGHT_ACTION_TIMEOUT_MS) env.PLAYWRIGHT_ACTION_TIMEOUT_MS = String(config.browser.actionTimeoutMs)
+  if (!env.PLAYWRIGHT_VIEWPORT_WIDTH) env.PLAYWRIGHT_VIEWPORT_WIDTH = String(config.browser.viewport.width)
+  if (!env.PLAYWRIGHT_VIEWPORT_HEIGHT) env.PLAYWRIGHT_VIEWPORT_HEIGHT = String(config.browser.viewport.height)
+  if (!env.PLAYWRIGHT_USER_AGENT) env.PLAYWRIGHT_USER_AGENT = config.browser.userAgent
+  if (config.browser.blockLocalhost === false) env.PLAYWRIGHT_BLOCK_LOCALHOST = 'false'
+  if (config.browser.allowedDomains.length > 0) env.PLAYWRIGHT_ALLOWED_DOMAINS = config.browser.allowedDomains.join(',')
+  if (config.auth.storageStatePath) env.PLAYWRIGHT_STORAGE_STATE = config.auth.storageStatePath
 }
 
 async function ensureResume(config: AgentConfig, trace: TraceRecorder, emit: (e: AgentEvent) => void): Promise<ResumeProfile> {
@@ -134,19 +157,30 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
   const config = options.config ?? loadConfig()
   const mode: AgentMode = options.mode ?? 'fill'
   const emit = options.onEvent ?? ((_e: AgentEvent) => {})
-  const gate: HumanGate = options.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate() : new CliHumanGate())
+  const gate: HumanGate = options.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate(undefined, { allowLocalFinalSubmit: mode === 'auto-apply' }) : new CliHumanGate())
   const llm = options.llm ?? new LlmGateway(config.model)
   const highlight = config.browser.visualHighlight
 
   applyBrowserEnv(config)
   if (mode === 'demo-form') process.env.PLAYWRIGHT_ALLOW_DATA_URLS = 'true'
 
-  const trace = new TraceRecorder(config.trace.outDir)
+  const trace = new TraceRecorder(config.trace.outDir, options.runId)
   const sessionId = 'default'
   trace.record({ phase: 'boot', action: `Agent start (mode=${mode}, headless=${config.browser.headless}, llm=${hasModelKey(config)})`, status: 'ok' })
 
   try {
     const profile = await ensureResume(config, trace, emit)
+    if ((mode === 'alibaba-apply' || mode === 'raw') && !llm.hasKey) {
+      return finalize({
+        mode,
+        profile,
+        matches: [],
+        finalState: 'blocked',
+        message: `${mode} requires a model key because it relies on LLM tool-calling to use page/job information.`,
+        trace,
+        emit,
+      })
+    }
 
     // --- mode-specific "open the target" pre-step -------------------------
     let chosenJob: JobPosting | undefined
@@ -154,12 +188,151 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     let extraContext: string | undefined
     let startUrl = options.startUrl
 
-    if (mode === 'demo-form') {
+    if (mode === 'raw') {
+      startUrl = startUrl ?? config.alibabaCareersUrl
+      const open = await browserOpen({ url: startUrl, sessionId, waitUntil: 'domcontentloaded' })
+      if (!open.ok) throw new Error(open.error.message)
+      trace.record({
+        phase: 'open_target',
+        action: `Opened raw-agent target: ${startUrl}`,
+        url: sessionManager.get(sessionId)?.page.url(),
+        status: 'ok',
+        screenshotPath: await trace.screenshot(sessionManager.get(sessionId)?.page, 'raw-target'),
+      })
+      emit({ phase: 'open_target', message: `Opened raw-agent target: ${startUrl}`, level: 'info' })
+    } else if (mode === 'demo-form') {
       const url = mockApplicationFormUrl(profile)
       const open = await browserOpen({ url, sessionId, waitUntil: 'domcontentloaded' })
       if (!open.ok) throw new Error(open.error.message)
       trace.record({ phase: 'open_form', action: 'Opened local DEMO application form.', url, status: 'ok', screenshotPath: await trace.screenshot(sessionManager.get(sessionId)?.page, 'demo-form-open') })
       emit({ phase: 'open_form', message: 'Opened local DEMO application form (offline, safe).', level: 'info' })
+    } else if (mode === 'auto-apply') {
+      if (!startUrl) throw new Error('auto-apply requires a target job-list URL.')
+      const open = await browserOpen({ url: startUrl, sessionId, waitUntil: 'domcontentloaded' })
+      if (!open.ok) throw new Error(open.error.message)
+      trace.record({ phase: 'open_jobs', action: `Opened job list: ${startUrl}`, url: sessionManager.get(sessionId)?.page.url(), status: 'ok', screenshotPath: await trace.screenshot(sessionManager.get(sessionId)?.page, 'job-list') })
+      emit({ phase: 'open_jobs', message: `Opened job list: ${startUrl}`, level: 'info' })
+
+      const jobs = await scrapeStructuredJobList(sessionId)
+      if (jobs.length === 0) {
+        return finalize({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No structured job cards found on the target page.', trace, emit })
+      }
+      matches = matchJobs(profile, jobs)
+      const best = matches[0]
+      if (!best || best.score <= 0) {
+        return finalize({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found on the target page.', trace, emit })
+      }
+      chosenJob = best.job
+      extraContext = `Matched job: ${best.job.title}. Match score: ${best.score.toFixed(2)}. ${best.reason}`
+      trace.record({ phase: 'match', action: `Best match: ${best.job.title} (score ${best.score.toFixed(2)}).`, status: 'ok', observation: best.reason })
+      emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: 'info' })
+      matches.slice(0, 5).forEach((m, i) => emit({ phase: 'match', message: `  ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.matchedSkills.slice(0, 5).join(', ')}`, level: 'info' }))
+
+      const applyUrl = best.job.applicationUrl || best.job.detailUrl
+      if (!applyUrl) throw new Error(`Matched job "${best.job.title}" has no application URL.`)
+      const openApply = await browserOpen({ url: applyUrl, sessionId, waitUntil: 'domcontentloaded' })
+      if (!openApply.ok) throw new Error(openApply.error.message)
+      trace.record({ phase: 'open_form', action: `Opened application form for ${best.job.title}.`, url: sessionManager.get(sessionId)?.page.url(), risk: isLocalUrl(applyUrl) ? 'L1' : 'L3', status: 'ok', screenshotPath: await trace.screenshot(sessionManager.get(sessionId)?.page, 'application-form') })
+      emit({ phase: 'open_form', message: `Opened application form for ${best.job.title}.`, level: 'info' })
+    } else if (mode === 'alibaba-apply') {
+      const listUrl = startUrl ?? config.alibabaCareersUrl
+      const { jobs } = await scrapeJobList(sessionId, listUrl, trace)
+      if (jobs.length === 0) {
+        return finalize({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the Alibaba list page.', trace, emit })
+      }
+
+      emit({ phase: 'scrape_list', message: `Scraped ${jobs.length} Alibaba jobs. Opening top ${Math.min(config.maxJobsToDetail, jobs.length)} for detail…`, level: 'info' })
+      const preRanked = matchJobs(profile, jobs).slice(0, config.maxJobsToDetail)
+      const detailed: ScrapedJob[] = []
+      for (const m of preRanked) {
+        try { detailed.push((await scrapeJobDetail(sessionId, m.job as ScrapedJob, trace)).job) }
+        catch (error) { trace.record({ phase: 'scrape_detail', action: `Detail failed: ${(error as Error).message}`, status: 'warn' }) }
+      }
+
+      const pool = detailed.length > 0 ? detailed : jobs
+      matches = matchJobs(profile, pool)
+      matches = await refineMatchesWithLlm(matches, profile, llm)
+      const best = matches[0]
+      if (!best || best.score <= 0) {
+        return finalize({ mode, profile, matches, finalState: 'no_match', message: 'No suitable Alibaba job match found.', trace, emit })
+      }
+
+      chosenJob = best.job
+      extraContext = [
+        `Matched Alibaba job: ${best.job.title} (${best.job.category || 'unknown category'}).`,
+        best.job.location ? `Location: ${best.job.location}.` : '',
+        best.job.detailUrl ? `Detail URL: ${best.job.detailUrl}.` : '',
+        `Match score: ${best.score.toFixed(2)}. ${best.reason}`,
+        'Use the current Alibaba page and any visible job/application information to fill only fields that can be mapped confidently from the resume.',
+      ].filter(Boolean).join('\n')
+      trace.record({ phase: 'match', action: `Best Alibaba match: ${best.job.title} (score ${best.score.toFixed(2)}).`, status: best.score <= 0 ? 'warn' : 'ok', observation: best.reason })
+      emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: best.score <= 0 ? 'warn' : 'info' })
+      matches.slice(0, 5).forEach((m, i) => emit({ phase: 'match', message: `  ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.matchedSkills.slice(0, 5).join(', ')}`, level: 'info' }))
+
+      const apply = await attemptApply(sessionId, best.job as ScrapedJob, gate, trace)
+      if (apply.gateDecision !== 'approve') {
+        return finalize({
+          mode,
+          profile,
+          matches,
+          chosenJob,
+          finalState: 'blocked',
+          message: `Matched "${best.job.title}", but entering the Alibaba application flow was handed off (${apply.gateDecision}).`,
+          trace,
+          emit,
+        })
+      }
+
+      if (apply.reachedLogin) {
+        emit({ phase: 'login', message: 'Alibaba login/captcha wall reached. Waiting for human login hand-off.', level: 'gate' })
+        let loginCleared = false
+        for (let attempt = 1; attempt <= 3 && !loginCleared; attempt += 1) {
+          const decision = await gate.confirm(
+            'login',
+            attempt === 1
+              ? 'Please log in to Alibaba in the visible browser window (and solve any captcha), then approve to continue filling.'
+              : 'Alibaba is still showing the login page. Please finish the SMS/captcha login in the browser, wait for the job/application page to load, then approve again.',
+            { url: apply.page.url(), risk: 'L4' },
+          )
+          trace.record({
+            phase: 'login',
+            action: `Alibaba login hand-off attempt ${attempt} → ${decision}.`,
+            url: apply.page.url(),
+            risk: 'L4',
+            status: decision === 'approve' ? 'ok' : 'blocked',
+          })
+          if (decision !== 'approve') {
+            return finalize({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}" but stopped at Alibaba login/captcha hand-off.`, trace, emit })
+          }
+
+          await apply.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
+          loginCleared = await waitForAlibabaLoginClear(apply.page, 30000)
+          trace.record({
+            phase: 'login',
+            action: loginCleared ? 'Alibaba login page cleared.' : `Still on Alibaba login page after attempt ${attempt}.`,
+            url: apply.page.url(),
+            risk: 'L4',
+            status: loginCleared ? 'ok' : 'blocked',
+          })
+        }
+        if (!loginCleared) {
+          return finalize({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}" but Alibaba login did not complete after repeated hand-offs.`, trace, emit })
+        }
+
+        sessionManager.adoptPage(sessionId, apply.page)
+        const authPath = config.auth.storageStatePath || defaultAuthPath(listUrl, config.trace.outDir)
+        try {
+          mkdirSync(dirname(authPath), { recursive: true })
+          await sessionManager.saveAuth(sessionId, authPath)
+          trace.record({ phase: 'login', action: `Saved Alibaba cookies to ${authPath}.`, status: 'ok' })
+        } catch (error) {
+          trace.record({ phase: 'login', action: `Failed to save Alibaba cookies: ${(error as Error).message}`, status: 'warn' })
+        }
+      } else if (apply.reachedForm) {
+        emit({ phase: 'open_form', message: 'Alibaba application form reached; starting LLM fill.', level: 'info' })
+      } else {
+        emit({ phase: 'open_form', message: 'Alibaba application-flow state is unclear; the LLM will inspect the current page.', level: 'warn' })
+      }
     } else if (mode === 'match') {
       const listUrl = startUrl ?? config.alibabaCareersUrl
       const { jobs } = await scrapeJobList(sessionId, listUrl, trace)
@@ -204,20 +377,50 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     }
 
     // --- fill the form -----------------------------------------------------
+    if (mode === 'auto-apply') {
+      const currentUrl = sessionManager.get(sessionId)?.page.url()
+      const allowFinalSubmit = isLocalUrl(currentUrl)
+      emit({
+        phase: 'agent',
+        message: allowFinalSubmit
+          ? 'Using deterministic local/sandbox fill and final submit.'
+          : 'Using deterministic fill; external final submit will stop at the human gate.',
+        level: allowFinalSubmit ? 'info' : 'warn',
+      })
+      const fill = await fillResumeDraft(sessionId, profile, gate, trace, highlight, { allowFinalSubmit })
+      await captureFinalScreenshot(sessionId, trace)
+      const finalState: FinalState =
+        fill.stoppedAt === 'submitted' ? 'submitted'
+          : fill.stoppedAt === 'submit' || fill.stoppedAt === 'save' ? 'stopped_at_submit'
+            : fill.stoppedAt === 'no_fields' ? 'blocked'
+              : 'filled'
+      const message =
+        fill.stoppedAt === 'submitted'
+          ? `Applied to "${chosenJob?.title || 'matched job'}" on the local/sandbox site.`
+          : `Filled "${chosenJob?.title || 'matched job'}" but stopped at "${fill.stoppedAt}".`
+      return finalize({ mode, profile, matches, chosenJob, finalState, message, trace, emit })
+    }
+
     const useLlm = llm.hasKey
     if (useLlm) {
       const goal =
-        mode === 'demo-form'
+        mode === 'raw'
+          ? options.taskPrompt || DEFAULT_ALIBABA_APPLY_PROMPT
+          : mode === 'demo-form'
           ? 'Fill this application form using my resume. Fill name/phone/email/city/summary. Do NOT click submit. Call agent_done when the draft is filled.'
+          : mode === 'alibaba-apply'
+            ? options.taskPrompt || DEFAULT_ALIBABA_APPLY_PROMPT
           : 'Fill the application form on the current page using my resume. Map resume fields to the matching form inputs. Do NOT click any submit/投递 button. If you hit a login wall or captcha, call agent_done with blocked=true.'
       const loopResult = await runAgentLoop({
         goal, resume: profile, llm,
         registry: new ToolRegistry(),
         ctx: { sessionId, highlight, trace },
         gate, extraContext,
+        safetyMode: mode === 'raw' ? 'raw' : 'guarded',
         maxSteps: config.agent.maxSteps,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
       })
+      await captureFinalScreenshot(sessionId, trace)
       const finalState: FinalState = loopResult.blocked
         ? (loopResult.summary.toLowerCase().includes('submit') ? 'stopped_at_submit' : 'blocked')
         : 'filled'
@@ -229,8 +432,9 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     }
 
     // Heuristic fallback (no model key): only works on simple known-label forms.
-    emit({ phase: 'agent', message: 'No MODEL_API_KEY — using heuristic field matcher (name/email/phone only).', level: 'warn' })
+    emit({ phase: 'agent', message: 'No model key — using heuristic field matcher (name/email/phone only).', level: 'warn' })
     const fill = await fillResumeDraft(sessionId, profile, gate, trace, highlight)
+    await captureFinalScreenshot(sessionId, trace)
     const finalState: FinalState =
       fill.stoppedAt === 'submit' ? 'stopped_at_submit'
         : fill.stoppedAt === 'save' ? 'stopped_at_submit'
@@ -243,6 +447,75 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
   } finally {
     if (gate instanceof CliHumanGate) gate.close()
   }
+}
+
+async function scrapeStructuredJobList(sessionId: string): Promise<JobPosting[]> {
+  const page = sessionManager.get(sessionId)?.page
+  if (!page) return []
+  const raw = await page.evaluate(() => {
+    const absolute = (value: string | null | undefined): string | undefined => {
+      if (!value) return undefined
+      try { return new URL(value, location.href).toString() } catch { return undefined }
+    }
+    const textOf = (root: Element, selector: string): string =>
+      root.querySelector(selector)?.textContent?.trim() || ''
+    const cards = Array.from(document.querySelectorAll('[data-job-card], article.job-card, .job-card'))
+    return cards.map((card, index) => {
+      const link = card.querySelector<HTMLAnchorElement>('a[href]')
+      const tags =
+        card.getAttribute('data-tags') ||
+        card.getAttribute('data-job-tags') ||
+        textOf(card, '[data-job-tags]') ||
+        ''
+      const title =
+        card.getAttribute('data-title') ||
+        textOf(card, '[data-job-title]') ||
+        textOf(card, 'h1,h2,h3') ||
+        link?.textContent?.trim() ||
+        `job-${index + 1}`
+      const detailUrl =
+        absolute(card.getAttribute('data-detail-url')) ||
+        absolute(link?.getAttribute('href')) ||
+        absolute(card.getAttribute('data-apply-url'))
+      const applicationUrl =
+        absolute(card.getAttribute('data-apply-url')) ||
+        absolute(card.querySelector<HTMLAnchorElement>('[data-apply-link]')?.getAttribute('href'))
+      return {
+        id: card.getAttribute('data-job-id') || `job-${index + 1}`,
+        title,
+        category: card.getAttribute('data-category') || textOf(card, '[data-category]') || undefined,
+        location: card.getAttribute('data-location') || textOf(card, '[data-location]') || undefined,
+        detailUrl,
+        applicationUrl,
+        searchText: [title, tags, card.textContent || ''].join(' '),
+        tags,
+      }
+    })
+  })
+  return raw
+    .filter((job) => job.title && (job.detailUrl || job.applicationUrl))
+    .map((job) => ({
+      ...job,
+      tags: [...new Set([...String(job.tags || '').split(/[,\s，、]+/).filter(Boolean), ...tokenize(job.searchText)])],
+    }))
+}
+
+function isLocalUrl(url?: string): boolean {
+  if (!url) return false
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+  } catch {
+    return false
+  }
+}
+
+/** Capture a screenshot of the final page state so the UI shows the filled form. */
+async function captureFinalScreenshot(sessionId: string, trace: TraceRecorder): Promise<void> {
+  const page = sessionManager.get(sessionId)?.page
+  if (!page) return
+  const path = await trace.screenshot(page, 'final')
+  trace.record({ phase: 'fill_draft', action: 'Captured final page state.', status: 'ok', screenshotPath: path })
 }
 
 function finalize(args: {

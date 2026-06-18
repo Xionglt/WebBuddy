@@ -1,7 +1,7 @@
 import type { Page } from 'playwright'
 import { browserOpen } from '../browser/open.js'
 import { sessionManager } from '../session/manager.js'
-import type { HumanGate } from './human.js'
+import type { GateDecision, HumanGate } from './human.js'
 import type { JobPosting } from './matcher.js'
 import { tokenize } from './matcher.js'
 import type { TraceRecorder } from './trace.js'
@@ -203,6 +203,8 @@ export interface ApplyAttempt {
   detailUrl: string
   /** The page the application form/login appeared on (popup or main). */
   page: Page
+  /** Human decision for entering the application flow. */
+  gateDecision: GateDecision
 }
 
 /**
@@ -223,8 +225,16 @@ export async function attemptApply(
   const session = sessionManager.get(sessionId)
   if (!session) throw new Error('Session not found. Call scrapeJobList first.')
 
-  const { popup } = await clickJobCard(session.page, job.title)
-  const detailPage = popup || session.page
+  let detailPage = session.page
+  if (job.detailUrl) {
+    const open = await browserOpen({ url: job.detailUrl, sessionId, waitUntil: 'domcontentloaded' })
+    if (!open.ok) throw new Error(`Failed to open Alibaba detail page: ${open.error.message}`)
+    detailPage = sessionManager.get(sessionId)?.page ?? detailPage
+  } else {
+    const { popup } = await clickJobCard(session.page, job.title)
+    detailPage = popup || session.page
+    sessionManager.adoptPage(sessionId, detailPage)
+  }
   await detailPage.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {})
   await detailPage
     .waitForFunction(() => document.body?.innerText.includes('投递简历'), null, { timeout: 20000 })
@@ -253,7 +263,7 @@ export async function attemptApply(
       risk: 'L3',
       status: 'blocked',
     })
-    return { reachedLogin: false, reachedForm: false, detailUrl, page: detailPage }
+    return { reachedLogin: false, reachedForm: false, detailUrl, page: detailPage, gateDecision: decision }
   }
 
   // Agree to the notice checkbox if present, then click apply.
@@ -267,7 +277,7 @@ export async function attemptApply(
   }
   await detailPage.waitForTimeout(1500)
 
-  const reachedLogin = await detectLoginWallOn(detailPage)
+  const reachedLogin = await detectAlibabaLoginWall(detailPage)
   const reachedForm =
     !reachedLogin &&
     (await detailPage
@@ -288,10 +298,11 @@ export async function attemptApply(
     screenshotPath: await trace.screenshot(detailPage, reachedLogin ? 'apply-login-wall' : 'apply-form'),
   })
 
-  return { reachedLogin, reachedForm, detailUrl, page: detailPage }
+  sessionManager.adoptPage(sessionId, detailPage)
+  return { reachedLogin, reachedForm, detailUrl, page: detailPage, gateDecision: decision }
 }
 
-async function detectLoginWallOn(page: Page): Promise<boolean> {
+export async function detectAlibabaLoginWall(page: Page): Promise<boolean> {
   try {
     const url = page.url()
     if (/login|ssoLogin/i.test(url)) return true
@@ -308,3 +319,11 @@ async function detectLoginWallOn(page: Page): Promise<boolean> {
   }
 }
 
+export async function waitForAlibabaLoginClear(page: Page, timeoutMs = 30000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await detectAlibabaLoginWall(page))) return true
+    await page.waitForTimeout(1000).catch(() => {})
+  }
+  return !(await detectAlibabaLoginWall(page))
+}

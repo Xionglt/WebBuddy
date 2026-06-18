@@ -13,6 +13,8 @@ export interface JobPosting {
   updated?: string
   /** Detail-page URL (position-detail), if known. */
   detailUrl?: string
+  /** Direct application form URL, if the site exposes one separately. */
+  applicationUrl?: string
   /** Concatenated text used for keyword matching. */
   searchText: string
   /** Tokenized requirement/tag keywords (lower-case). */

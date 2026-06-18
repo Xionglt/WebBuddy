@@ -71,6 +71,29 @@ async function clearOutline(page: Page): Promise<void> {
   })
 }
 
+async function moveVisibleCursor(page: Page, x: number, y: number, color: string): Promise<void> {
+  await page.evaluate(
+    ({ x: cx, y: cy, color: c }) => {
+      let cursor = document.getElementById('__mfa_cursor__') as HTMLDivElement | null
+      if (!cursor) {
+        cursor = document.createElement('div')
+        cursor.id = '__mfa_cursor__'
+        cursor.style.cssText =
+          'position:fixed;left:0;top:0;width:16px;height:16px;border-radius:999px;' +
+          'z-index:2147483647;pointer-events:none;transform:translate(-50%,-50%);' +
+          'box-shadow:0 0 0 4px rgba(255,255,255,.85),0 8px 24px rgba(0,0,0,.24);' +
+          'transition:left 35ms linear,top 35ms linear,background 120ms ease;'
+        document.documentElement.appendChild(cursor)
+      }
+      cursor.style.left = `${cx}px`
+      cursor.style.top = `${cy}px`
+      cursor.style.background = c
+      cursor.style.border = `2px solid ${c}`
+    },
+    { x, y, color },
+  )
+}
+
 /**
  * Move the mouse toward `locator` and flash the action-colored outline. Best
  * effort — never throws; callers gate this on `config.browser.visualHighlight`.
@@ -107,8 +130,11 @@ export async function visualizeBeforeAction(
     for (let i = 1; i <= steps; i += 1) {
       const x = start.x + (targetX - start.x) * (i / steps)
       const y = start.y + (targetY - start.y) * (i / steps)
+      await moveVisibleCursor(page, x, y, color)
       await page.mouse.move(x, y, { steps: 1 })
+      await page.waitForTimeout(25)
     }
+    await moveVisibleCursor(page, targetX, targetY, color)
     await page.mouse.move(targetX, targetY, { steps: 1 })
     await page.evaluate(
       ({ x, y }) => {

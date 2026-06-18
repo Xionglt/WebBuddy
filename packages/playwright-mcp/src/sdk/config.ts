@@ -29,13 +29,26 @@ function loadDotEnv(filePath: string): Record<string, string> {
   return out
 }
 
+export type LlmProvider = 'openai' | 'anthropic'
+
 export interface ModelConfig {
-  /** OpenAI-compatible API key. null when the user has not configured one. */
+  /** API key (OpenAI `Authorization: Bearer`) or null. */
   apiKey: string | null
-  /** Base URL of an OpenAI-compatible endpoint. */
+  /** Anthropic `x-api-key` token (used when provider='anthropic'). */
+  authToken?: string | null
+  /** Wire format / provider. */
+  provider: LlmProvider
+  /**
+   * Base URL.
+   *  - openai    → `${baseUrl}/chat/completions`
+   *  - anthropic → `${baseUrl}/v1/messages` (baseUrl should already include any
+   *                provider path, e.g. https://open.bigmodel.cn/api/anthropic)
+   */
   baseUrl: string
   /** Model name to call. */
   name: string
+  /** Anthropic API version header. */
+  anthropicVersion?: string
 }
 
 export interface BrowserRuntimeConfig {
@@ -52,6 +65,7 @@ export interface BrowserRuntimeConfig {
   userAgent: string
   navigationTimeoutMs: number
   actionTimeoutMs: number
+  keepBrowserOpen: boolean
 }
 
 export interface HumanLoopConfig {
@@ -113,10 +127,34 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     ...process.env,
   }
 
-  const apiKey = overrides.model?.apiKey ?? env.MODEL_API_KEY ?? env.OPENAI_API_KEY ?? null
-  const baseUrl =
-    overrides.model?.baseUrl ?? env.MODEL_BASE_URL ?? env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1'
-  const modelName = overrides.model?.name ?? env.MODEL_NAME ?? env.OPENAI_MODEL ?? 'gpt-4o-mini'
+  // Model resolution. Prefer an explicit override; then Anthropic-format env
+  // (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL, e.g. Zhipu GLM); then OpenAI env.
+  const ovrProvider = overrides.model?.provider
+  const anthropicToken = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? null
+  const useAnthropic =
+    ovrProvider ? ovrProvider === 'anthropic' : Boolean(overrides.model?.authToken ?? anthropicToken)
+
+  let model: ModelConfig
+  if (useAnthropic) {
+    // GLM (open.bigmodel.cn) exposes its Anthropic-compat API under /api/anthropic.
+    let base = (env.ANTHROPIC_API_BASE ?? env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com')
+      .replace(/\/+$/, '')
+    if (!base.includes('/api/anthropic') && base.includes('bigmodel.cn')) base += '/api/anthropic'
+    model = {
+      provider: 'anthropic',
+      authToken: overrides.model?.authToken ?? anthropicToken,
+      apiKey: overrides.model?.authToken ?? anthropicToken,
+      baseUrl: overrides.model?.baseUrl ?? base,
+      name: overrides.model?.name ?? env.ANTHROPIC_MODEL ?? 'glm-4.7',
+      anthropicVersion: env.ANTHROPIC_VERSION ?? '2023-06-01',
+    }
+  } else {
+    const apiKey = overrides.model?.apiKey ?? env.MODEL_API_KEY ?? env.OPENAI_API_KEY ?? null
+    const baseUrl =
+      overrides.model?.baseUrl ?? env.MODEL_BASE_URL ?? env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1'
+    const modelName = overrides.model?.name ?? env.MODEL_NAME ?? env.OPENAI_MODEL ?? 'gpt-4o-mini'
+    model = { provider: 'openai', apiKey, baseUrl, name: modelName }
+  }
 
   const headless = boolEnv(env, 'PLAYWRIGHT_HEADLESS', true)
   const visualHighlight = boolEnv(env, 'PLAYWRIGHT_VISUAL_HIGHLIGHT', !headless)
@@ -128,7 +166,7 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     .filter(Boolean)
 
   return {
-    model: { apiKey, baseUrl, name: modelName },
+    model,
     resumePath: overrides.resumePath ?? env.RESUME_PDF_PATH ?? join(REPO_ROOT, 'tmp', 'pdfs', 'resume.pdf'),
     alibabaCareersUrl:
       overrides.alibabaCareersUrl ?? env.ALIBABA_CAREERS_URL ?? 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh',
@@ -149,9 +187,10 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       navigationTimeoutMs: numEnv(env, 'PLAYWRIGHT_NAVIGATION_TIMEOUT_MS', 45000),
       actionTimeoutMs: numEnv(env, 'PLAYWRIGHT_ACTION_TIMEOUT_MS', 12000),
+      keepBrowserOpen: boolEnv(env, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', false),
     },
     trace: {
-      outDir: overrides.trace?.outDir ?? env.TRACE_OUT_DIR ?? join(REPO_ROOT, 'output'),
+      outDir: resolve(REPO_ROOT, overrides.trace?.outDir ?? env.TRACE_OUT_DIR ?? 'output'),
     },
     human: {
       mode: (env.HUMAN_GATE_MODE as 'cli' | 'auto' | undefined) ?? 'cli',
