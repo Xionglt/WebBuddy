@@ -57,3 +57,16 @@ await esbuild.build({
   banner: { js: '#!/usr/bin/env node' },
   external: EXTERNAL,
 })
+
+// Web UI server. index.html is inlined as a text module (single-file bundle).
+await esbuild.build({
+  entryPoints: ['src/web/server.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node18',
+  outfile: 'dist/web/server.js',
+  banner: { js: '#!/usr/bin/env node' },
+  external: EXTERNAL,
+  loader: { '.html': 'text' },
+})

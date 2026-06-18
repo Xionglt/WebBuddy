@@ -71,20 +71,29 @@ export class LlmGateway {
   constructor(private readonly model: ModelConfig) {}
 
   get hasKey(): boolean {
-    return Boolean(this.model.apiKey?.trim())
+    return Boolean(this.model.apiKey?.trim() || this.model.authToken?.trim())
   }
 
   get label(): string {
-    return `${this.model.name} @ ${this.model.baseUrl}`
+    return `${this.model.name} @ ${this.model.baseUrl} (${this.model.provider})`
   }
 
-  /** Shared request — returns the raw assistant message payload. */
+  /** Shared request — routes to the OpenAI or Anthropic wire format. */
   private async request(messages: ChatMessage[], options: ChatOptions): Promise<{
     content: string | null
     toolCalls: ToolCall[]
   }> {
-    if (!this.hasKey) throw new LlmError('No MODEL_API_KEY configured.', 'NO_KEY')
+    if (!this.hasKey) throw new LlmError('No model key configured.', 'NO_KEY')
+    return this.model.provider === 'anthropic'
+      ? this.requestAnthropic(messages, options)
+      : this.requestOpenai(messages, options)
+  }
 
+  /** OpenAI-compatible /chat/completions. */
+  private async requestOpenai(messages: ChatMessage[], options: ChatOptions): Promise<{
+    content: string | null
+    toolCalls: ToolCall[]
+  }> {
     const url = `${this.model.baseUrl.replace(/\/$/, '')}/chat/completions`
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 45000)
@@ -138,6 +147,119 @@ export class LlmGateway {
         toolCalls.push({ id: tc.id, name: tc.function.name, arguments: args })
       }
       return { content, toolCalls }
+    } catch (error) {
+      if (error instanceof LlmError) throw error
+      throw new LlmError(`Request failed: ${(error as Error).message}`, 'HTTP')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Anthropic Messages API (/v1/messages). Translates our OpenAI-style
+   * ChatMessage[] + ToolSchema[] to/from Anthropic's format. Used by Zhipu GLM
+   * (open.bigmodel.cn/api/anthropic) and real Anthropic.
+   */
+  private async requestAnthropic(messages: ChatMessage[], options: ChatOptions): Promise<{
+    content: string | null
+    toolCalls: ToolCall[]
+  }> {
+    const url = `${this.model.baseUrl.replace(/\/$/, '')}/v1/messages`
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 45000)
+
+    const system = messages
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .filter(Boolean)
+      .join('\n\n')
+
+    // Convert to Anthropic messages. Tool results (role:'tool') must be wrapped
+    // in a user message as {type:'tool_result'}. Consecutive tool results are
+    // grouped into one user message.
+    const converted: Array<Record<string, unknown>> = []
+    let i = 0
+    while (i < messages.length) {
+      const m = messages[i]
+      if (m.role === 'system') { i += 1; continue }
+      if (m.role === 'tool') {
+        const results: unknown[] = []
+        while (i < messages.length && messages[i].role === 'tool') {
+          results.push({
+            type: 'tool_result',
+            tool_use_id: messages[i].tool_call_id,
+            content: messages[i].content,
+          })
+          i += 1
+        }
+        converted.push({ role: 'user', content: results })
+        continue
+      }
+      if (m.role === 'assistant' && m.tool_calls?.length) {
+        const blocks: unknown[] = []
+        if (m.content) blocks.push({ type: 'text', text: m.content })
+        for (const tc of m.tool_calls) {
+          let input: unknown = {}
+          try { input = tc.function.arguments ? JSON.parse(tc.function.arguments) : {} } catch { input = {} }
+          blocks.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input })
+        }
+        converted.push({ role: 'assistant', content: blocks })
+      } else {
+        converted.push({ role: m.role, content: m.content })
+      }
+      i += 1
+    }
+
+    const body: Record<string, unknown> = {
+      model: this.model.name,
+      max_tokens: options.maxTokens ?? 1024,
+      messages: converted,
+      temperature: options.temperature ?? 0.2,
+    }
+    if (system) body.system = system
+    if (options.tools?.length) {
+      body.tools = options.tools.map((t) => ({
+        name: t.function.name,
+        description: t.function.description,
+        input_schema: t.function.parameters,
+      }))
+      body.tool_choice = options.toolChoice === 'none' ? { type: 'none' } : { type: 'auto' }
+    }
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.model.authToken || this.model.apiKey || '',
+          'anthropic-version': this.model.anthropicVersion || '2023-06-01',
+        },
+        body: JSON.stringify(body),
+      })
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw new LlmError(`HTTP ${res.status} from ${this.model.name}: ${text.slice(0, 300)}`, 'HTTP')
+      }
+
+      const json = (await res.json()) as {
+        content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>
+        stop_reason?: string
+      }
+      let text = ''
+      const toolCalls: ToolCall[] = []
+      for (const block of json.content ?? []) {
+        if (block.type === 'text' && block.text) text += block.text
+        if (block.type === 'tool_use' && block.name) {
+          toolCalls.push({
+            id: block.id || `call_${toolCalls.length}`,
+            name: block.name,
+            arguments: (block.input as Record<string, unknown>) ?? {},
+          })
+        }
+      }
+      return { content: text || null, toolCalls }
     } catch (error) {
       if (error instanceof LlmError) throw error
       throw new LlmError(`Request failed: ${(error as Error).message}`, 'HTTP')

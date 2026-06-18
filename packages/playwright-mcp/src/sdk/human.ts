@@ -96,13 +96,28 @@ export class CliHumanGate implements HumanGate {
  * guarantees no real login/upload/save/submit happens without a human.
  */
 export class AutoHumanGate implements HumanGate {
-  constructor(private readonly onGate?: (kind: GateKind, decision: GateDecision) => void) {}
+  constructor(
+    private readonly onGate?: (kind: GateKind, decision: GateDecision) => void,
+    private readonly opts: { allowLocalFinalSubmit?: boolean } = {},
+  ) {}
 
-  async confirm(kind: GateKind, _message: string, _context?: GateContext): Promise<GateDecision> {
+  async confirm(kind: GateKind, _message: string, context?: GateContext): Promise<GateDecision> {
     const decision: GateDecision =
-      kind === 'high_risk_action' ? 'approve' : 'takeover'
+      kind === 'high_risk_action' || (kind === 'final_submit' && this.opts.allowLocalFinalSubmit && isLocalUrl(context?.url))
+        ? 'approve'
+        : 'takeover'
     this.onGate?.(kind, decision)
     return decision
+  }
+}
+
+function isLocalUrl(url?: string): boolean {
+  if (!url) return false
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+  } catch {
+    return false
   }
 }
 

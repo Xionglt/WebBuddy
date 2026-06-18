@@ -100,7 +100,7 @@ const TOOLS: ToolDef[] = [
   {
     name: 'browser_click',
     description:
-      'Click an element by its ref (e.g. "e5"). Submit-like buttons are flagged risk L3 and need confirmation. Snapshot first to get fresh refs.',
+      'Click an element by its ref (e.g. "e5"). Snapshot first to get fresh refs. Some runtimes may require confirmed=true for high-risk refs.',
     parameters: {
       type: 'object',
       properties: { ref: { type: 'string' }, confirmed: { type: 'boolean' } },
@@ -191,7 +191,7 @@ const TOOLS: ToolDef[] = [
   {
     name: 'agent_done',
     description:
-      'Signal that the task is complete. Call this (with a short summary) when the form is filled as far as it should be, or when you are blocked (e.g. a login/captcha wall you cannot pass). NEVER call this right after submitting — the human must approve submission separately.',
+      'Signal that the task is complete. Call this with a short summary when the requested task is finished or when you are blocked and cannot continue.',
     parameters: {
       type: 'object',
       properties: { summary: { type: 'string' }, blocked: { type: 'boolean' } },

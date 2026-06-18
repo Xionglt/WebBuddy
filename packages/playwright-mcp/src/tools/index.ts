@@ -1,10 +1,15 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import { browserClick } from '../browser/click.js'
+import { browserClickText } from '../browser/click-text.js'
+import { browserFillByLabel } from '../browser/fill-by-label.js'
+import { browserFormSnapshot } from '../browser/form-snapshot.js'
 import { browserOpen } from '../browser/open.js'
 import { browserScreenshot } from '../browser/screenshot.js'
 import { browserSelect } from '../browser/select.js'
+import { browserSelectByText } from '../browser/select-by-text.js'
 import { browserSnapshot } from '../browser/snapshot.js'
 import { browserType } from '../browser/type.js'
+import { browserUploadFile } from '../browser/upload-file.js'
 import { browserWait } from '../browser/wait.js'
 import { formatToolResult } from '../errors.js'
 
@@ -51,6 +56,94 @@ export const TOOL_DEFINITIONS: Tool[] = [
         highlight: { type: 'boolean', description: 'When true and headful, move the mouse to the element and flash an outline before clicking.' },
       },
       required: ['ref'],
+    },
+  },
+  {
+    name: 'browser_click_text',
+    description:
+      'Click a visible text string directly, without requiring a snapshot ref. Use this for custom DOM lists/cards where visible job titles or links are present in body text but not exposed as refs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Visible text to click, e.g. a job title.' },
+        sessionId: { type: 'string' },
+        exact: { type: 'boolean', description: 'When true, require exact normalized text match. Default: false.' },
+        nth: { type: 'number', description: 'Zero-based match index when multiple visible matches exist. Default: 0.' },
+        timeoutMs: { type: 'number', description: 'Action timeout in milliseconds.' },
+        confirmed: { type: 'boolean', description: 'Required as true for submit-like text such as 投递/申请/提交.' },
+        highlight: { type: 'boolean', description: 'When true and headful, move the mouse to the matched text and flash an outline before clicking.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'browser_form_snapshot',
+    description:
+      'Capture form-specific state: labels, placeholders, required flags, current values, validation errors, select options, and upload hints. Use this before uploading a resume or filling complex application forms.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        maxFields: { type: 'number', description: 'Maximum fields to include. Default: 120.' },
+      },
+    },
+  },
+  {
+    name: 'browser_upload_file',
+    description:
+      'Upload a local file, such as a resume PDF, through an input[type=file] or an upload button that opens a file chooser. Use browser_form_snapshot first to find upload hints. Requires confirmed=true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filePath: { type: 'string', description: 'Absolute path to local file to upload.' },
+        ref: { type: 'string', description: 'Optional ref from browser_snapshot for an upload button or file input.' },
+        text: { type: 'string', description: 'Optional visible upload button text, e.g. 上传简历.' },
+        selector: { type: 'string', description: 'Optional CSS selector for input[type=file] or upload button.' },
+        sessionId: { type: 'string' },
+        exact: { type: 'boolean', description: 'When using text, require exact normalized text match. Default: false.' },
+        nth: { type: 'number', description: 'Zero-based match index when multiple text matches exist. Default: 0.' },
+        timeoutMs: { type: 'number' },
+        confirmed: { type: 'boolean', description: 'Required as true because resume upload contains sensitive data.' },
+        highlight: { type: 'boolean', description: 'When true and headful, show visual cursor/highlight before clicking upload trigger.' },
+      },
+      required: ['filePath'],
+    },
+  },
+  {
+    name: 'browser_fill_by_label',
+    description:
+      'Fill a form field by matching label, placeholder, aria-label, name/id, or nearby form text. Use for complex application forms when snapshot refs are stale or hard to identify.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Field label or nearby text, e.g. 姓名, 手机, 邮箱.' },
+        text: { type: 'string', description: 'Text to enter.' },
+        sessionId: { type: 'string' },
+        exact: { type: 'boolean', description: 'Require exact normalized label match. Default: false.' },
+        nth: { type: 'number', description: 'Zero-based match index when multiple fields match. Default: 0.' },
+        clear: { type: 'boolean', description: 'Clear existing value before typing. Default: true.' },
+        timeoutMs: { type: 'number' },
+      },
+      required: ['label', 'text'],
+    },
+  },
+  {
+    name: 'browser_select_by_text',
+    description:
+      'Select an option from a native select or custom dropdown by label/ref and visible option text. Useful for city, education, experience, and date-like fields.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        option: { type: 'string', description: 'Visible option text to choose, e.g. 杭州.' },
+        label: { type: 'string', description: 'Optional field label or nearby text for the dropdown.' },
+        ref: { type: 'string', description: 'Optional ref from browser_snapshot for the dropdown/control.' },
+        sessionId: { type: 'string' },
+        exact: { type: 'boolean', description: 'Require exact text match for label/option. Default: false.' },
+        nth: { type: 'number', description: 'Zero-based control match index when multiple labels match. Default: 0.' },
+        optionNth: { type: 'number', description: 'Zero-based option match index when multiple options match. Default: 0.' },
+        timeoutMs: { type: 'number' },
+      },
+      required: ['option'],
     },
   },
   {
@@ -121,6 +214,11 @@ const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknow
   browser_open: (args) => browserOpen(args as Parameters<typeof browserOpen>[0]),
   browser_snapshot: (args) => browserSnapshot(args as Parameters<typeof browserSnapshot>[0]),
   browser_click: (args) => browserClick(args as Parameters<typeof browserClick>[0]),
+  browser_click_text: (args) => browserClickText(args as Parameters<typeof browserClickText>[0]),
+  browser_form_snapshot: (args) => browserFormSnapshot(args as Parameters<typeof browserFormSnapshot>[0]),
+  browser_upload_file: (args) => browserUploadFile(args as Parameters<typeof browserUploadFile>[0]),
+  browser_fill_by_label: (args) => browserFillByLabel(args as Parameters<typeof browserFillByLabel>[0]),
+  browser_select_by_text: (args) => browserSelectByText(args as Parameters<typeof browserSelectByText>[0]),
   browser_type: (args) => browserType(args as Parameters<typeof browserType>[0]),
   browser_select: (args) => browserSelect(args as Parameters<typeof browserSelect>[0]),
   browser_wait: (args) => browserWait(args as Parameters<typeof browserWait>[0]),
@@ -142,5 +240,5 @@ export async function callBrowserTool(name: string, args: Record<string, unknown
   }
 
   const result = await handler(args)
-  return formatToolResult(result as { ok: boolean; observation: string; data?: unknown; error?: { code: string; message: string; recoverable: boolean; suggestedNextActions?: string[] }; pageChanged?: boolean })
+  return formatToolResult(result as Parameters<typeof formatToolResult>[0])
 }

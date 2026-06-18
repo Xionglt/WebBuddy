@@ -13,6 +13,8 @@ risk tiers.
 
 ## What works
 
+- ✅ **Web UI** — a Codex-style dashboard (`npm run web`) to drive the agent from
+  the browser: config, live event stream, screenshots, trace timeline.
 - ✅ **Generic fill** — any site + resume → cookie login → LLM-driven agent loop
   fills the form. No hardcoded field mapping; the model picks the right inputs.
 - ✅ **Cookie login** — `login <url>` once, save cookies; `fill` reuses them.
@@ -20,6 +22,11 @@ risk tiers.
   you can watch every action.
 - ✅ **PDF resume** → structured `ResumeProfile` (`.json`/`.txt` too).
 - ✅ **Alibaba match** — scrape the position list + details, match to resume.
+- ✅ **Claude Code runtime Alibaba runner** — `npm run alibaba:apply` runs the
+  recovered Claude Code runtime (`packages/web-buddy`) with Playwright exposed
+  as an MCP server.
+- ✅ **Raw Alibaba apply runner** — `npm run alibaba:apply:raw` keeps the local
+  minimal Playwright agent loop for comparison.
 - ✅ **Human-in-the-loop** at login / captcha / upload / save / submit.
 - ✅ **Trace** — every step, screenshot, URL, risk tier, under `output/<runId>/`.
 - ✅ `npm run build`, `npm run test:smoke`, `npm run test:alibaba-probe` pass.
@@ -31,6 +38,7 @@ risk tiers.
 multi-functional-agent/
 ├── configs/                       # config + resume examples
 ├── packages/
+│   ├── web-buddy/                 # Claude Code recovered runtime wrapper
 │   └── playwright-mcp/            # ★ the agent (engine + MCP server + CLI)
 │       ├── src/core/              # agent-loop · tool-registry · page-view · login
 │       ├── src/sdk/               # orchestrator · llm · config · trace · human · resume · matcher · alibaba
@@ -45,24 +53,37 @@ multi-functional-agent/
 cd packages/playwright-mcp
 npm install && npm run build
 
-# 1) Offline demo (no key needed) — mock form, visible fill:
+# 1) Web UI dashboard (recommended) — configure + run from the browser:
+npm run web                  # → http://localhost:5178
+
+# 2) Offline demo (no key needed) — mock form, visible fill:
 npm run demo
 
-# 2) The headline — any site + resume:
+# 3) The headline — any site + resume:
 npm run login -- https://your-recruiting-site.com/        # log in once, save cookies
-MODEL_API_KEY=sk-... npm run fill -- https://your-recruiting-site.com/apply
+npm run fill -- https://your-recruiting-site.com/apply    # (needs a model key)
 
-# 3) Alibaba scrape + match (read-only):
+# 4) Alibaba scrape + match (read-only):
 npm run demo:match
+
+# 5) Alibaba official site, no Web UI: Claude Code runtime + Playwright MCP:
+npm run alibaba:apply -- --resume /path/to/resume.pdf
+
+# Compare with the local minimal raw runtime:
+npm run alibaba:apply:raw -- --resume /path/to/resume.pdf --keep-browser-open
 ```
 
 ### Configure your model
 
-`fill` needs an OpenAI-compatible model with **function/tool-calling** support.
+`fill` needs a model with **function/tool-calling**. Two formats:
+
+- **Anthropic-compatible** — e.g. **Zhipu GLM** (`glm-4.7` via
+  `open.bigmodel.cn/api/anthropic`), verified end-to-end with tool-calling. Set
+  `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_MODEL` (auto-detected).
+- **OpenAI-compatible** — set `MODEL_API_KEY` + `MODEL_BASE_URL` + `MODEL_NAME`.
 
 ```bash
-cp configs/agent.env.example .env
-# edit .env → set MODEL_API_KEY (and MODEL_BASE_URL / MODEL_NAME if non-OpenAI)
+cp configs/agent.env.example .env   # edit .env → set the chosen block
 ```
 
 ## Commands
@@ -71,6 +92,9 @@ cp configs/agent.env.example .env
 |---------|------|------|
 | `fill <url>` | Generic: cookie-login + LLM-driven form fill. Never submits. | ✅ |
 | `login <url>` | Interactive login, save cookies for reuse. | ❌ |
+| `raw <url>` | Raw browser agent: open URL and let the LLM drive from prompt + resume. | ✅ |
+| `npm run alibaba:apply` | Claude Code recovered runtime + Playwright MCP Alibaba run. | ✅ |
+| `npm run alibaba:apply:raw` | Local minimal raw Playwright runtime Alibaba run. | ✅ |
 | `match` | Alibaba scrape + match, hand off at gate (read-only). | opt |
 | `demo-form` | Offline mock form, visible fill. Always works. | opt |
 
@@ -99,6 +123,7 @@ stop for a human. Final-submit *refuses* to auto-submit even when approved.
 
 ## Documentation
 
+- [Agent iteration log](./docs/agent-iteration-log.md) — project iteration notes, run conclusions, and next-step records
 - [Agent + MCP README](./packages/playwright-mcp/README.md) — architecture, CLI, env, scripts
 - [Config examples](./configs/) (`agent.env.example`, `resume.example.json`)
 - [Web-agent RFC](./docs/architecture/web-agent-bmad-rfc.md) · [Week-1 plan](./docs/architecture/web-agent-week1-plan.md)
@@ -110,6 +135,7 @@ stop for a human. Final-submit *refuses* to auto-submit even when approved.
 | Phase 1 | ✅ | Playwright MCP tools, risk gating, navigation guard |
 | MVP | ✅ | PDF resume, Alibaba scrape+match, gated draft fill, trace, demo CLI |
 | **Generic + cookie** | ✅ | **LLM-driven agent loop (any site), cookie login, architecture refactor** |
+| **Web UI + GLM** | ✅ | **Codex-style dashboard, Anthropic/GLM provider, real-API E2E verified** |
 | Next | 🚧 | resume-upload automation (gated), trace replay UI, multi-step wizards, more job boards |
 
 ## License
