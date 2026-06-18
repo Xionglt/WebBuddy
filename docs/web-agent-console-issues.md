@@ -11,7 +11,6 @@
 - 最新真实投递体验 run：`runtime-2026-06-18T07-44-10-627Z`
 - 最新 Trace 目录：`output/traces/claude_2026-06-18T07-44-11-428Z`
 - 最新 Runtime 目录：`output/claude-runtime/2026-06-18T07-44-11-428Z`
-- 本次功能变更说明：`docs/web-agent-console-change-summary.md`
 - 安全备注：本文档不记录 API key 明文，也不应在后续 issue / log 中粘贴任何密钥。
 
 ## 优先级拆分
