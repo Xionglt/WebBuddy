@@ -12,6 +12,7 @@ import { browserType } from '../browser/type.js'
 import { browserUploadFile } from '../browser/upload-file.js'
 import { browserWait } from '../browser/wait.js'
 import { formatToolResult } from '../errors.js'
+import { getOrCreateProcessTrace } from '../agent-trace/index.js'
 
 export const TOOL_DEFINITIONS: Tool[] = [
   {
@@ -226,9 +227,19 @@ const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknow
 }
 
 export async function callBrowserTool(name: string, args: Record<string, unknown>) {
+  const trace = getOrCreateProcessTrace('mcp-server')
+  const span = trace?.startSpan({
+    spanType: 'mcp_tool_call',
+    name,
+    toolName: name,
+    input: args,
+    metadata: {
+      sessionId: args.sessionId,
+    },
+  })
   const handler = handlers[name]
   if (!handler) {
-    return formatToolResult({
+    const text = formatToolResult({
       ok: false,
       observation: `Unknown tool: ${name}`,
       error: {
@@ -237,8 +248,31 @@ export async function callBrowserTool(name: string, args: Record<string, unknown
         recoverable: false,
       },
     })
+    span?.end({
+      status: 'failed',
+      output: text,
+      errorCode: 'UNKNOWN',
+      errorMessage: `Unknown tool: ${name}`,
+    })
+    return text
   }
 
-  const result = await handler(args)
-  return formatToolResult(result as Parameters<typeof formatToolResult>[0])
+  try {
+    const result = await handler(args)
+    const text = formatToolResult(result as Parameters<typeof formatToolResult>[0])
+    span?.end({
+      status: (result as { ok?: boolean }).ok === false ? 'failed' : 'success',
+      output: {
+        result,
+        text,
+      },
+    })
+    return text
+  } catch (error) {
+    span?.end({
+      status: 'failed',
+      errorMessage: error instanceof Error ? error.message : String(error),
+    })
+    throw error
+  }
 }

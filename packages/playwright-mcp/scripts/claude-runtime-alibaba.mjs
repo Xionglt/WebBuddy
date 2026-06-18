@@ -5,10 +5,12 @@
  * as an MCP server.
  */
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createAgentTraceSession } from '../dist/agent-trace/index.js'
+import { recordStreamJsonTrace } from '../dist/agent-trace/stream-json.js'
 
 const DEFAULT_ALIBABA_URL = 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh'
 const DEFAULT_TASK_PROMPT =
@@ -37,8 +39,11 @@ const MCP_TOOL_NAMES = [
 function parseArgs(argv) {
   const out = {
     resume: undefined,
+    noResume: false,
     url: undefined,
     prompt: undefined,
+    preset: 'alibaba',
+    allowedDomains: undefined,
     model: undefined,
     baseUrl: undefined,
     maxTurns: undefined,
@@ -52,6 +57,8 @@ function parseArgs(argv) {
     saveFullPrompt: false,
     autoContinue: true,
     waitOnBlocked: true,
+    handoffMode: 'terminal',
+    continueFile: undefined,
     maxPasses: undefined,
     maxBlockedHandoffs: '3',
   }
@@ -65,8 +72,11 @@ function parseArgs(argv) {
     }
 
     if (arg === '--resume') out.resume = value()
+    else if (arg === '--no-resume') out.noResume = true
     else if (arg === '--url' || arg === '--list-url') out.url = value()
     else if (arg === '--prompt') out.prompt = value()
+    else if (arg === '--preset') out.preset = value()
+    else if (arg === '--allowed-domains') out.allowedDomains = value()
     else if (arg === '--model' || arg === '--model-name') out.model = value()
     else if (arg === '--base-url') out.baseUrl = value()
     else if (arg === '--max-turns') out.maxTurns = value()
@@ -83,6 +93,8 @@ function parseArgs(argv) {
     else if (arg === '--save-full-prompt') out.saveFullPrompt = true
     else if (arg === '--no-auto-continue') out.autoContinue = false
     else if (arg === '--no-wait-on-blocked') out.waitOnBlocked = false
+    else if (arg === '--handoff-mode') out.handoffMode = value()
+    else if (arg === '--continue-file') out.continueFile = value()
     else if (arg === '--max-passes') out.maxPasses = value()
     else if (arg === '--max-blocked-handoffs') out.maxBlockedHandoffs = value()
     else if (arg === '-h' || arg === '--help') {
@@ -102,8 +114,11 @@ function printHelp() {
 
 Options:
   --resume <path>          Resume PDF/JSON/TXT. Defaults to RESUME_PDF_PATH.
+  --no-resume              Run without resume context.
   --url <url>              Target careers URL. Defaults to Alibaba off-campus list.
   --prompt <text>          Override the task prompt.
+  --preset <name>          Prompt preset: alibaba or generic. Default: alibaba.
+  --allowed-domains <list> Comma-separated browser allowlist. Defaults to target host.
   --model <name>           Override ANTHROPIC_MODEL for web-buddy.
   --base-url <url>         Override ANTHROPIC_BASE_URL for web-buddy.
   --max-turns <n>          Optional Claude Code max agent turns. Omitted by default.
@@ -116,6 +131,8 @@ Options:
   --save-full-prompt       Save full prompt, including resume text, under output/.
   --no-auto-continue       Do not restart Claude when it exits without a terminal status marker.
   --no-wait-on-blocked     Do not pause for manual login/captcha handoff when Claude reports BLOCKED.
+  --handoff-mode <mode>    terminal or file. File mode waits for --continue-file.
+  --continue-file <path>   In file handoff mode, continue after this file appears.
   --max-passes <n>         Optional wrapper continuation pass cap. Omitted by default.
   --max-blocked-handoffs <n> Maximum manual blocked handoffs. Default: 3. Use 0/none/unlimited for no cap.
   --dry-run                Print generated files and command without calling the model.
@@ -174,11 +191,15 @@ function buildEnv(flags) {
 }
 
 function resolveResumePath(flags, env) {
+  if (flags.noResume) return undefined
   const value = flags.resume || env.RESUME_PDF_PATH || join(REPO_ROOT, 'tmp', 'pdfs', 'resume.pdf')
   return resolve(value)
 }
 
 async function readResumeForPrompt(resumePath) {
+  if (!resumePath) {
+    return { rawText: '', profile: null }
+  }
   if (!existsSync(resumePath)) {
     throw new Error(`Resume not found: ${resumePath}`)
   }
@@ -197,16 +218,48 @@ async function readResumeForPrompt(resumePath) {
   return { rawText, profile }
 }
 
+function targetHost(url) {
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function resolveAllowedDomains(flags, env, url) {
+  if (flags.allowedDomains) return flags.allowedDomains
+  if (env.PLAYWRIGHT_ALLOWED_DOMAINS) return env.PLAYWRIGHT_ALLOWED_DOMAINS
+  const host = targetHost(url)
+  return host || 'talent-holding.alibaba.com'
+}
+
 function truncate(value, max) {
   if (value.length <= max) return value
   return `${value.slice(0, max)}\n\n[truncated ${value.length - max} chars]`
 }
 
-function buildPrompt({ taskPrompt, url, resumePath, resume }) {
+function buildPrompt({ taskPrompt, url, resumePath, resume, preset }) {
   const profileJson = resume.profile ? JSON.stringify(resume.profile, null, 2) : '(unable to parse structured profile)'
   const resumeText = truncate(resume.rawText || '', 14000)
+  const resumeLines = resumePath
+    ? [
+        `简历文件路径：${resumePath}`,
+        '',
+        '简历结构化摘要：',
+        '```json',
+        profileJson,
+        '```',
+        '',
+        '简历原文：',
+        '```text',
+        resumeText,
+        '```',
+      ]
+    : [
+        '本次任务没有提供简历文件。不要假设用户的个人信息；如果网页任务需要简历、联系方式或账号信息但页面无法继续，请输出 AGENT_STATUS=BLOCKED。',
+      ]
 
-  return [
+  const common = [
     '你现在运行在 Claude Code recovered runtime 中，浏览器操作能力来自名为 playwright 的 MCP server。',
     '',
     '可用浏览器 MCP 工具：',
@@ -223,33 +276,34 @@ function buildPrompt({ taskPrompt, url, resumePath, resume }) {
     '- mcp__playwright__browser_wait',
     '- mcp__playwright__browser_screenshot',
     '',
-    '请只用这些浏览器工具完成网页操作。不要编写脚本爬取页面，不要使用固定流程；根据网站当前可见信息自主搜索、筛选、比较、打开岗位、填写表单并推进投递目标。',
-    '如果岗位标题、列表卡片或链接文字出现在页面正文中，但没有出现在 browser_snapshot refs 里，请使用 mcp__playwright__browser_click_text 按可见文本点击，不要因此停止。',
-    '进入投递表单后，应优先寻找“上传简历 / 简历解析 / 附件简历 / PDF上传”等入口；如果存在，请使用 mcp__playwright__browser_upload_file 上传简历文件，并传 confirmed=true。',
-    '上传简历并等待解析后，调用 mcp__playwright__browser_form_snapshot 检查字段、必填项、错误提示和上传状态，再用 mcp__playwright__browser_fill_by_label 与 mcp__playwright__browser_select_by_text 修正缺失或错误字段。',
-    '如果普通 ref 输入失败、字段 ref 频繁变化、下拉框不是原生 select，请优先改用 form_snapshot + fill_by_label / select_by_text，而不是直接放弃。',
+    '请只用这些浏览器工具完成网页操作。不要编写脚本爬取页面，不要使用固定流程；根据网站当前可见信息判断下一步。',
     '页面变化、点击失败、输入失败、ref 失效、弹窗出现、跳转登录页之后，必须重新调用 mcp__playwright__browser_snapshot 获取最新 refs。',
-    '如果你决定点击投递、申请、提交等高风险按钮，并且这是完成用户目标所必需的，请在 mcp__playwright__browser_click 里传 confirmed=true。',
-    '不要因为已经浏览了几个岗位或写了阶段性总结就停止；只有用户目标完成，或遇到短信验证码、扫码、真实身份验证、人工无法替代的登录步骤，才输出最终回答。',
-    '最终回答或阶段性总结不要复述用户手机号、邮箱、身份证号、住址等隐私字段；需要提及时只说“联系方式已从简历读取”。',
+    '如果你决定点击提交、申请、投递、付款、删除等高风险按钮，并且这是完成用户目标所必需的，请在 mcp__playwright__browser_click 里传 confirmed=true。',
+    '不要因为阶段性总结就停止；只有用户目标完成，或遇到短信验证码、扫码、真实身份验证、账号登录、人机验证、网站风控或其他必须人工处理的步骤，才输出最终回答。',
+    '最终回答或阶段性总结不要复述用户手机号、邮箱、身份证号、住址等隐私字段；需要提及时只说“相关信息已从用户提供内容读取”。',
     '',
     '最终回答必须在最后一行包含且只包含以下状态标记之一：',
-    '- AGENT_STATUS=COMPLETED：已经完成用户目标，例如已成功投递、已提交申请，或网站明确显示申请/投递完成。',
+    '- AGENT_STATUS=COMPLETED：已经完成用户目标。',
     '- AGENT_STATUS=BLOCKED：遇到必须由用户处理的人机验证、扫码、短信验证码、账号登录、真实身份验证、网站风控或其他人工步骤。',
     '- AGENT_STATUS=INCOMPLETE：进程必须停止但目标尚未完成。除非发生无法继续的技术故障，否则不要主动选择这个状态；应继续使用浏览器工具推进。',
     '',
     `目标网站：${url}`,
-    `简历文件路径：${resumePath}`,
+    ...resumeLines,
     '',
-    '简历结构化摘要：',
-    '```json',
-    profileJson,
-    '```',
-    '',
-    '简历原文：',
-    '```text',
-    resumeText,
-    '```',
+    '用户目标：',
+    taskPrompt,
+  ]
+
+  if (preset !== 'alibaba') return common.join('\n')
+
+  return [
+    ...common.slice(0, 17),
+    '请根据网站当前可见信息自主搜索、筛选、比较、打开岗位、填写表单并推进投递目标。',
+    '如果岗位标题、列表卡片或链接文字出现在页面正文中，但没有出现在 browser_snapshot refs 里，请使用 mcp__playwright__browser_click_text 按可见文本点击，不要因此停止。',
+    '进入投递表单后，应优先寻找“上传简历 / 简历解析 / 附件简历 / PDF上传”等入口；如果存在，请使用 mcp__playwright__browser_upload_file 上传简历文件，并传 confirmed=true。',
+    '上传简历并等待解析后，调用 mcp__playwright__browser_form_snapshot 检查字段、必填项、错误提示和上传状态，再用 mcp__playwright__browser_fill_by_label 与 mcp__playwright__browser_select_by_text 修正缺失或错误字段。',
+    '如果普通 ref 输入失败、字段 ref 频繁变化、下拉框不是原生 select，请优先改用 form_snapshot + fill_by_label / select_by_text，而不是直接放弃。',
+    ...common.slice(17, -2),
     '',
     '用户目标：',
     taskPrompt,
@@ -292,14 +346,16 @@ function buildManualHandoffContinuationPrompt({ basePrompt, previousOutput, pass
   ].join('\n')
 }
 
-function buildRedactedPromptRecord({ taskPrompt, url, resumePath }) {
+function buildRedactedPromptRecord({ taskPrompt, url, resumePath, preset }) {
   return [
-    'Claude Code recovered runtime + Playwright MCP Alibaba run.',
+    `Claude Code recovered runtime + Playwright MCP run (preset=${preset}).`,
     '',
     `目标网站：${url}`,
-    `简历文件路径：${resumePath}`,
+    `简历文件路径：${resumePath || '(none)'}`,
     '',
-    '简历内容：已脱敏省略。真实运行时会在内存中传给模型，不默认写入 output。',
+    resumePath
+      ? '简历内容：已脱敏省略。真实运行时会在内存中传给模型，不默认写入 output。'
+      : '本次任务没有提供简历文件。',
     '',
     '用户目标：',
     taskPrompt,
@@ -313,7 +369,7 @@ function writeMcpConfig({ runDir, env, flags }) {
     PLAYWRIGHT_VISUAL_HIGHLIGHT: flags.headless ? 'false' : 'true',
     PLAYWRIGHT_KEEP_BROWSER_OPEN: flags.keepBrowserOpen ? 'true' : env.PLAYWRIGHT_KEEP_BROWSER_OPEN || 'false',
     PLAYWRIGHT_BLOCK_LOCALHOST: env.PLAYWRIGHT_BLOCK_LOCALHOST || 'true',
-    PLAYWRIGHT_ALLOWED_DOMAINS: env.PLAYWRIGHT_ALLOWED_DOMAINS || 'talent-holding.alibaba.com',
+    PLAYWRIGHT_ALLOWED_DOMAINS: flags.allowedDomains || env.PLAYWRIGHT_ALLOWED_DOMAINS || 'talent-holding.alibaba.com',
     PLAYWRIGHT_STORAGE_STATE: env.PLAYWRIGHT_STORAGE_STATE || '',
     PLAYWRIGHT_NAVIGATION_TIMEOUT_MS: env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS || '90000',
     PLAYWRIGHT_ACTION_TIMEOUT_MS: env.PLAYWRIGHT_ACTION_TIMEOUT_MS || '20000',
@@ -321,6 +377,14 @@ function writeMcpConfig({ runDir, env, flags }) {
     PLAYWRIGHT_TYPE_DELAY_MS: env.PLAYWRIGHT_TYPE_DELAY_MS || (flags.headless ? '0' : '12'),
     PLAYWRIGHT_VIEWPORT_WIDTH: env.PLAYWRIGHT_VIEWPORT_WIDTH || '1280',
     PLAYWRIGHT_VIEWPORT_HEIGHT: env.PLAYWRIGHT_VIEWPORT_HEIGHT || '840',
+    AGENT_TRACE_ENABLED: env.AGENT_TRACE_ENABLED || '',
+    AGENT_TRACE_SESSION_ID: env.AGENT_TRACE_SESSION_ID || '',
+    AGENT_TRACE_RUN_ID: env.AGENT_TRACE_RUN_ID || '',
+    AGENT_TRACE_OUT_DIR: env.AGENT_TRACE_OUT_DIR || '',
+    AGENT_TRACE_MODE: env.AGENT_TRACE_MODE || 'redacted',
+    AGENT_TRACE_SCENARIO: env.AGENT_TRACE_SCENARIO || '',
+    AGENT_TRACE_MODEL: env.AGENT_TRACE_MODEL || '',
+    AGENT_TRACE_PROVIDER: env.AGENT_TRACE_PROVIDER || '',
   }
 
   const config = {
@@ -397,7 +461,26 @@ function isManualBlockedOutput(stdout) {
   return /登录|登陆|验证码|扫码|身份验证|人机验证|风控|人工|sign\s*in|log\s*in|captcha|verification/i.test(stdout || '')
 }
 
-async function waitForUserEnter(message) {
+async function waitForUserContinue({ message, flags, runLogPath, handoffIndex }) {
+  if (flags.handoffMode === 'file') {
+    if (!flags.continueFile) throw new Error('--continue-file is required when --handoff-mode=file')
+    rmSync(flags.continueFile, { force: true })
+    appendRunEvent(runLogPath, 'manual_handoff_waiting_for_continue_file', {
+      handoffIndex,
+      continueFile: flags.continueFile,
+    })
+    console.log(`WEB_HANDOFF_WAITING ${JSON.stringify({ handoffIndex, continueFile: flags.continueFile })}`)
+    while (!existsSync(flags.continueFile)) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+    appendRunEvent(runLogPath, 'manual_handoff_continue_file_seen', {
+      handoffIndex,
+      continueFile: flags.continueFile,
+    })
+    rmSync(flags.continueFile, { force: true })
+    return
+  }
+
   if (!process.stdin.isTTY) {
     console.log(`${message}\n当前 stdin 不是交互终端，等待 120 秒后继续。`)
     await new Promise((resolve) => setTimeout(resolve, 120000))
@@ -460,8 +543,10 @@ async function performManualBrowserHandoff({ env, flags, url, runDir, runLogPath
   console.log('')
   console.log('Claude 报告遇到需要人工处理的步骤。')
   console.log('我已经打开一个浏览器窗口，请你在里面完成登录、验证码、扫码或其他人工步骤。')
-  console.log('完成后回到这个终端按 Enter，我会保存登录状态并继续同一个任务。')
-  await waitForUserEnter('人工步骤交接')
+  console.log(flags.handoffMode === 'file'
+    ? '完成后回到 Web 控制台点击继续，我会保存登录状态并继续同一个任务。'
+    : '完成后回到这个终端按 Enter，我会保存登录状态并继续同一个任务。')
+  await waitForUserContinue({ message: '人工步骤交接', flags, runLogPath, handoffIndex })
 
   await context.storageState({ path: storageStatePath })
   env.PLAYWRIGHT_STORAGE_STATE = storageStatePath
@@ -475,9 +560,12 @@ async function performManualBrowserHandoff({ env, flags, url, runDir, runLogPath
   return storageStatePath
 }
 
-async function runClaudePass({ cliArgs, env, prompt, runLogPath, stdoutLogPath, stderrLogPath, passIndex, flags }) {
+async function runClaudePass({ cliArgs, env, prompt, runLogPath, stdoutLogPath, stderrLogPath, streamJsonLogPath, passIndex, flags }) {
   appendFileSync(stdoutLogPath, `\n\n===== PASS ${passIndex} STDOUT ${new Date().toISOString()} =====\n`)
   appendFileSync(stderrLogPath, `\n\n===== PASS ${passIndex} STDERR ${new Date().toISOString()} =====\n`)
+  if (streamJsonLogPath) {
+    appendFileSync(streamJsonLogPath, `\n`)
+  }
 
   const child = spawn(process.execPath, cliArgs, {
     cwd: REPO_ROOT,
@@ -501,6 +589,7 @@ async function runClaudePass({ cliArgs, env, prompt, runLogPath, stdoutLogPath, 
     const text = chunk.toString('utf8')
     stdout += text
     appendFileSync(stdoutLogPath, text)
+    if (streamJsonLogPath) appendFileSync(streamJsonLogPath, text)
   })
 
   child.stderr.on('data', (chunk) => {
@@ -544,12 +633,23 @@ async function runClaudePass({ cliArgs, env, prompt, runLogPath, stdoutLogPath, 
 async function main() {
   const flags = parseArgs(process.argv.slice(2))
   const env = buildEnv(flags)
+  if (!['alibaba', 'generic'].includes(flags.preset)) {
+    throw new Error(`Invalid --preset value: ${flags.preset}`)
+  }
+  if (!['terminal', 'file'].includes(flags.handoffMode)) {
+    throw new Error(`Invalid --handoff-mode value: ${flags.handoffMode}`)
+  }
+  if (flags.handoffMode === 'file' && !flags.continueFile) {
+    throw new Error('--continue-file is required when --handoff-mode=file')
+  }
   flags.maxTurns = normalizeMaxTurns(flags.maxTurns)
   flags.maxPasses = normalizeMaxPasses(flags.maxPasses)
   flags.maxBlockedHandoffs = normalizeOptionalPositiveInt(flags.maxBlockedHandoffs, '--max-blocked-handoffs')
   const resumePath = resolveResumePath(flags, env)
-  const url = flags.url || env.ALIBABA_CAREERS_URL || DEFAULT_ALIBABA_URL
-  const taskPrompt = flags.prompt || DEFAULT_TASK_PROMPT
+  const url = flags.url || (flags.preset === 'alibaba' ? env.ALIBABA_CAREERS_URL || DEFAULT_ALIBABA_URL : '')
+  if (!url) throw new Error('Missing target URL. Pass --url for generic web tasks.')
+  flags.allowedDomains = resolveAllowedDomains(flags, env, url)
+  const taskPrompt = flags.prompt || (flags.preset === 'alibaba' ? DEFAULT_TASK_PROMPT : '请根据用户目标操作这个网页，并在完成或被人工步骤阻塞时按要求输出状态标记。')
 
   const hasCredential = Boolean(env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_OAUTH_TOKEN)
   if (!flags.dryRun && !hasCredential) {
@@ -563,14 +663,59 @@ async function main() {
   const runLogPath = join(runDir, 'run-events.log')
   const stdoutLogPath = join(runDir, 'stdout.log')
   const stderrLogPath = join(runDir, 'stderr.log')
+  const streamJsonLogPath = flags.outputFormat === 'stream-json' ? join(runDir, 'stream.jsonl') : undefined
+
+  const prompt = buildPrompt({ taskPrompt, url, resumePath, resume, preset: flags.preset })
+  const promptPath = join(runDir, flags.saveFullPrompt ? 'prompt.full.txt' : 'prompt.redacted.txt')
+  const promptRecord = flags.saveFullPrompt ? prompt : buildRedactedPromptRecord({ taskPrompt, url, resumePath, preset: flags.preset })
+  writeFileSync(promptPath, promptRecord)
+
+  const traceOutDir = join(REPO_ROOT, 'output', 'traces')
+  const trace = createAgentTraceSession({
+    sessionId: `claude_${runId}`,
+    runId,
+    outDir: traceOutDir,
+    source: 'claude-runtime',
+    scenario: flags.preset === 'alibaba' ? 'alibaba-apply' : 'generic-web',
+    model: env.ANTHROPIC_MODEL,
+    provider: 'anthropic',
+    userPrompt: promptRecord,
+    metadata: {
+      runDir,
+      runLogPath,
+      stdoutLogPath,
+      stderrLogPath,
+      streamJsonLogPath,
+      promptPath,
+      outputFormat: flags.outputFormat,
+      preset: flags.preset,
+      allowedDomains: flags.allowedDomains,
+      url,
+      resumePath,
+    },
+  })
+  if (trace) {
+    env.AGENT_TRACE_ENABLED = '1'
+    env.AGENT_TRACE_SESSION_ID = trace.sessionId
+    env.AGENT_TRACE_RUN_ID = runId
+    env.AGENT_TRACE_OUT_DIR = traceOutDir
+    env.AGENT_TRACE_MODE = trace.redactionMode
+    env.AGENT_TRACE_SCENARIO = flags.preset === 'alibaba' ? 'alibaba-apply' : 'generic-web'
+    env.AGENT_TRACE_MODEL = env.ANTHROPIC_MODEL
+    env.AGENT_TRACE_PROVIDER = 'anthropic'
+    trace.recordEvent('runtime_files', {
+      runDir,
+      runLogPath,
+      stdoutLogPath,
+      stderrLogPath,
+      streamJsonLogPath,
+      promptPath,
+      preset: flags.preset,
+      allowedDomains: flags.allowedDomains,
+    })
+  }
 
   const mcpConfigPath = writeMcpConfig({ runDir, env, flags })
-  const prompt = buildPrompt({ taskPrompt, url, resumePath, resume })
-  const promptPath = join(runDir, flags.saveFullPrompt ? 'prompt.full.txt' : 'prompt.redacted.txt')
-  writeFileSync(
-    promptPath,
-    flags.saveFullPrompt ? prompt : buildRedactedPromptRecord({ taskPrompt, url, resumePath }),
-  )
 
   const cliArgs = [
     join(WEB_BUDDY_ROOT, 'dist', 'cli.js'),
@@ -607,8 +752,13 @@ async function main() {
   console.log('Run events:', runLogPath)
   console.log('Stdout log:', stdoutLogPath)
   console.log('Stderr log:', stderrLogPath)
+  if (streamJsonLogPath) console.log('Stream JSON:', streamJsonLogPath)
+  if (trace) console.log('Agent trace:', trace.dir)
   console.log('Runtime: packages/web-buddy (Claude Code recovered source)')
   console.log('Browser MCP: packages/playwright-mcp/dist/server.js')
+  console.log('Preset:', flags.preset)
+  console.log('Allowed domains:', flags.allowedDomains)
+  console.log('Handoff mode:', flags.handoffMode)
   console.log('Claude max turns:', flags.maxTurns || 'unlimited')
   console.log('Keep browser open:', flags.keepBrowserOpen ? 'true' : 'false')
   console.log('Auto continue:', flags.autoContinue ? 'true' : 'false')
@@ -622,6 +772,17 @@ async function main() {
     }
     console.log('Dry run command:')
     console.log(`${process.execPath} ${redactCommand(cliArgs)} < [prompt omitted; see ${promptPath}]`)
+    trace?.finalize({
+      status: 'cancelled',
+      finalAnswer: 'dry-run',
+      metadata: {
+        stopReason: 'dry-run',
+        runLogPath,
+        stdoutLogPath,
+        stderrLogPath,
+        streamJsonLogPath,
+      },
+    })
     return
   }
 
@@ -629,8 +790,21 @@ async function main() {
   let nextPrompt = prompt
   let lastExitCode = 0
   let blockedHandoffs = 0
+  let stopReason = 'unknown'
 
   while (true) {
+    const passSpan = trace?.startSpan({
+      spanType: 'runtime_event',
+      name: 'claude_pass',
+      input: {
+        passIndex,
+        prompt: nextPrompt,
+      },
+      metadata: {
+        outputFormat: flags.outputFormat,
+        maxTurns: flags.maxTurns || null,
+      },
+    })
     const result = await runClaudePass({
       cliArgs,
       env,
@@ -638,12 +812,30 @@ async function main() {
       runLogPath,
       stdoutLogPath,
       stderrLogPath,
+      streamJsonLogPath,
       passIndex,
       flags,
     })
     lastExitCode = result.exitCode
+    const streamTraceSummary = flags.outputFormat === 'stream-json'
+      ? recordStreamJsonTrace(trace, result.stdout, {
+          passIndex,
+          parentSpanId: passSpan?.spanId,
+        })
+      : undefined
+    passSpan?.end({
+      status: result.exitCode === 0 ? 'success' : 'failed',
+      output: {
+        exitCode: result.exitCode,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        streamTraceSummary,
+      },
+    })
 
     if (result.exitCode !== 0) {
+      stopReason = 'nonzero-exit'
       appendRunEvent(runLogPath, 'stop', {
         reason: 'nonzero-exit',
         passIndex,
@@ -659,6 +851,7 @@ async function main() {
     })
 
     if (status === 'completed') {
+      stopReason = status
       appendRunEvent(runLogPath, 'stop', {
         reason: status,
         passIndex,
@@ -702,10 +895,12 @@ async function main() {
         waitOnBlocked: flags.waitOnBlocked,
         blockedHandoffs,
       })
+      stopReason = status
       break
     }
 
     if (!flags.autoContinue) {
+      stopReason = 'auto-continue-disabled'
       appendRunEvent(runLogPath, 'stop', {
         reason: 'auto-continue-disabled',
         passIndex,
@@ -715,6 +910,7 @@ async function main() {
     }
 
     if (flags.maxPasses && passIndex >= flags.maxPasses) {
+      stopReason = 'max-passes'
       appendRunEvent(runLogPath, 'stop', {
         reason: 'max-passes',
         passIndex,
@@ -736,6 +932,20 @@ async function main() {
     })
   }
 
+  trace?.finalize({
+    status: stopReason === 'completed' ? 'success' : lastExitCode === 0 ? 'cancelled' : 'failed',
+    finalAnswer: stopReason,
+    metadata: {
+      stopReason,
+      lastExitCode,
+      blockedHandoffs,
+      passIndex,
+      runLogPath,
+      stdoutLogPath,
+      stderrLogPath,
+      streamJsonLogPath,
+    },
+  })
   process.exitCode = lastExitCode
 }
 
