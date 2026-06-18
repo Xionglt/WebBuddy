@@ -1,318 +1,414 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>job-agent · visual browser job-application agent</title>
+<title>Web Agent Console</title>
 <style>
   :root {
-    --bg: #0a0a0c; --panel: #111114; --panel2: #151519; --border: #24242b;
-    --text: #e7e7ea; --muted: #8b8b95; --dim: #5a5a64;
-    --green: #3fb950; --cyan: #56c2ff; --amber: #e0a83b; --red: #f76655; --violet: #b39df3;
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --rail: #15171c;
+    --rail-2: #20232b;
+    --text: #1c2028;
+    --muted: #667085;
+    --soft: #e4e7ec;
+    --line: #d5d9e2;
+    --green: #1f8f5f;
+    --blue: #246bfe;
+    --amber: #b46b08;
+    --red: #c43e38;
+    --purple: #7047b8;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    background: var(--bg); color: var(--text); font-family: var(--sans);
-    font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 13px/1.45 var(--sans); }
+  button, input, textarea, select { font: inherit; }
+  .app { min-height: 100vh; display: grid; grid-template-columns: 340px minmax(420px, 1fr) 390px; }
+  aside { background: var(--rail); color: #eef1f6; padding: 18px; overflow: auto; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .mark { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg, var(--green), var(--blue)); }
+  .brand h1 { font-size: 15px; margin: 0; font-weight: 680; letter-spacing: 0; }
+  .brand p { margin: 2px 0 0; color: #aeb6c5; font-size: 11px; }
+  .group { margin: 0 0 14px; }
+  .label { display: flex; justify-content: space-between; align-items: center; color: #b8c0cc; font-size: 11px; margin-bottom: 6px; }
+  .label span:last-child { color: #7f899a; font-family: var(--mono); }
+  input, textarea, select {
+    width: 100%;
+    border: 1px solid #343946;
+    background: var(--rail-2);
+    color: #f6f8fb;
+    border-radius: 6px;
+    padding: 8px 9px;
+    outline: none;
   }
-  .app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
-  /* sidebar */
-  aside { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 18px 16px; }
-  .brand { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
-  .brand h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
-  .brand .ver { color: var(--dim); font-family: var(--mono); font-size: 11px; }
-  .sub { color: var(--muted); font-size: 11.5px; margin: 0 0 16px; }
-  .group { margin-bottom: 16px; }
-  .group > label { display: block; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 6px; font-weight: 600; }
-  input, select {
-    width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 7px 9px; font-family: var(--mono); font-size: 12px; outline: none;
+  textarea { min-height: 116px; resize: vertical; }
+  input:focus, textarea:focus, select:focus { border-color: #6ea5ff; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #0f1116; padding: 4px; border-radius: 8px; border: 1px solid #303541; }
+  .seg button { border: 0; border-radius: 6px; background: transparent; color: #aeb6c5; padding: 7px 8px; cursor: pointer; }
+  .seg button.on { background: #eef1f6; color: #111318; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .check { display: flex; gap: 8px; align-items: center; color: #b8c0cc; margin-top: 8px; }
+  .check input { width: auto; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+  .btn { border: 0; border-radius: 7px; padding: 10px 12px; font-weight: 650; cursor: pointer; }
+  .btn:disabled { opacity: .48; cursor: not-allowed; }
+  .primary { background: var(--green); color: white; grid-column: span 2; }
+  .secondary { background: #2b303a; color: #eef1f6; }
+  .danger { background: #3a2526; color: #ffb4ad; }
+  .continue { background: var(--blue); color: white; grid-column: span 2; display: none; }
+  main { min-width: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); }
+  .topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 18px;
   }
-  input:focus, select:focus { border-color: var(--cyan); }
-  input[type=password] { letter-spacing: 0.2em; }
-  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .seg { display: flex; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 2px; gap: 2px; }
-  .seg button { flex: 1; background: transparent; border: 0; color: var(--muted); padding: 6px 0; border-radius: 4px; font-size: 11.5px; cursor: pointer; font-family: var(--sans); }
-  .seg button.on { background: var(--border); color: var(--text); }
-  .check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; cursor: pointer; }
-  .resume-row { display: flex; gap: 6px; }
-  .resume-row input { flex: 1; }
-  .btn { width: 100%; border: 0; border-radius: 7px; padding: 10px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: var(--sans); transition: filter .12s; }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .btn-run { background: var(--green); color: #06150a; margin-top: 4px; }
-  .btn-run:hover:not(:disabled) { filter: brightness(1.08); }
-  .btn-stop { background: var(--panel2); color: var(--red); border: 1px solid var(--border); margin-top: 8px; }
-  .key-status { font-size: 11px; font-family: var(--mono); color: var(--muted); margin-top: 5px; }
-  .key-status.ok { color: var(--green); }
-  .key-status.no { color: var(--amber); }
-  hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
-  /* main */
-  main { display: grid; grid-template-rows: auto 1fr; min-width: 0; }
-  .topbar { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
-  .topbar .state { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-  .topbar .state b { color: var(--text); }
-  .pill { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
-  .pill.live { color: var(--green); border-color: #2a3d2e; background: #121a12; }
-  .pill .blink { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 5px; animation: blink 1s infinite; }
-  @keyframes blink { 50% { opacity: 0.25; } }
-  .content { display: grid; grid-template-columns: 1.4fr 1fr; min-height: 0; overflow: hidden; }
-  /* log */
-  .log-wrap { border-right: 1px solid var(--border); overflow-y: auto; padding: 10px 0; }
-  .ev { display: grid; grid-template-columns: 44px 92px 1fr; gap: 8px; padding: 3px 16px; font-family: var(--mono); font-size: 12px; align-items: baseline; }
-  .ev:hover { background: #12121500; }
-  .ev .ic { text-align: center; opacity: 0.95; }
-  .ev .ph { color: var(--dim); font-size: 11px; text-transform: lowercase; }
-  .ev .msg { color: var(--text); white-space: pre-wrap; word-break: break-word; }
-  .ev.think .msg { color: var(--cyan); }
-  .ev.act .msg { color: var(--green); }
-  .ev.act .ic, .ev.think .ic, .ev.observe .ic { color: var(--muted); }
-  .ev.gate { background: rgba(224,168,59,0.06); }
-  .ev.gate .msg { color: var(--amber); }
-  .ev.gate .ic { color: var(--amber); }
-  .ev.warn .msg { color: var(--amber); }
-  .ev.error .msg, .ev.error .ic { color: var(--red); }
-  .ev.done .msg { color: var(--green); font-weight: 600; }
-  .ev.info .msg { color: var(--text); }
-  /* right column */
-  .side-panel { overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-  .shot-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .shot-box .hd { display: flex; justify-content: space-between; padding: 8px 10px; font-size: 11px; color: var(--muted); font-family: var(--mono); border-bottom: 1px solid var(--border); }
-  .shot-box img { width: 100%; display: block; background: #fff; min-height: 120px; }
-  .shot-box .empty { padding: 30px 10px; text-align: center; color: var(--dim); font-size: 12px; }
-  .steps h3 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
-  .step { display: grid; grid-template-columns: 26px 1fr auto; gap: 8px; padding: 5px 0; border-bottom: 1px solid #1a1a1f; font-family: var(--mono); font-size: 11.5px; align-items: baseline; }
-  .step .n { color: var(--dim); text-align: right; }
-  .step .a { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .risk { font-size: 10px; padding: 1px 5px; border-radius: 4px; font-weight: 600; }
-  .risk.L3, .risk.L4 { background: rgba(247,102,85,0.16); color: var(--red); }
-  .risk.L2 { background: rgba(224,168,59,0.14); color: var(--amber); }
-  .risk.L0, .risk.L1 { background: #1c1c22; color: var(--muted); }
-  .footer { position: absolute; bottom: 0; left: 320px; right: 0; padding: 6px 18px; font-size: 11px; color: var(--dim); font-family: var(--mono); background: var(--panel); border-top: 1px solid var(--border); display: none; }
-  .empty-log { color: var(--dim); font-family: var(--mono); font-size: 12px; padding: 40px 24px; text-align: center; }
-  .hint { color: var(--dim); font-size: 11px; margin-top: 6px; font-family: var(--mono); }
+  .status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; color: var(--muted); background: #fbfcfd; }
+  .status.running { color: var(--green); border-color: #b8dfca; background: #f0fbf5; }
+  .status.blocked { color: var(--amber); border-color: #eac486; background: #fff8eb; }
+  .status.failed { color: var(--red); border-color: #f0aca8; background: #fff3f2; }
+  .dot { width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+  .runid { font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline { overflow: auto; padding: 14px 0; }
+  .empty { color: var(--muted); font-family: var(--mono); padding: 36px 22px; }
+  .event { display: grid; grid-template-columns: 86px 108px minmax(0, 1fr); gap: 10px; padding: 6px 18px; border-left: 3px solid transparent; }
+  .event:hover { background: #eef1f5; }
+  .event .time, .event .phase { font-family: var(--mono); color: var(--muted); font-size: 11px; }
+  .event .msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .event.think { border-left-color: var(--purple); }
+  .event.act { border-left-color: var(--blue); }
+  .event.observe { border-left-color: var(--green); }
+  .event.gate { border-left-color: var(--amber); background: #fff8eb; }
+  .event.warn { border-left-color: var(--amber); }
+  .event.error { border-left-color: var(--red); }
+  .event.done { border-left-color: var(--green); }
+  .inspect { background: var(--surface); border-left: 1px solid var(--line); overflow: auto; padding: 16px; }
+  .panel { margin-bottom: 18px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0; color: var(--muted); margin: 0 0 8px; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 6px 10px; font-size: 12px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .mono { font-family: var(--mono); overflow-wrap: anywhere; }
+  .span { border-top: 1px solid var(--soft); padding: 8px 0; }
+  .span-head { display: flex; gap: 6px; align-items: center; min-width: 0; }
+  .chip { font-family: var(--mono); font-size: 10px; border-radius: 4px; padding: 2px 5px; background: #edf0f5; color: #475467; }
+  .chip.llm_call { color: var(--purple); background: #f0ebff; }
+  .chip.mcp_tool_call, .chip.tool_call { color: var(--blue); background: #eaf1ff; }
+  .chip.skill_call { color: var(--green); background: #e8f7ef; }
+  .chip.runtime_event { color: var(--amber); background: #fff3d9; }
+  .span-name { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .span-meta { color: var(--muted); margin-top: 4px; font-family: var(--mono); font-size: 11px; }
+  .filebox { border: 1px solid var(--soft); border-radius: 7px; padding: 8px; background: #fbfcfd; }
+  .hint { color: #99a3b3; font-size: 11px; margin-top: 5px; }
+  @media (max-width: 1050px) {
+    .app { grid-template-columns: 320px 1fr; }
+    .inspect { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); max-height: 360px; }
+  }
+  @media (max-width: 760px) {
+    .app { display: block; }
+    aside { min-height: auto; }
+    main { min-height: 360px; grid-template-rows: 58px minmax(260px, auto); }
+    .event { grid-template-columns: 72px 82px 1fr; padding-right: 10px; }
+    .inspect { max-height: none; }
+  }
 </style>
 </head>
 <body>
 <div class="app">
   <aside>
-    <div class="brand"><span class="dot"></span><h1>job-agent</h1><span class="ver">web · 0.2</span></div>
-    <p class="sub">visual browser job-application agent — give a site + resume, watch it fill.</p>
+    <div class="brand">
+      <div class="mark"></div>
+      <div><h1>Web Agent Console</h1><p>Claude runtime + Playwright MCP</p></div>
+    </div>
 
     <div class="group">
-      <label>Model provider</label>
-      <div class="seg" id="seg-provider">
-        <button data-v="anthropic" class="on">Anthropic / GLM</button>
-        <button data-v="openai">OpenAI-compat</button>
+      <div class="label"><span>Preset</span><span>runtime</span></div>
+      <div class="seg" id="presetSeg">
+        <button data-v="generic" class="on">Generic</button>
+        <button data-v="alibaba">Alibaba</button>
       </div>
     </div>
 
     <div class="group">
-      <label>Base URL</label>
+      <div class="label"><span>Target URL</span><span>required</span></div>
+      <input id="url" placeholder="https://example.com" />
+    </div>
+
+    <div class="group">
+      <div class="label"><span>Task</span><span>prompt</span></div>
+      <textarea id="prompt"></textarea>
+    </div>
+
+    <div class="group">
+      <div class="label"><span>Resume</span><span>optional</span></div>
+      <input id="resumePath" placeholder="/path/to/resume.pdf" />
+      <div class="row" style="margin-top:8px">
+        <input type="file" id="resumeFile" accept=".pdf,.json,.txt" />
+        <button class="btn secondary" id="uploadBtn">Use file</button>
+      </div>
+      <div class="hint">Generic tasks can run without a resume.</div>
+    </div>
+
+    <div class="group">
+      <div class="label"><span>Model endpoint</span><span>Anthropic-compatible</span></div>
       <input id="baseUrl" placeholder="https://open.bigmodel.cn/api/anthropic" />
     </div>
-    <div class="group">
-      <label>Model</label>
-      <input id="model" placeholder="glm-4.7" />
-    </div>
-    <div class="group">
-      <label>API key / token</label>
-      <input id="key" type="password" placeholder="••••••••••••" />
-      <div id="keyStatus" class="key-status">checking…</div>
-    </div>
-
-    <hr/>
-
-    <div class="group">
-      <label>Resume</label>
-      <div class="resume-row">
-        <input id="resumePath" placeholder="tmp/pdfs/resume.pdf" />
+    <div class="row">
+      <div class="group">
+        <div class="label"><span>Model</span></div>
+        <input id="model" placeholder="glm-4.7" />
       </div>
-      <div class="row2" style="margin-top:6px">
-        <input type="file" id="resumeFile" accept=".pdf,.json,.txt" style="font-size:11px" />
-        <button class="btn btn-stop" id="useUploaded" style="margin:0">use uploaded</button>
-      </div>
-      <div class="hint">drop your resume; absent → a sample is generated.</div>
-    </div>
-
-    <hr/>
-
-    <div class="group">
-      <label>Mode</label>
-      <div class="seg" id="seg-mode">
-        <button data-v="demo-form" class="on" title="offline mock form — always works">demo-form</button>
-        <button data-v="auto-apply" title="structured list → best match → local/sandbox submit">auto-apply</button>
-        <button data-v="fill" title="generic: cookie-login + LLM fill">fill</button>
-        <button data-v="match" title="Alibaba scrape + match">match</button>
+      <div class="group">
+        <div class="label"><span>Max turns</span></div>
+        <input id="maxTurns" placeholder="20" />
       </div>
     </div>
-    <div class="group" id="urlGroup" style="display:none">
-      <label>Target URL</label>
-      <input id="startUrl" placeholder="https://your-site.com/jobs" />
-    </div>
     <div class="group">
-      <label class="check"><input type="checkbox" id="headless" /> headless browser (no window)</label>
+      <div class="label"><span>API key</span><span id="keyState">checking</span></div>
+      <input id="key" type="password" placeholder="leave blank to use env" />
     </div>
 
-    <button class="btn btn-run" id="runBtn">▶ Run agent</button>
-    <button class="btn btn-stop" id="stopBtn" disabled>■ Stop</button>
+    <div class="group">
+      <div class="label"><span>Allowed domains</span><span>optional</span></div>
+      <input id="allowedDomains" placeholder="auto from target URL" />
+      <label class="check"><input type="checkbox" id="headless" /> Run headless</label>
+    </div>
+
+    <div class="actions">
+      <button class="btn primary" id="runBtn">Run Agent</button>
+      <button class="btn continue" id="continueBtn">Continue After Handoff</button>
+      <button class="btn secondary" id="refreshBtn">Refresh Trace</button>
+      <button class="btn danger" id="stopBtn" disabled>Stop</button>
+    </div>
   </aside>
 
   <main>
     <div class="topbar">
-      <span class="pill" id="livePill">idle</span>
-      <span class="state">state: <b id="stateTxt">—</b></span>
-      <span class="state" id="msgTxt" style="color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-      <span style="flex:1"></span>
-      <span class="pill" id="tracePill">no trace</span>
+      <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
+      <span class="runid" id="runId">no run</span>
     </div>
-    <div class="content">
-      <div class="log-wrap" id="log">
-        <div class="empty-log">Press <b>Run agent</b> to start.<br/>Events stream here live.</div>
-      </div>
-      <div class="side-panel">
-        <div class="shot-box">
-          <div class="hd"><span>latest screenshot</span><span id="shotMeta">—</span></div>
-          <img id="shot" alt="screenshot" style="display:none" />
-          <div class="empty" id="shotEmpty">no screenshot yet</div>
-        </div>
-        <div class="steps">
-          <h3>trace steps</h3>
-          <div id="steps"></div>
-        </div>
-      </div>
+    <div class="timeline" id="timeline">
+      <div class="empty">Configure a URL and task, then run the agent.</div>
     </div>
   </main>
+
+  <section class="inspect">
+    <div class="panel">
+      <h2>Run</h2>
+      <div class="kv">
+        <div>Status</div><div class="mono" id="runStatus">idle</div>
+        <div>Run dir</div><div class="mono" id="runDir">-</div>
+        <div>Trace dir</div><div class="mono" id="traceDir">-</div>
+        <div>Spans</div><div class="mono" id="spanCount">0</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Trace Spans</h2>
+      <div id="spans"><div class="empty" style="padding:8px 0">No spans yet.</div></div>
+    </div>
+  </section>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let provider = 'anthropic', mode = 'demo-form', runId = null, es = null, pollT = null;
+const GENERIC_PROMPT = '请打开目标网页，根据我的目标完成操作。遇到登录、验证码、扫码、真实身份验证或其他必须人工处理的步骤时，请暂停并输出 AGENT_STATUS=BLOCKED。';
+const ALIBABA_PROMPT = '这是我的个人简历文件，然后现在我想去阿里官方招聘网站进行投递，然后请帮我找到适合我的岗位，然后帮我进行投递，填写表单，充分利用网站信息';
+const ALIBABA_URL = 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh';
+let preset = 'generic';
+let runId = null;
+let events = null;
+let traceTimer = null;
 
-const ICON = { info:'•', think:'💭', act:'🎯', observe:'👀', gate:'⛔', warn:'⚠', error:'✖', done:'✓' };
-
-function seg(el, onPick) {
-  el.addEventListener('click', (e) => {
-    const b = e.target.closest('button'); if (!b) return;
-    el.querySelectorAll('button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on'); onPick(b.dataset.v);
-  });
+function setPreset(next) {
+  preset = next;
+  document.querySelectorAll('#presetSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === preset));
+  if (preset === 'alibaba') {
+    if (!$('url').value.trim()) $('url').value = ALIBABA_URL;
+    if (!$('prompt').value.trim() || $('prompt').value === GENERIC_PROMPT) $('prompt').value = ALIBABA_PROMPT;
+  } else if (!$('prompt').value.trim() || $('prompt').value === ALIBABA_PROMPT) {
+    $('prompt').value = GENERIC_PROMPT;
+  }
 }
-seg($('seg-provider'), (v) => { provider = v;
-  $('baseUrl').placeholder = v === 'anthropic' ? 'https://open.bigmodel.cn/api/anthropic' : 'https://api.openai.com/v1';
-  $('model').placeholder = v === 'anthropic' ? 'glm-4.7' : 'gpt-4o-mini';
-});
-seg($('seg-mode'), (v) => { mode = v; $('urlGroup').style.display = (v === 'demo-form') ? 'none' : 'grid'; });
+
+function setStatus(value) {
+  const status = $('status');
+  status.className = 'status';
+  if (value === 'running') status.classList.add('running');
+  if (value === 'blocked') status.classList.add('blocked');
+  if (value === 'failed') status.classList.add('failed');
+  $('statusText').textContent = value;
+  $('runStatus').textContent = value;
+}
 
 async function api(path, opts) {
-  const r = await fetch(path, opts);
-  return r.json();
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
 }
-async function saveConfig() {
-  const key = $('key').value.trim();
-  await api('/api/config', { method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ provider, baseUrl: $('baseUrl').value.trim(), name: $('model').value.trim(), ...(key ? {key} : {}) }) });
-}
-['baseUrl','model','key'].forEach(id => $(id).addEventListener('change', saveConfig));
 
 async function loadConfig() {
-  const c = await api('/api/config');
-  provider = c.provider || 'anthropic';
-  document.querySelectorAll('#seg-provider button').forEach(b => b.classList.toggle('on', b.dataset.v === provider));
-  $('baseUrl').value = c.baseUrl || ''; $('model').value = c.name || '';
-  $('resumePath').value = c.resumePath || '';
-  $('startUrl').value = c.alibabaCareersUrl || '';
-  const ks = $('keyStatus');
-  if (c.hasKey) { ks.textContent = `✓ key set (${c.keyPreview || '•••'})`; ks.className = 'key-status ok'; }
-  else { ks.textContent = '⚠ no key — demo-form/match still work; fill needs a key'; ks.className = 'key-status no'; }
-}
-loadConfig();
-
-$('useUploaded').addEventListener('click', async () => {
-  const f = $('resumeFile').files[0]; if (!f) return;
-  const buf = await f.arrayBuffer();
-  const r = await api('/api/resume', { method:'POST', headers:{'content-type':'application/octet-stream','x-file-name':f.name}, body: buf });
-  if (r.path) { $('resumePath').value = r.path; }
-});
-
-function addEvent(e) {
-  if (e._end) { finish(e); return; }
-  const log = $('log');
-  if (log.querySelector('.empty-log')) log.innerHTML = '';
-  const lvl = e.level || 'info';
-  const div = document.createElement('div');
-  div.className = `ev ${lvl}`;
-  div.innerHTML = `<span class="ic">${ICON[lvl] || '•'}</span><span class="ph">${e.phase||''}</span><span class="msg"></span>`;
-  div.querySelector('.msg').textContent = e.message || '';
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-  if (e.phase === 'done' || e.level === 'done') { $('stateTxt').textContent = 'finishing…'; }
+  const cfg = await api('/api/config');
+  $('baseUrl').value = cfg.baseUrl || '';
+  $('model').value = cfg.name || '';
+  $('resumePath').value = cfg.resumePath || '';
+  $('keyState').textContent = cfg.hasKey ? 'set' : 'not set';
+  setPreset('generic');
 }
 
-function finish(e) {
-  $('livePill').textContent = 'done'; $('livePill').classList.remove('live');
-  $('stateTxt').textContent = e.finalState || 'done';
-  $('msgTxt').textContent = (e.message || '').slice(0, 120);
-  $('runBtn').disabled = false; $('stopBtn').disabled = true;
-  if (e.error) addEvent({ level:'error', phase:'fatal', message: e.error });
-  if (pollT) { clearInterval(pollT); pollT = null; }
-  if (es) { es.close(); es = null; }
+async function saveConfig() {
+  const key = $('key').value.trim();
+  await api('/api/config', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      provider: 'anthropic',
+      baseUrl: $('baseUrl').value.trim(),
+      name: $('model').value.trim(),
+      ...(key ? { key } : {}),
+    }),
+  });
 }
 
-$('runBtn').addEventListener('click', async () => {
-  await saveConfig();
-  $('log').innerHTML = '<div class="empty-log">starting…</div>';
-  $('steps').innerHTML = ''; $('shot').style.display = 'none'; $('shotEmpty').style.display = 'block'; $('shotMeta').textContent = '—';
-  $('runBtn').disabled = true; $('stopBtn').disabled = false;
-  $('livePill').innerHTML = '<span class="blink"></span>running'; $('livePill').classList.add('live');
-  $('stateTxt').textContent = 'running'; $('msgTxt').textContent = '';
-  const body = { mode, resumePath: $('resumePath').value.trim() || undefined, headless: $('headless').checked };
-  if (mode !== 'demo-form') body.startUrl = $('startUrl').value.trim();
-  const r = await api('/api/run', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
-  if (!r.runId) { addEvent({level:'error', phase:'fatal', message: r.error || 'no runId'}); finish({}); return; }
-  runId = r.runId;
-  $('tracePill').textContent = runId;
-  // SSE for live events
-  es = new EventSource(`/api/events?id=${runId}`);
-  es.onmessage = (m) => addEvent(JSON.parse(m.data));
-  es.onerror = () => { /* will reconnect; ignore */ };
-  // poll trace for screenshots + steps
-  pollT = setInterval(refreshTrace, 900);
-});
-
-$('stopBtn').addEventListener('click', async () => {
-  $('stopBtn').disabled = true;
-  await api('/api/stop', { method:'POST' });
-  addEvent({level:'warn', phase:'stop', message: 'stop requested — closing browser'});
-});
+function addEvent(event) {
+  const timeline = $('timeline');
+  if (timeline.querySelector('.empty')) timeline.innerHTML = '';
+  const row = document.createElement('div');
+  const level = event.level || 'info';
+  row.className = `event ${level}`;
+  const time = event.ts ? new Date(event.ts).toLocaleTimeString() : new Date().toLocaleTimeString();
+  row.innerHTML = `<div class="time">${time}</div><div class="phase"></div><div class="msg"></div>`;
+  row.querySelector('.phase').textContent = event.phase || level;
+  row.querySelector('.msg').textContent = event.message || '';
+  timeline.appendChild(row);
+  timeline.scrollTop = timeline.scrollHeight;
+  if (level === 'gate') {
+    $('continueBtn').style.display = 'block';
+    setStatus('blocked');
+  }
+}
 
 async function refreshTrace() {
   if (!runId) return;
-  const t = await api(`/api/trace?id=${runId}`);
-  if (!t.steps) return;
-  // steps list
-  const sw = $('steps'); sw.innerHTML = '';
-  for (const s of t.steps) {
-    const d = document.createElement('div'); d.className = 'step';
-    const risk = s.risk ? `<span class="risk ${s.risk}">${s.risk}</span>` : '<span class="risk L0">—</span>';
-    d.innerHTML = `<span class="n">${s.step}</span><span class="a"></span>${risk}`;
-    d.querySelector('.a').textContent = s.action || '';
-    sw.appendChild(d);
+  const trace = await api(`/api/runtime/trace?id=${encodeURIComponent(runId)}`);
+  $('runDir').textContent = trace.runDir || '-';
+  $('traceDir').textContent = trace.traceDir || '-';
+  $('spanCount').textContent = String(trace.spans?.length || 0);
+  if (trace.handoffWaiting) {
+    $('continueBtn').style.display = 'block';
+    setStatus('blocked');
   }
-  // latest screenshot
-  const withShot = t.steps.filter(s => s.screenshotPath);
-  if (withShot.length) {
-    const last = withShot[withShot.length - 1];
-    const name = last.screenshotPath.split(/[\\/]/).pop();
-    $('shot').src = `/api/shot?id=${runId}&name=${encodeURIComponent(name)}&_=${Date.now()}`;
-    $('shot').style.display = 'block'; $('shotEmpty').style.display = 'none';
-    $('shotMeta').textContent = `step ${last.step}`;
-  }
-  if (t.summary) { $('tracePill').textContent = `${t.summary.steps} steps · ${t.summary.screenshots} shots`; }
+  renderSpans(trace.spans || []);
 }
+
+function renderSpans(spans) {
+  const root = $('spans');
+  if (!spans.length) {
+    root.innerHTML = '<div class="empty" style="padding:8px 0">No spans yet.</div>';
+    return;
+  }
+  root.innerHTML = '';
+  for (const span of spans.slice(-40).reverse()) {
+    const div = document.createElement('div');
+    div.className = 'span';
+    div.innerHTML = `<div class="span-head"><span class="chip ${span.spanType || ''}">${span.spanType || 'span'}</span><span class="span-name"></span></div><div class="span-meta"></div>`;
+    div.querySelector('.span-name').textContent = span.toolName || span.name || '';
+    div.querySelector('.span-meta').textContent = `${span.status || ''} · ${span.latencyMs || 0}ms`;
+    root.appendChild(div);
+  }
+}
+
+function closeStream() {
+  if (events) {
+    events.close();
+    events = null;
+  }
+  if (traceTimer) {
+    clearInterval(traceTimer);
+    traceTimer = null;
+  }
+}
+
+$('presetSeg').addEventListener('click', (event) => {
+  const button = event.target.closest('button');
+  if (button) setPreset(button.dataset.v);
+});
+
+$('uploadBtn').addEventListener('click', async () => {
+  const file = $('resumeFile').files[0];
+  if (!file) return;
+  const body = await file.arrayBuffer();
+  const uploaded = await api('/api/resume', {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream', 'x-file-name': file.name },
+    body,
+  });
+  $('resumePath').value = uploaded.path || '';
+});
+
+$('runBtn').addEventListener('click', async () => {
+  await saveConfig();
+  closeStream();
+  $('timeline').innerHTML = '<div class="empty">Starting runtime...</div>';
+  $('spans').innerHTML = '<div class="empty" style="padding:8px 0">No spans yet.</div>';
+  $('continueBtn').style.display = 'none';
+  setStatus('running');
+  $('runBtn').disabled = true;
+  $('stopBtn').disabled = false;
+  const started = await api('/api/runtime/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      preset,
+      url: $('url').value.trim(),
+      prompt: $('prompt').value.trim(),
+      resumePath: $('resumePath').value.trim() || undefined,
+      headless: $('headless').checked,
+      maxTurns: $('maxTurns').value.trim() || undefined,
+      allowedDomains: $('allowedDomains').value.trim() || undefined,
+    }),
+  });
+  runId = started.runId;
+  $('runId').textContent = runId;
+  events = new EventSource(`/api/runtime/events?id=${encodeURIComponent(runId)}`);
+  events.onmessage = (message) => {
+    const event = JSON.parse(message.data);
+    if (event._end) {
+      setStatus(event.exitCode === 0 ? 'done' : 'failed');
+      $('runBtn').disabled = false;
+      $('stopBtn').disabled = true;
+      closeStream();
+      refreshTrace().catch(() => {});
+      return;
+    }
+    addEvent(event);
+  };
+  events.onerror = () => {};
+  traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
+});
+
+$('continueBtn').addEventListener('click', async () => {
+  if (!runId) return;
+  await api(`/api/runtime/continue?id=${encodeURIComponent(runId)}`, { method: 'POST' });
+  $('continueBtn').style.display = 'none';
+  setStatus('running');
+});
+
+$('stopBtn').addEventListener('click', async () => {
+  if (!runId) return;
+  await api(`/api/runtime/stop?id=${encodeURIComponent(runId)}`, { method: 'POST' });
+});
+
+$('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => addEvent({ level: 'error', phase: 'trace', message: error.message })));
+
+loadConfig().catch((error) => {
+  setStatus('failed');
+  addEvent({ level: 'error', phase: 'config', message: error.message });
+});
 </script>
 </body>
 </html>

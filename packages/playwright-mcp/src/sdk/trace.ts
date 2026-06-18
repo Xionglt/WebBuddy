@@ -1,6 +1,12 @@
 import { mkdirSync, appendFileSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import type { Page } from 'playwright'
+import {
+  createAgentTraceSession,
+  type AgentTraceSession,
+  type AgentSpanStatus,
+  type AgentTraceStatus,
+} from '../agent-trace/index.js'
 
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3' | 'L4'
 export type StepStatus = 'ok' | 'warn' | 'blocked' | 'error'
@@ -45,6 +51,7 @@ export interface TraceSummary {
 export class TraceRecorder {
   readonly runId: string
   readonly dir: string
+  readonly agentTrace?: AgentTraceSession
   private stepCount = 0
   private screenshotCount = 0
   private startedAt: string
@@ -58,6 +65,12 @@ export class TraceRecorder {
     this.dir = join(outDir, this.runId)
     mkdirSync(this.dir, { recursive: true })
     this.traceFile = join(this.dir, 'trace.jsonl')
+    this.agentTrace = createAgentTraceSession({
+      sessionId: `run_${this.runId}`,
+      runId: this.runId,
+      outDir: join(outDir, 'traces'),
+      source: 'trace-recorder',
+    })
   }
 
   /** Capture a screenshot (best-effort) and return its path relative to CWD. */
@@ -68,8 +81,21 @@ export class TraceRecorder {
     const file = join(this.dir, `shot-${String(this.screenshotCount).padStart(3, '0')}-${slug}.png`)
     try {
       await page.screenshot({ path: file, fullPage: false })
+      const span = this.agentTrace?.startSpan({
+        spanType: 'screenshot',
+        name: 'page_screenshot',
+        input: { label },
+        metadata: { path: file },
+      })
+      span?.end({ status: 'success', output: { path: relative(process.cwd(), file) } })
       return relative(process.cwd(), file)
     } catch {
+      const span = this.agentTrace?.startSpan({
+        spanType: 'screenshot',
+        name: 'page_screenshot',
+        input: { label },
+      })
+      span?.end({ status: 'failed', errorMessage: 'Screenshot capture failed.' })
       return undefined
     }
   }
@@ -81,6 +107,23 @@ export class TraceRecorder {
     this.lastStatus = full.status
     if (full.risk) this.maxRisk = higherRisk(this.maxRisk, full.risk)
     appendFileSync(this.traceFile, JSON.stringify(full) + '\n')
+    this.agentTrace?.recordEvent('legacy_trace_step', full)
+    const span = this.agentTrace?.startSpan({
+      spanType: full.phase === 'agent_loop' && full.action.startsWith('GATE') ? 'gate' : 'agent_step',
+      name: full.phase,
+      input: { action: full.action },
+      metadata: {
+        step: full.step,
+        url: full.url,
+        title: full.title,
+        risk: full.risk,
+        screenshotPath: full.screenshotPath,
+      },
+    })
+    span?.end({
+      status: toAgentSpanStatus(full.status),
+      output: { observation: full.observation },
+    })
     return full
   }
 
@@ -98,6 +141,10 @@ export class TraceRecorder {
       tracePath,
     }
     writeFileSync(join(this.dir, 'summary.json'), JSON.stringify(summary, null, 2))
+    this.agentTrace?.finalize({
+      status: toAgentTraceStatus(this.lastStatus),
+      metadata: { summary },
+    })
     return summary
   }
 }
@@ -113,4 +160,16 @@ function higherRisk(a: RiskLevel | undefined, b: RiskLevel): RiskLevel {
 function truncateUrl(url: string, max = 160): string {
   if (url.length <= max) return url
   return `${url.slice(0, max)}…<+${url.length - max} chars>`
+}
+
+function toAgentSpanStatus(status: StepStatus): AgentSpanStatus {
+  if (status === 'error') return 'failed'
+  if (status === 'blocked') return 'skipped'
+  return 'success'
+}
+
+function toAgentTraceStatus(status: StepStatus): AgentTraceStatus {
+  if (status === 'error') return 'failed'
+  if (status === 'blocked') return 'cancelled'
+  return 'success'
 }

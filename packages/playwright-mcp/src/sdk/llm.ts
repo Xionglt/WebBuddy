@@ -1,4 +1,5 @@
 import type { ModelConfig } from './config.js'
+import { getActiveTrace } from '../agent-trace/index.js'
 
 /**
  * Thin OpenAI-compatible chat client. Works with any endpoint that implements
@@ -83,10 +84,41 @@ export class LlmGateway {
     content: string | null
     toolCalls: ToolCall[]
   }> {
-    if (!this.hasKey) throw new LlmError('No model key configured.', 'NO_KEY')
-    return this.model.provider === 'anthropic'
-      ? this.requestAnthropic(messages, options)
-      : this.requestOpenai(messages, options)
+    const trace = getActiveTrace()
+    const span = trace?.startSpan({
+      spanType: 'llm_call',
+      name: 'llm.chat',
+      input: {
+        messages,
+        options: traceChatOptions(options),
+      },
+      metadata: {
+        provider: this.model.provider,
+        model: this.model.name,
+        baseUrl: this.model.baseUrl,
+      },
+    })
+    try {
+      if (!this.hasKey) throw new LlmError('No model key configured.', 'NO_KEY')
+      const result = this.model.provider === 'anthropic'
+        ? await this.requestAnthropic(messages, options)
+        : await this.requestOpenai(messages, options)
+      span?.end({
+        status: 'success',
+        output: {
+          content: result.content,
+          toolCalls: result.toolCalls,
+        },
+      })
+      return result
+    } catch (error) {
+      span?.end({
+        status: 'failed',
+        errorCode: error instanceof LlmError ? error.code : 'UNKNOWN',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
   }
 
   /** OpenAI-compatible /chat/completions. */
@@ -331,5 +363,20 @@ export class LlmGateway {
     } catch {
       return ''
     }
+  }
+}
+
+function traceChatOptions(options: ChatOptions): Record<string, unknown> {
+  return {
+    jsonMode: options.jsonMode,
+    temperature: options.temperature,
+    timeoutMs: options.timeoutMs,
+    toolChoice: options.toolChoice,
+    maxTokens: options.maxTokens,
+    tools: options.tools?.map((tool) => ({
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
+    })),
   }
 }

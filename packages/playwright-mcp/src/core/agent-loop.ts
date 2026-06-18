@@ -242,7 +242,37 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       }
 
       emit('act', `${call.name}(${argBrief})`, step)
-      const result = await registry.run(call.name, call.arguments, ctx)
+      const toolSpan = ctx.trace.agentTrace?.startSpan({
+        spanType: 'tool_call',
+        name: call.name,
+        toolName: call.name,
+        input: call.arguments,
+        metadata: {
+          step,
+          toolCallId: call.id,
+          risk,
+          argBrief,
+        },
+      })
+      let result
+      try {
+        result = await registry.run(call.name, call.arguments, ctx)
+        toolSpan?.end({
+          status: result.observation.startsWith('FAILED') ? 'failed' : 'success',
+          output: result,
+          metadata: {
+            pageChanged: result.pageChanged,
+            risk: result.risk,
+            done: result.done,
+          },
+        })
+      } catch (error) {
+        toolSpan?.end({
+          status: 'failed',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        })
+        throw error
+      }
       ctx.trace.record({
         phase: 'agent_loop',
         action: `${call.name}(${argBrief})`,

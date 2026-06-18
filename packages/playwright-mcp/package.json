@@ -29,7 +29,7 @@
     "alibaba:claude": "npm run build && npm --prefix ../web-buddy run build && node ./scripts/claude-runtime-alibaba.mjs",
     "fill": "npm run build && node ./dist/cli/demo.js fill",
     "login": "npm run build && node ./dist/cli/demo.js login",
-    "web": "npm run build && node ./dist/web/server.js",
+    "web": "npm run build && npm --prefix ../web-buddy run build && node ./dist/web/server.js",
     "test:e2e-auto-apply": "npm run build && node ./scripts/e2e-auto-apply.mjs",
     "test:e2e-web-auto-apply": "npm run build && node ./scripts/e2e-web-auto-apply.mjs",
     "test:smoke": "npm run build && node ./scripts/smoke-test.mjs",
