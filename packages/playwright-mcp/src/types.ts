@@ -61,6 +61,7 @@ export type ToolErrorCode =
   | 'TIMEOUT'
   | 'PAGE_CRASHED'
   | 'INVALID_ARGUMENT'
+  | 'CONFIRMATION_REQUIRED'
   | 'SESSION_NOT_FOUND'
   | 'UNKNOWN'
 

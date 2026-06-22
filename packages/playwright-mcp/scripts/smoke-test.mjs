@@ -1,6 +1,7 @@
 import { browserOpen } from '../dist/browser/open.js'
 import { browserSnapshot } from '../dist/browser/snapshot.js'
 import { browserType } from '../dist/browser/type.js'
+import { browserClick } from '../dist/browser/click.js'
 import { browserWait } from '../dist/browser/wait.js'
 import { sessionManager } from '../dist/session/manager.js'
 
@@ -31,6 +32,12 @@ async function main() {
   const waited = await browserWait({ for: 'ms', ms: 200 })
 
   const submit = snap.data.elements.find((e) => e.risk === 'L3')
+  if (!submit) throw new Error('Failed to classify submit button as L3')
+
+  const blockedSubmit = await browserClick({ ref: submit.ref })
+  if (blockedSubmit.ok || blockedSubmit.error.code !== 'CONFIRMATION_REQUIRED') {
+    throw new Error('Expected high-risk click to require confirmation')
+  }
 
   console.log('open:', open.observation)
   console.log('snapshot:', snap.observation, `refs=${snap.data.elements.length}`)
@@ -38,6 +45,7 @@ async function main() {
   console.log('type email:', typedEmail.observation)
   console.log('wait:', waited.observation)
   console.log('submit risk:', submit?.ref, submit?.risk)
+  console.log('submit guard:', blockedSubmit.observation)
 
   await sessionManager.closeAll()
   console.log('smoke test passed')

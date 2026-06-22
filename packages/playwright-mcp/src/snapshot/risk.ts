@@ -1,6 +1,21 @@
 import type { ElementRef } from '../types.js'
 
-const SUBMIT_PATTERNS = [/submit/i, /提交/, /send/i, /发送/, /confirm/i, /确认/, /pay/i, /支付/]
+const SUBMIT_PATTERNS = [
+  /submit/i,
+  /apply/i,
+  /application/i,
+  /提交/,
+  /投递/,
+  /申请/,
+  /递交/,
+  /报名/,
+  /send/i,
+  /发送/,
+  /confirm/i,
+  /确认/,
+  /pay/i,
+  /支付/,
+]
 
 export function detectElementRisk(input: {
   tag: string
