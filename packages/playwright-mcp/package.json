@@ -1,0 +1,53 @@
+{
+  "name": "@multi-functional-agent/playwright-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright MCP server + visual browser job-application Agent SDK (Alibaba careers demo)",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "bin": {
+    "playwright-mcp": "dist/server.js",
+    "job-agent": "dist/cli/demo.js",
+    "job-agent-web": "dist/web/server.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "clean": "node -e \"import('node:fs/promises').then(fs => fs.rm('dist', { recursive: true, force: true }))\"",
+    "start": "node ./dist/server.js",
+    "dev": "npm run build && npm start",
+    "demo": "npm run build && node ./dist/cli/demo.js demo-form --headful",
+    "demo:form": "npm run build && node ./dist/cli/demo.js demo-form --headful",
+    "demo:auto": "npm run build && node ./dist/cli/demo.js demo-form --headless --auto-gate",
+    "demo:match": "npm run build && node ./dist/cli/demo.js match --headful",
+    "alibaba:apply": "npm run build && npm --prefix ../web-buddy run build && node ./scripts/claude-runtime-alibaba.mjs",
+    "alibaba:apply:raw": "npm run build && node ./dist/cli/demo.js alibaba-apply --headful",
+    "alibaba:claude": "npm run build && npm --prefix ../web-buddy run build && node ./scripts/claude-runtime-alibaba.mjs",
+    "fill": "npm run build && node ./dist/cli/demo.js fill",
+    "login": "npm run build && node ./dist/cli/demo.js login",
+    "web": "npm run build && npm --prefix ../web-buddy run build && node ./dist/web/server.js",
+    "test:e2e-auto-apply": "npm run build && node ./scripts/e2e-auto-apply.mjs",
+    "test:e2e-web-auto-apply": "npm run build && node ./scripts/e2e-web-auto-apply.mjs",
+    "test:smoke": "npm run build && node ./scripts/smoke-test.mjs",
+    "test:resume": "node ./scripts/resume-test.mjs",
+    "test:matcher": "node ./scripts/matcher-test.mjs",
+    "test:agent-loop": "node ./scripts/agent-loop-test.mjs",
+    "test:alibaba-probe": "node ./scripts/alibaba-application-probe.mjs",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "pdfjs-dist": "^4.10.38",
+    "playwright": "^1.52.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "esbuild": "^0.25.1",
+    "typescript": "^5.8.2"
+  }
+}
