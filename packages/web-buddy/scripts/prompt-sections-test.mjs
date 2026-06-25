@@ -134,6 +134,100 @@ const budgetedMetrics = measurePromptSections(sections)
 assert(budgetedMetrics.contextTruncations >= 2, 'section truncations should be measurable')
 assert.equal(budgetedMetrics.promptSectionChars.CURRENT_PAGE_STATE, pageSection.content.length, 'page section chars should match section content length')
 
+const longSafetyNote = Array.from({ length: 40 }, (_, i) => `routine-safety-note-${i}`).join(' ')
+const blockerSections = buildPromptSections({
+  ...snapshot,
+  safetyNotes: [longSafetyNote],
+  blockers: ['Human approval gate denied final submit.'],
+}, {
+  sectionMaxChars: {
+    SAFETY_RULES: 140,
+  },
+})
+const blockerSafetySection = findSection(blockerSections, 'SAFETY_RULES')
+assert(blockerSafetySection.content.includes('Current blockers:'), 'blocker heading should survive tight safety budget')
+assert(blockerSafetySection.content.includes('Human approval gate'), 'blocker text should survive tight safety budget')
+
+const noisyFilledFields = Array.from({ length: 16 }, (_, i) => field(i, `Optional profile field with verbose label ${i}`, `verbose value ${i}`, false))
+const missingRequiredSections = buildPromptSections({
+  ...snapshot,
+  form: {
+    ...snapshot.form,
+    fields: [...noisyFilledFields, field(99, 'Email', '', true)],
+    filledFields: noisyFilledFields,
+    missingRequired: [field(99, 'Email', '', true)],
+  },
+}, {
+  sectionMaxChars: {
+    CURRENT_FORM_STATE: 150,
+    CURRENT_PAGE_STATE: 150,
+  },
+})
+const missingRequiredSection = findSection(missingRequiredSections, 'CURRENT_FORM_STATE')
+assert(missingRequiredSection.content.includes('missingRequired:'), 'missingRequired heading should survive tight form budget')
+assert(missingRequiredSection.content.includes('Email'), 'missing required label should survive tight form budget')
+
+const recentPrioritySections = buildPromptSections({
+  ...snapshot,
+  recentActions: [
+    {
+      step: 1,
+      toolName: 'browser_wait',
+      argumentsSummary: 'ms=1000',
+      status: 'ok',
+      observation: longObservation,
+      at: '2026-06-25T00:00:01.000Z',
+    },
+    {
+      step: 2,
+      toolName: 'browser_snapshot',
+      argumentsSummary: '(no args)',
+      status: 'ok',
+      observation: longObservation,
+      at: '2026-06-25T00:00:02.000Z',
+    },
+    {
+      step: 3,
+      toolName: 'browser_click',
+      argumentsSummary: 'ref=e9',
+      status: 'ok',
+      risk: 'L3',
+      observation: 'High-risk submit candidate seen.',
+      at: '2026-06-25T00:00:03.000Z',
+    },
+    {
+      step: 4,
+      toolName: 'browser_type',
+      argumentsSummary: 'ref=e1, text=zhangsan@example.com',
+      status: 'error',
+      observation: 'Field ref was stale.',
+      at: '2026-06-25T00:00:04.000Z',
+    },
+    {
+      step: 5,
+      toolName: 'browser_click',
+      argumentsSummary: 'ref=e10',
+      status: 'blocked',
+      risk: 'L4',
+      observation: 'Final submit blocked by safety gate.',
+      at: '2026-06-25T00:00:05.000Z',
+    },
+  ],
+}, {
+  sectionMaxChars: {
+    RECENT_ACTIONS: 520,
+  },
+})
+const priorityRecentSection = findSection(recentPrioritySections, 'RECENT_ACTIONS')
+assert(priorityRecentSection.content.includes('status=blocked'), 'blocked recent action should survive tight recent-actions budget')
+assert(priorityRecentSection.content.includes('Final submit blocked'), 'blocked recent action observation should survive tight recent-actions budget')
+assert(priorityRecentSection.content.includes('status=error'), 'error recent action should survive tight recent-actions budget')
+assert(priorityRecentSection.content.includes('risk=L3'), 'high-risk recent action should survive tight recent-actions budget')
+const firstOrdinaryActionIndex = firstPresentIndex(priorityRecentSection.content, ['tool=browser_snapshot', 'tool=browser_wait'])
+assert(firstOrdinaryActionIndex < 0 || priorityRecentSection.content.indexOf('status=blocked') < firstOrdinaryActionIndex, 'blocked actions should render before ordinary ok actions')
+assert(firstOrdinaryActionIndex < 0 || priorityRecentSection.content.indexOf('status=error') < firstOrdinaryActionIndex, 'error actions should render before ordinary ok actions')
+assert(firstOrdinaryActionIndex < 0 || priorityRecentSection.content.indexOf('risk=L3') < firstOrdinaryActionIndex, 'high-risk actions should render before ordinary ok actions')
+
 console.log('prompt-sections-test: PASS')
 
 function field(index, label, value, required) {
@@ -149,4 +243,15 @@ function field(index, label, value, required) {
     readonly: false,
     invalid: required && !value,
   }
+}
+
+function findSection(sections, id) {
+  const section = sections.find((candidate) => candidate.id === id)
+  assert(section, `${id} should exist`)
+  return section
+}
+
+function firstPresentIndex(content, needles) {
+  const indexes = needles.map((needle) => content.indexOf(needle)).filter((index) => index >= 0)
+  return indexes.length ? Math.min(...indexes) : -1
 }

@@ -33,6 +33,8 @@ export interface RunMetrics {
   contextChars: number
   contextTruncations: number
   recentActionsIncluded: number
+  pageStateAgeMs: number
+  formStateAgeMs: number
   promptSectionChars: Partial<Record<PromptSectionId, number>>
   spans: number
   events: number
@@ -85,6 +87,8 @@ export function emptyRunMetrics(input: {
     contextChars: 0,
     contextTruncations: 0,
     recentActionsIncluded: 0,
+    pageStateAgeMs: 0,
+    formStateAgeMs: 0,
     promptSectionChars: {},
     spans: 0,
     events: 0,
