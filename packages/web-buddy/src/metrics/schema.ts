@@ -1,0 +1,89 @@
+import type { RunSource } from './trace-inputs.js'
+
+export type RunMetricsStatus = 'completed' | 'blocked' | 'incomplete' | 'failed' | 'unknown'
+export type FailureCategory = 'login' | 'captcha' | 'form' | 'navigation' | 'model' | 'tool' | 'unknown'
+
+export interface RunMetrics {
+  schemaVersion: 'run-metrics/v1'
+  generatedAt: string
+  runId?: string
+  sessionId?: string
+  runDir?: string
+  traceDir?: string
+  source: RunSource
+  scenario?: string
+  profile?: string
+  status: RunMetricsStatus
+  durationMs: number
+  llmCalls: number
+  toolCalls: number
+  mcpToolCalls: number
+  observationToolCalls: number
+  actionToolCalls: number
+  humanToolCalls: number
+  evalToolCalls: number
+  browserSnapshots: number
+  browserClicks: number
+  browserTypes: number
+  browserWaits: number
+  screenshots: number
+  manualHandoffs: number
+  spans: number
+  events: number
+  legacySteps: number
+  stdoutBytes: number
+  stderrBytes: number
+  streamJsonBytes: number
+  runLogBytes: number
+  promptBytes: number
+  failureCategory: FailureCategory
+  warnings: string[]
+}
+
+export function emptyRunMetrics(input: {
+  runId?: string
+  sessionId?: string
+  runDir?: string
+  traceDir?: string
+  source: RunSource
+  scenario?: string
+  profile?: string
+  warnings?: string[]
+}): RunMetrics {
+  return {
+    schemaVersion: 'run-metrics/v1',
+    generatedAt: new Date().toISOString(),
+    runId: input.runId,
+    sessionId: input.sessionId,
+    runDir: input.runDir,
+    traceDir: input.traceDir,
+    source: input.source,
+    scenario: input.scenario,
+    profile: input.profile,
+    status: 'unknown',
+    durationMs: 0,
+    llmCalls: 0,
+    toolCalls: 0,
+    mcpToolCalls: 0,
+    observationToolCalls: 0,
+    actionToolCalls: 0,
+    humanToolCalls: 0,
+    evalToolCalls: 0,
+    browserSnapshots: 0,
+    browserClicks: 0,
+    browserTypes: 0,
+    browserWaits: 0,
+    screenshots: 0,
+    manualHandoffs: 0,
+    spans: 0,
+    events: 0,
+    legacySteps: 0,
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    streamJsonBytes: 0,
+    runLogBytes: 0,
+    promptBytes: 0,
+    failureCategory: 'unknown',
+    warnings: input.warnings ? [...input.warnings] : [],
+  }
+}

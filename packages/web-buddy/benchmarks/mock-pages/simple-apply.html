@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Simple Apply Benchmark</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --text: #18202a;
+      --muted: #667085;
+      --line: #d8dee8;
+      --accent: #1f7a5c;
+      --panel: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    main { max-width: 840px; margin: 0 auto; padding: 28px 18px 48px; }
+    header { margin-bottom: 18px; }
+    h1 { margin: 0 0 4px; font-size: 24px; }
+    p { margin: 0; color: var(--muted); }
+    .job, form {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin-top: 16px;
+    }
+    .job h2 { margin: 0 0 6px; font-size: 18px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+    .tags span { border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; color: var(--muted); font-size: 12px; }
+    a, button { cursor: pointer; }
+    a.apply, button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      border: 0;
+      border-radius: 7px;
+      background: var(--accent);
+      color: white;
+      padding: 8px 13px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+    label { display: block; margin-top: 12px; color: #344054; font-size: 13px; }
+    input, textarea {
+      width: 100%;
+      margin-top: 5px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      font: inherit;
+      background: white;
+    }
+    textarea { min-height: 92px; resize: vertical; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .status { margin-top: 12px; color: var(--accent); min-height: 20px; }
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Simple Apply Benchmark</h1>
+      <p>Local mock page for Web Buddy trace and metrics baselines.</p>
+    </header>
+
+    <article
+      class="job"
+      data-job-card
+      data-job-id="frontend-platform"
+      data-title="Frontend Platform Engineer"
+      data-category="Engineering"
+      data-location="Hangzhou"
+      data-tags="TypeScript React Playwright Node.js frontend"
+      data-apply-url="/simple-apply.html#apply"
+    >
+      <h2 data-job-title>Frontend Platform Engineer</h2>
+      <p data-location>Hangzhou</p>
+      <p>Build internal developer tools with TypeScript, React, Node.js, and Playwright automation.</p>
+      <div class="tags" data-job-tags>
+        <span>TypeScript</span>
+        <span>React</span>
+        <span>Playwright</span>
+        <span>Node.js</span>
+      </div>
+      <a class="apply" data-apply-link href="/simple-apply.html#apply">Apply now</a>
+    </article>
+
+    <form id="apply" aria-label="Application form">
+      <h2>Application form</h2>
+      <div class="grid">
+        <label for="name">Name
+          <input id="name" name="name" autocomplete="name" placeholder="Zhang San" />
+        </label>
+        <label for="phone">Phone
+          <input id="phone" name="phone" autocomplete="tel" placeholder="13800001234" />
+        </label>
+      </div>
+      <div class="grid">
+        <label for="email">Email
+          <input id="email" name="email" autocomplete="email" placeholder="zhangsan@example.com" />
+        </label>
+        <label for="city">City
+          <input id="city" name="city" placeholder="Hangzhou" />
+        </label>
+      </div>
+      <label for="summary">Summary
+        <textarea id="summary" name="summary" placeholder="Brief professional summary"></textarea>
+      </label>
+      <button type="submit">Submit application</button>
+      <div class="status" id="status" role="status"></div>
+    </form>
+  </main>
+  <script>
+    document.getElementById('apply').addEventListener('submit', (event) => {
+      event.preventDefault();
+      document.getElementById('status').textContent = 'Application submitted in local benchmark.';
+      document.body.dataset.submitted = 'true';
+    });
+  </script>
+</body>
+</html>

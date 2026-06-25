@@ -1,34 +1,21 @@
-type Listener = () => void
-type OnChange<T> = (args: { newState: T; oldState: T }) => void
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import type { AgentState } from './agent-state.js'
 
-export type Store<T> = {
-  getState: () => T
-  setState: (updater: (prev: T) => T) => void
-  subscribe: (listener: Listener) => () => void
+export function agentStatePathForTraceDir(traceDir: string): string {
+  return join(traceDir, 'agent-state.json')
 }
 
-export function createStore<T>(
-  initialState: T,
-  onChange?: OnChange<T>,
-): Store<T> {
-  let state = initialState
-  const listeners = new Set<Listener>()
+export function writeAgentState(state: AgentState, path: string): string {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2))
+  return path
+}
 
-  return {
-    getState: () => state,
-
-    setState: (updater: (prev: T) => T) => {
-      const prev = state
-      const next = updater(prev)
-      if (Object.is(next, prev)) return
-      state = next
-      onChange?.({ newState: next, oldState: prev })
-      for (const listener of listeners) listener()
-    },
-
-    subscribe: (listener: Listener) => {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
-    },
+export function writeAgentStateSafe(state: AgentState, path: string): string | undefined {
+  try {
+    return writeAgentState(state, path)
+  } catch {
+    return undefined
   }
 }
