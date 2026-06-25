@@ -48,6 +48,7 @@
     "test:prompt-sections": "npm run build && node ./scripts/prompt-sections-test.mjs",
     "test:alibaba-probe": "node ./scripts/alibaba-application-probe.mjs",
     "benchmark:simple": "npm run build && node ./scripts/benchmark-simple.mjs",
+    "benchmark:complex": "npm run build && node ./scripts/benchmark-complex.mjs",
     "postinstall": "playwright install chromium"
   },
   "dependencies": {
