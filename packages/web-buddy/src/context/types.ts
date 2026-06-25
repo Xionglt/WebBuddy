@@ -21,12 +21,23 @@ export interface ContextRecentAction {
   at: string
 }
 
+export interface ContextFreshness {
+  pageStateUpdatedAt?: string
+  formStateUpdatedAt?: string
+  pageStateAgeMs?: number
+  formStateAgeMs?: number
+  pageStateStale: boolean
+  formStateStale: boolean
+  staleAfterMs: number
+}
+
 export interface ContextSnapshot {
   schemaVersion: 'context-snapshot/v1'
   sessionId: string
   goal: string
   page?: PageState
   form?: FormState
+  freshness: ContextFreshness
   resumeSummary: string
   recentActions: ContextRecentAction[]
   safetyNotes: string[]

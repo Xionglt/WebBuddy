@@ -5,6 +5,7 @@ import {
   buildPromptSections,
   renderPromptSections,
 } from '../dist/context/prompt-sections.js'
+import { measurePromptSections } from '../dist/context/metrics.js'
 
 const longText = Array.from({ length: 80 }, (_, i) => `long-page-text-${i}`).join(' ')
 const longObservation = Array.from({ length: 80 }, (_, i) => `recent-action-observation-${i}`).join(' ')
@@ -43,6 +44,15 @@ const snapshot = {
     uploadHints: [{ tag: 'input', type: 'file', text: 'Upload resume', visible: true, accept: '.pdf' }],
     visibleErrors: ['Email is required'],
     updatedAt: '2026-06-25T00:00:00.000Z',
+  },
+  freshness: {
+    pageStateUpdatedAt: '2026-06-25T00:00:00.000Z',
+    formStateUpdatedAt: '2026-06-25T00:00:00.000Z',
+    pageStateAgeMs: 3000,
+    formStateAgeMs: 3000,
+    pageStateStale: false,
+    formStateStale: false,
+    staleAfterMs: 30_000,
   },
   resumeSummary: 'name: Zhang San\nemail: zhangsan@example.com',
   recentActions: [
@@ -93,6 +103,7 @@ assert(formSection.content.includes('missingRequired:'), 'missingRequired should
 assert(formSection.content.includes('Email'), 'missing required labels should enter prompt')
 assert(formSection.content.includes('submitCandidates:'), 'submitCandidates should enter prompt')
 assert(formSection.content.includes('Submit application'), 'submit candidate text should enter prompt')
+assert(formSection.content.includes('freshness: ageMs=3000 stale=false'), 'form freshness should enter prompt')
 
 const pageSection = sections.find((section) => section.id === 'CURRENT_PAGE_STATE')
 assert(pageSection, 'CURRENT_PAGE_STATE should exist')
@@ -103,6 +114,25 @@ const recentSection = sections.find((section) => section.id === 'RECENT_ACTIONS'
 assert(recentSection, 'RECENT_ACTIONS should exist')
 assert(recentSection.content.length <= 260, 'recent actions should be controlled by section budget')
 assert(recentSection.content.includes('[truncated]'), 'long recent actions should show truncation')
+
+const fullSections = buildPromptSections(snapshot, {
+  sectionMaxChars: {
+    CURRENT_PAGE_STATE: 10000,
+    RECENT_ACTIONS: 10000,
+  },
+})
+const fullMetrics = measurePromptSections(fullSections)
+assert.equal(fullMetrics.contextBuilds, 1, 'context build count should default to one measured build')
+assert.equal(fullMetrics.contextChars, renderPromptSections(fullSections).length, 'context chars should match rendered sections length')
+assert.equal(fullMetrics.recentActionsIncluded, 2, 'recent action count should be measurable')
+assert(fullMetrics.promptSectionChars.CURRENT_FORM_STATE > 0, 'section chars should be measured by section id')
+
+const fullPageSection = fullSections.find((section) => section.id === 'CURRENT_PAGE_STATE')
+assert(fullPageSection?.content.includes('freshness: ageMs=3000 stale=false'), 'page freshness should enter prompt')
+
+const budgetedMetrics = measurePromptSections(sections)
+assert(budgetedMetrics.contextTruncations >= 2, 'section truncations should be measurable')
+assert.equal(budgetedMetrics.promptSectionChars.CURRENT_PAGE_STATE, pageSection.content.length, 'page section chars should match section content length')
 
 console.log('prompt-sections-test: PASS')
 

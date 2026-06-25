@@ -1,7 +1,7 @@
 import type { FormFieldState, FormState, SubmitCandidate, UploadHint } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
 import { normalizeLines, oneLine, truncateText } from './budget.js'
-import type { ContextRecentAction, ContextSnapshot, PromptSection, PromptSectionId } from './types.js'
+import type { ContextFreshness, ContextRecentAction, ContextSnapshot, PromptSection, PromptSectionId } from './types.js'
 
 export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'SYSTEM_ROLE',
@@ -95,9 +95,9 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
     case 'RESUME_SUMMARY':
       return snapshot.resumeSummary || '(no resume summary provided)'
     case 'CURRENT_PAGE_STATE':
-      return renderPageState(snapshot.page)
+      return renderPageState(snapshot.page, snapshot.freshness)
     case 'CURRENT_FORM_STATE':
-      return renderFormState(snapshot.form)
+      return renderFormState(snapshot.form, snapshot.freshness)
     case 'RECENT_ACTIONS':
       return renderRecentActions(snapshot.recentActions)
     case 'NEXT_ACTION_RULES':
@@ -121,9 +121,12 @@ function renderSafetyRules(notes: string[], blockers: string[]): string {
   return lines.join('\n')
 }
 
-function renderPageState(page?: PageState): string {
+function renderPageState(page: PageState | undefined, freshness: ContextFreshness | undefined): string {
   if (!page) {
-    return '(no PageState in ObservationProvider memory yet; call browser_snapshot or use the latest page view fallback)'
+    return normalizeLines([
+      '(no PageState in ObservationProvider memory yet; call browser_snapshot or use the latest page view fallback)',
+      renderFreshnessCue('page', freshness),
+    ])
   }
   return normalizeLines([
     `schemaVersion: ${page.schemaVersion}`,
@@ -131,14 +134,18 @@ function renderPageState(page?: PageState): string {
     `title: ${page.title || '(untitled)'}`,
     `pageType: ${page.pageType}`,
     `counts: interactive=${page.interactiveCount}, forms=${page.formCount}, links=${page.linkCount}, buttons=${page.buttonCount}, inputs=${page.inputCount}`,
+    renderFreshnessCue('page', freshness),
     `textSummary: ${page.textSummary || '(empty)'}`,
     `updatedAt: ${page.updatedAt}`,
   ])
 }
 
-function renderFormState(form?: FormState): string {
+function renderFormState(form: FormState | undefined, freshness: ContextFreshness | undefined): string {
   if (!form) {
-    return '(no FormState in ObservationProvider memory yet; call browser_form_snapshot if form details are needed)'
+    return normalizeLines([
+      '(no FormState in ObservationProvider memory yet; call browser_form_snapshot if form details are needed)',
+      renderFreshnessCue('form', freshness),
+    ])
   }
 
   return normalizeLines([
@@ -147,6 +154,7 @@ function renderFormState(form?: FormState): string {
     `fieldCount: ${form.fields.length}`,
     `filledFieldsCount: ${form.filledFields.length}`,
     `missingRequiredCount: ${form.missingRequired.length}`,
+    renderFreshnessCue('form', freshness),
     '',
     'filledFields:',
     renderFieldList(form.filledFields),
@@ -160,6 +168,20 @@ function renderFormState(form?: FormState): string {
     form.visibleErrors?.length ? `\nvisibleErrors:\n${form.visibleErrors.map((error) => `- ${oneLine(error, 180)}`).join('\n')}` : undefined,
     `updatedAt: ${form.updatedAt}`,
   ])
+}
+
+function renderFreshnessCue(kind: 'page' | 'form', freshness: ContextFreshness | undefined): string {
+  const ageMs = kind === 'page' ? freshness?.pageStateAgeMs : freshness?.formStateAgeMs
+  const stale = kind === 'page' ? freshness?.pageStateStale : freshness?.formStateStale
+  const updatedAt = kind === 'page' ? freshness?.pageStateUpdatedAt : freshness?.formStateUpdatedAt
+
+  return [
+    'freshness:',
+    `ageMs=${ageMs ?? '(unknown)'}`,
+    `stale=${stale ?? '(unknown)'}`,
+    `updatedAt=${updatedAt ?? '(none)'}`,
+    `staleAfterMs=${freshness?.staleAfterMs ?? '(unknown)'}`,
+  ].join(' ')
 }
 
 function renderFieldList(fields: FormFieldState[]): string {

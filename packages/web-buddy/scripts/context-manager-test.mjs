@@ -78,6 +78,25 @@ try {
   assert.deepEqual(snapshot.recentActions.map((action) => action.toolName), ['browser_type', 'browser_form_snapshot'])
   assert.equal(snapshot.safetyNotes[0], 'Do not submit final applications.')
   assert.equal(snapshot.blockers[0], 'captcha not present')
+  assert.equal(snapshot.freshness.staleAfterMs, 30_000)
+  assert.equal(snapshot.freshness.pageStateUpdatedAt, pageState.updatedAt)
+  assert.equal(snapshot.freshness.formStateUpdatedAt, formState.updatedAt)
+  assert.equal(snapshot.freshness.pageStateAgeMs, 60_000)
+  assert.equal(snapshot.freshness.formStateAgeMs, 60_000)
+  assert.equal(snapshot.freshness.pageStateStale, true)
+  assert.equal(snapshot.freshness.formStateStale, true)
+
+  const overrideSnapshot = await new ContextManager({ observationProvider: provider, staleAfterMs: 120_000 }).createSnapshot({
+    sessionId: 'ctx-test',
+    goal: 'Fill the current form.',
+    resumeSummary: 'name: Zhang San\nemail: zhangsan@example.com',
+    updatedAt: '2026-06-25T00:01:00.000Z',
+  })
+  assert.equal(overrideSnapshot.freshness.staleAfterMs, 120_000)
+  assert.equal(overrideSnapshot.freshness.pageStateAgeMs, 60_000)
+  assert.equal(overrideSnapshot.freshness.formStateAgeMs, 60_000)
+  assert.equal(overrideSnapshot.freshness.pageStateStale, false)
+  assert.equal(overrideSnapshot.freshness.formStateStale, false)
 
   const serialized = JSON.stringify(snapshot)
   assert(!serialized.includes('POISON ARTIFACT'), 'ContextManager must ignore trace artifact page files')
