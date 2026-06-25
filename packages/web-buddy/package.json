@@ -39,6 +39,7 @@
     "test:resume": "node ./scripts/resume-test.mjs",
     "test:matcher": "node ./scripts/matcher-test.mjs",
     "test:agent-loop": "node ./scripts/agent-loop-test.mjs",
+    "test:agent-runtime": "node ./scripts/agent-runtime-test.mjs",
     "test:trace-inputs": "npm run build && node ./scripts/trace-inputs-test.mjs",
     "test:metrics": "npm run build && node ./scripts/metrics-test.mjs",
     "test:tool-catalog": "npm run build && node ./scripts/tool-catalog-test.mjs",
