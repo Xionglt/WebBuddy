@@ -56,7 +56,27 @@ try {
       span({ spanType: 'mcp_tool_call', name: 'browser_wait', toolName: 'browser_wait' }),
       span({ spanType: 'screenshot', name: 'page_screenshot' }),
     ].join('\n') + '\n')
-    writeFileSync(eventsJsonl, `${JSON.stringify({ event: 'WEB_HANDOFF_WAITING', data: {} })}\n`)
+    writeFileSync(eventsJsonl, [
+      JSON.stringify({ event: 'WEB_HANDOFF_WAITING', data: {} }),
+      JSON.stringify({
+        event: 'context_selection',
+        data: {
+          kind: 'json',
+          value: {
+            schemaVersion: 'context-selection-metrics/v1',
+            contextBuilds: 1,
+            contextChars: 1234,
+            contextTruncations: 2,
+            recentActionsIncluded: 3,
+            promptSectionChars: {
+              TASK: 120,
+              CURRENT_PAGE_STATE: 420,
+              RECENT_ACTIONS: 300,
+            },
+          },
+        },
+      }),
+    ].join('\n') + '\n')
     writeFileSync(stdoutLog, 'hello stdout')
     writeFileSync(stderrLog, 'warn')
     writeFileSync(runLog, 'event')
@@ -100,6 +120,15 @@ try {
     assert.equal(result.metrics.browserWaits, 1)
     assert.equal(result.metrics.screenshots, 1)
     assert.equal(result.metrics.manualHandoffs, 1)
+    assert.equal(result.metrics.contextBuilds, 1)
+    assert.equal(result.metrics.contextChars, 1234)
+    assert.equal(result.metrics.contextTruncations, 2)
+    assert.equal(result.metrics.recentActionsIncluded, 3)
+    assert.deepEqual(result.metrics.promptSectionChars, {
+      TASK: 120,
+      CURRENT_PAGE_STATE: 420,
+      RECENT_ACTIONS: 300,
+    })
     assert.equal(result.metrics.stdoutBytes, Buffer.byteLength('hello stdout'))
     assert.equal(JSON.parse(readFileSync(result.path, 'utf8')).schemaVersion, 'run-metrics/v1')
   }
@@ -165,6 +194,11 @@ try {
     assert.equal(metrics.actionToolCalls, 0)
     assert.equal(metrics.humanToolCalls, 0)
     assert.equal(metrics.evalToolCalls, 0)
+    assert.equal(metrics.contextBuilds, 0)
+    assert.equal(metrics.contextChars, 0)
+    assert.equal(metrics.contextTruncations, 0)
+    assert.equal(metrics.recentActionsIncluded, 0)
+    assert.deepEqual(metrics.promptSectionChars, {})
     assert.deepEqual(metrics.warnings, ['missing fixture'])
   }
 

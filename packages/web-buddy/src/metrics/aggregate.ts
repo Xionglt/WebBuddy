@@ -3,6 +3,7 @@ import type { ResolvedTraceInputs } from './trace-inputs.js'
 import { emptyRunMetrics, type RunMetrics, type RunMetricsStatus } from './schema.js'
 import { getToolCategory } from '../tools/catalog.js'
 import type { ToolCategory } from '../tools/types.js'
+import type { PromptSectionId } from '../context/types.js'
 
 interface AgentTraceSessionJson {
   sessionId?: string
@@ -37,6 +38,11 @@ interface LegacyTraceStepJson {
   toolCategory?: string
   status?: string
   screenshotPath?: string
+}
+
+interface AgentTraceEventJson {
+  event?: string
+  data?: unknown
 }
 
 export function aggregateMetrics(inputs: ResolvedTraceInputs): RunMetrics {
@@ -131,10 +137,36 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
   const eventsFile = inputs.files.eventsJsonl
   if (!eventsFile) return
 
-  for (const event of readJsonl<Record<string, unknown>>(eventsFile, metrics)) {
+  for (const event of readJsonl<AgentTraceEventJson>(eventsFile, metrics)) {
     metrics.events += 1
     const hay = JSON.stringify(event)
     if (/handoff|manual|WEB_HANDOFF_WAITING/i.test(hay)) metrics.manualHandoffs += 1
+    applyContextSelectionEvent(metrics, event)
+  }
+}
+
+function applyContextSelectionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event !== 'context_selection') return
+
+  const data = tracePayloadValue(event.data)
+  if (!isRecord(data)) {
+    metrics.contextBuilds += 1
+    return
+  }
+  const metricSource = isRecord(data.metrics) ? data.metrics : data
+
+  metrics.contextBuilds += numberValue(metricSource.contextBuilds) ?? 1
+  metrics.contextChars += numberValue(metricSource.contextChars) ?? 0
+  metrics.contextTruncations += numberValue(metricSource.contextTruncations) ?? 0
+  metrics.recentActionsIncluded += numberValue(metricSource.recentActionsIncluded) ?? 0
+
+  const promptSectionChars = metricSource.promptSectionChars
+  if (!isRecord(promptSectionChars)) return
+  for (const [sectionId, rawValue] of Object.entries(promptSectionChars)) {
+    const value = numberValue(rawValue)
+    if (value === undefined) continue
+    const id = sectionId as PromptSectionId
+    metrics.promptSectionChars[id] = (metrics.promptSectionChars[id] ?? 0) + value
   }
 }
 
@@ -265,4 +297,20 @@ function incrementToolCategory(metrics: RunMetrics, category: ToolCategory | und
   if (category === 'action') metrics.actionToolCalls += 1
   if (category === 'human') metrics.humanToolCalls += 1
   if (category === 'eval') metrics.evalToolCalls += 1
+}
+
+function tracePayloadValue(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  if (typeof value.kind === 'string' && Object.prototype.hasOwnProperty.call(value, 'value')) {
+    return value.value
+  }
+  return value
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

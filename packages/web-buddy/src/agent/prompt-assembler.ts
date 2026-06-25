@@ -1,3 +1,5 @@
+import { getActiveTrace } from '../agent-trace/index.js'
+import { measurePromptSections, type ContextSelectionMetrics } from '../context/metrics.js'
 import { contextManager, summarizeResumeProfile } from '../context/context-manager.js'
 import {
   buildPromptSections,
@@ -6,7 +8,7 @@ import {
   SYSTEM_PROMPT_SECTION_IDS,
   USER_PROMPT_SECTION_IDS,
 } from '../context/prompt-sections.js'
-import type { ContextRecentAction, ContextSnapshot } from '../context/types.js'
+import type { ContextRecentAction, ContextSnapshot, PromptSection } from '../context/types.js'
 import type { AgentSafetyMode, PromptAssemblerInput } from './types.js'
 
 export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
@@ -29,6 +31,8 @@ export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
 }
 
 export class PromptAssembler {
+  private readonly promptSectionCache = new WeakMap<ContextSnapshot, PromptSectionCacheEntry>()
+
   async buildLoopContext(
     input: PromptAssemblerInput,
     recentActions: ContextRecentAction[],
@@ -46,12 +50,12 @@ export class PromptAssembler {
   }
 
   renderSystemContext(snapshot: ContextSnapshot): string {
-    const sections = buildPromptSections(snapshot)
+    const sections = this.promptSectionsFor(snapshot)
     return renderPromptSections(selectPromptSections(sections, SYSTEM_PROMPT_SECTION_IDS))
   }
 
   renderUserContext(snapshot: ContextSnapshot): string {
-    const sections = buildPromptSections(snapshot)
+    const sections = this.promptSectionsFor(snapshot)
     return renderPromptSections(selectPromptSections(sections, USER_PROMPT_SECTION_IDS))
   }
 
@@ -71,6 +75,17 @@ export class PromptAssembler {
           'Begin. Call browser_snapshot (or browser_open with the target URL) to see the page.',
         ].join('\n')
     return `${base}\n\n${pageFallback}`
+  }
+
+  private promptSectionsFor(snapshot: ContextSnapshot): PromptSection[] {
+    const cached = this.promptSectionCache.get(snapshot)
+    if (cached) return cached.sections
+
+    const sections = buildPromptSections(snapshot)
+    const metrics = measurePromptSections(sections)
+    this.promptSectionCache.set(snapshot, { sections })
+    recordContextSelection(snapshot, metrics, sections)
+    return sections
   }
 }
 
@@ -94,4 +109,22 @@ export function renderUserContext(snapshot: ContextSnapshot): string {
 
 export function renderInitialUserContext(snapshot: ContextSnapshot, firstView: string): string {
   return promptAssembler.renderInitialUserContext(snapshot, firstView)
+}
+
+interface PromptSectionCacheEntry {
+  sections: PromptSection[]
+}
+
+function recordContextSelection(
+  snapshot: ContextSnapshot,
+  metrics: ContextSelectionMetrics,
+  sections: PromptSection[],
+): void {
+  getActiveTrace()?.recordEvent('context_selection', {
+    schemaVersion: 'context-selection-metrics/v1',
+    sessionId: snapshot.sessionId,
+    snapshotUpdatedAt: snapshot.updatedAt,
+    sectionIds: sections.map((section) => section.id),
+    ...metrics,
+  })
 }

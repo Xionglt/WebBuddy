@@ -1,4 +1,5 @@
 import type { RunSource } from './trace-inputs.js'
+import type { PromptSectionId } from '../context/types.js'
 
 export type RunMetricsStatus = 'completed' | 'blocked' | 'incomplete' | 'failed' | 'unknown'
 export type FailureCategory = 'login' | 'captcha' | 'form' | 'navigation' | 'model' | 'tool' | 'unknown'
@@ -28,6 +29,11 @@ export interface RunMetrics {
   browserWaits: number
   screenshots: number
   manualHandoffs: number
+  contextBuilds: number
+  contextChars: number
+  contextTruncations: number
+  recentActionsIncluded: number
+  promptSectionChars: Partial<Record<PromptSectionId, number>>
   spans: number
   events: number
   legacySteps: number
@@ -75,6 +81,11 @@ export function emptyRunMetrics(input: {
     browserWaits: 0,
     screenshots: 0,
     manualHandoffs: 0,
+    contextBuilds: 0,
+    contextChars: 0,
+    contextTruncations: 0,
+    recentActionsIncluded: 0,
+    promptSectionChars: {},
     spans: 0,
     events: 0,
     legacySteps: 0,
