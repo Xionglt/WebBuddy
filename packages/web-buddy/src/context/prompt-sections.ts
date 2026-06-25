@@ -113,11 +113,13 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
 }
 
 function renderSafetyRules(notes: string[], blockers: string[]): string {
-  const lines = notes.length > 0 ? notes.map((note) => `- ${note}`) : ['- No additional safety notes were supplied.']
+  const lines: string[] = []
   if (blockers.length > 0) {
-    lines.push('', 'Current blockers:')
+    lines.push('Current blockers:')
     lines.push(...blockers.map((blocker) => `- ${blocker}`))
+    lines.push('')
   }
+  lines.push(...(notes.length > 0 ? notes.map((note) => `- ${note}`) : ['- No additional safety notes were supplied.']))
   return lines.join('\n')
 }
 
@@ -150,17 +152,17 @@ function renderFormState(form: FormState | undefined, freshness: ContextFreshnes
 
   return normalizeLines([
     `schemaVersion: ${form.schemaVersion}`,
+    `missingRequiredCount: ${form.missingRequired.length}`,
+    'missingRequired:',
+    renderFieldList(form.missingRequired),
+    '',
     `url: ${form.url || '(unknown)'}`,
     `fieldCount: ${form.fields.length}`,
     `filledFieldsCount: ${form.filledFields.length}`,
-    `missingRequiredCount: ${form.missingRequired.length}`,
     renderFreshnessCue('form', freshness),
     '',
     'filledFields:',
     renderFieldList(form.filledFields),
-    '',
-    'missingRequired:',
-    renderFieldList(form.missingRequired),
     '',
     'submitCandidates:',
     renderSubmitCandidates(form.submitCandidates),
@@ -245,7 +247,7 @@ function renderUploadHints(hints: UploadHint[]): string {
 
 function renderRecentActions(actions: ContextRecentAction[]): string {
   if (actions.length === 0) return '(none yet)'
-  return actions.map((action) => {
+  return prioritizeRecentActions(actions).map((action) => {
     const parts = [
       `step=${action.step}`,
       `tool=${action.toolName}`,
@@ -257,6 +259,37 @@ function renderRecentActions(actions: ContextRecentAction[]): string {
     ].filter(Boolean)
     return `- ${parts.join(' | ')}`
   }).join('\n')
+}
+
+function prioritizeRecentActions(actions: ContextRecentAction[]): ContextRecentAction[] {
+  return [...actions].sort((a, b) => {
+    const priorityDelta = recentActionPriority(b) - recentActionPriority(a)
+    if (priorityDelta !== 0) return priorityDelta
+    return b.step - a.step
+  })
+}
+
+function recentActionPriority(action: ContextRecentAction): number {
+  let priority = 0
+  if (action.status === 'blocked' || action.status === 'error') priority += 100
+  else if (action.status === 'warn') priority += 50
+  priority += riskPriority(action.risk)
+  return priority
+}
+
+function riskPriority(risk: ContextRecentAction['risk']): number {
+  switch (risk) {
+    case 'L4':
+      return 40
+    case 'L3':
+      return 30
+    case 'L2':
+      return 20
+    case 'L1':
+      return 10
+    default:
+      return 0
+  }
 }
 
 function fitSectionsToTotal(sections: PromptSection[], totalMaxChars?: number): PromptSection[] {

@@ -82,7 +82,10 @@ export class PromptAssembler {
     if (cached) return cached.sections
 
     const sections = buildPromptSections(snapshot)
-    const metrics = measurePromptSections(sections)
+    const metrics = measurePromptSections(sections, {
+      pageStateAgeMs: snapshot.freshness.pageStateAgeMs,
+      formStateAgeMs: snapshot.freshness.formStateAgeMs,
+    })
     this.promptSectionCache.set(snapshot, { sections })
     recordContextSelection(snapshot, metrics, sections)
     return sections

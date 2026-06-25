@@ -68,10 +68,32 @@ try {
             contextChars: 1234,
             contextTruncations: 2,
             recentActionsIncluded: 3,
+            pageStateAgeMs: 2500,
+            formStateAgeMs: 7000,
             promptSectionChars: {
               TASK: 120,
               CURRENT_PAGE_STATE: 420,
               RECENT_ACTIONS: 300,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        event: 'context_selection',
+        data: {
+          kind: 'json',
+          value: {
+            schemaVersion: 'context-selection-metrics/v1',
+            metrics: {
+              contextChars: 100,
+              contextTruncations: 1,
+              recentActionsIncluded: 1,
+              pageStateAgeMs: 5000,
+              formStateAgeMs: 6000,
+              promptSectionChars: {
+                TASK: 30,
+                CURRENT_FORM_STATE: 45,
+              },
             },
           },
         },
@@ -120,13 +142,16 @@ try {
     assert.equal(result.metrics.browserWaits, 1)
     assert.equal(result.metrics.screenshots, 1)
     assert.equal(result.metrics.manualHandoffs, 1)
-    assert.equal(result.metrics.contextBuilds, 1)
-    assert.equal(result.metrics.contextChars, 1234)
-    assert.equal(result.metrics.contextTruncations, 2)
-    assert.equal(result.metrics.recentActionsIncluded, 3)
+    assert.equal(result.metrics.contextBuilds, 2)
+    assert.equal(result.metrics.contextChars, 1334)
+    assert.equal(result.metrics.contextTruncations, 3)
+    assert.equal(result.metrics.recentActionsIncluded, 4)
+    assert.equal(result.metrics.pageStateAgeMs, 5000)
+    assert.equal(result.metrics.formStateAgeMs, 7000)
     assert.deepEqual(result.metrics.promptSectionChars, {
-      TASK: 120,
+      TASK: 150,
       CURRENT_PAGE_STATE: 420,
+      CURRENT_FORM_STATE: 45,
       RECENT_ACTIONS: 300,
     })
     assert.equal(result.metrics.stdoutBytes, Buffer.byteLength('hello stdout'))
@@ -198,6 +223,8 @@ try {
     assert.equal(metrics.contextChars, 0)
     assert.equal(metrics.contextTruncations, 0)
     assert.equal(metrics.recentActionsIncluded, 0)
+    assert.equal(metrics.pageStateAgeMs, 0)
+    assert.equal(metrics.formStateAgeMs, 0)
     assert.deepEqual(metrics.promptSectionChars, {})
     assert.deepEqual(metrics.warnings, ['missing fixture'])
   }

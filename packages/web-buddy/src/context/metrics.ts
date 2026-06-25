@@ -6,11 +6,15 @@ export interface ContextSelectionMetrics {
   contextChars: number
   contextTruncations: number
   recentActionsIncluded: number
+  pageStateAgeMs?: number
+  formStateAgeMs?: number
   promptSectionChars: Partial<Record<PromptSectionId, number>>
 }
 
 export interface MeasurePromptSectionsOptions {
   contextBuilds?: number
+  pageStateAgeMs?: number
+  formStateAgeMs?: number
 }
 
 export function measurePromptSections(
@@ -34,6 +38,8 @@ export function measurePromptSections(
     contextChars: renderedPromptChars(sections),
     contextTruncations,
     recentActionsIncluded,
+    ...(finiteNumber(options.pageStateAgeMs) === undefined ? {} : { pageStateAgeMs: options.pageStateAgeMs }),
+    ...(finiteNumber(options.formStateAgeMs) === undefined ? {} : { formStateAgeMs: options.formStateAgeMs }),
     promptSectionChars,
   }
 }
@@ -51,4 +57,8 @@ function isTruncated(content: string): boolean {
 
 function countRecentActions(content: string): number {
   return content.match(/^\s*-\s+step=/gm)?.length ?? 0
+}
+
+function finiteNumber(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }

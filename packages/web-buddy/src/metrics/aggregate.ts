@@ -159,6 +159,11 @@ function applyContextSelectionEvent(metrics: RunMetrics, event: AgentTraceEventJ
   metrics.contextChars += numberValue(metricSource.contextChars) ?? 0
   metrics.contextTruncations += numberValue(metricSource.contextTruncations) ?? 0
   metrics.recentActionsIncluded += numberValue(metricSource.recentActionsIncluded) ?? 0
+  const freshness = isRecord(metricSource.freshness) ? metricSource.freshness : undefined
+  const pageStateAgeMs = numberValue(metricSource.pageStateAgeMs) ?? numberValue(freshness?.pageStateAgeMs)
+  const formStateAgeMs = numberValue(metricSource.formStateAgeMs) ?? numberValue(freshness?.formStateAgeMs)
+  if (pageStateAgeMs !== undefined) metrics.pageStateAgeMs = Math.max(metrics.pageStateAgeMs, pageStateAgeMs)
+  if (formStateAgeMs !== undefined) metrics.formStateAgeMs = Math.max(metrics.formStateAgeMs, formStateAgeMs)
 
   const promptSectionChars = metricSource.promptSectionChars
   if (!isRecord(promptSectionChars)) return
