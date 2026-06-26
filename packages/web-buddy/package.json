@@ -43,6 +43,7 @@
     "test:trace-inputs": "npm run build && node ./scripts/trace-inputs-test.mjs",
     "test:metrics": "npm run build && node ./scripts/metrics-test.mjs",
     "test:tool-execution": "npm run build && node ./scripts/tool-execution-test.mjs",
+    "test:policy": "npm run build && node ./scripts/policy-decision-test.mjs",
     "test:tool-catalog": "npm run build && node ./scripts/tool-catalog-test.mjs",
     "test:observation": "npm run build && node ./scripts/observation-test.mjs",
     "test:context": "npm run build && node ./scripts/context-manager-test.mjs",
