@@ -48,6 +48,8 @@
     "test:observation": "npm run build && node ./scripts/observation-test.mjs",
     "test:context": "npm run build && node ./scripts/context-manager-test.mjs",
     "test:prompt-sections": "npm run build && node ./scripts/prompt-sections-test.mjs",
+    "test:workflow": "npm run build && node ./scripts/workflow-state-test.mjs && node ./scripts/workflow-transition-test.mjs",
+    "test:agent-runtime-workflow": "npm run build && node ./scripts/agent-runtime-workflow-test.mjs",
     "test:alibaba-probe": "node ./scripts/alibaba-application-probe.mjs",
     "benchmark:simple": "npm run build && node ./scripts/benchmark-simple.mjs",
     "benchmark:complex": "npm run build && node ./scripts/benchmark-complex.mjs",

@@ -49,6 +49,7 @@ export class PromptAssembler {
       blockers,
       extraContext: input.extraContext,
       taskState: input.taskState ?? createDefaultTaskState({ goal: input.goal, updatedAt }),
+      workflowState: input.workflowState,
       updatedAt,
     })
   }

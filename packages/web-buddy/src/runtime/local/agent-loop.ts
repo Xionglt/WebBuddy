@@ -13,6 +13,8 @@ import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
 import type { ResumeProfile } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
 import { ToolExecutionBoundary } from '../../tools/tool-execution.js'
+import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
+import { transitionWorkflowState } from '../../workflow/workflow-transition.js'
 import { pageView } from './page-view.js'
 import { ToolRegistry, type ToolContext } from './tool-registry.js'
 
@@ -44,6 +46,7 @@ export interface AgentLoopResult {
   done: boolean
   blocked: boolean
   summary: string
+  workflowState?: WorkflowState
 }
 
 const DEFAULT_MAX_STEPS = 16
@@ -82,9 +85,26 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let done = false
   let blocked = false
   let summary = 'no summary'
+  let workflowState = createInitialWorkflowState()
   const recentActions: ContextRecentAction[] = []
   const blockers: string[] = []
-  let latestContext = await buildLoopContext(input, recentActions, blockers)
+  let latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+  const initialWorkflow = transitionWorkflowState({
+    previous: workflowState,
+    currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
+    page: latestContext.page,
+    form: latestContext.form,
+  })
+  workflowState = initialWorkflow.state
+  if (initialWorkflow.changed) {
+    latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+  }
+  const initialHandoffSummary = workflowHandoffSummary(workflowState)
+  if (initialHandoffSummary) {
+    emit('done', initialHandoffSummary, step)
+    ctx.trace.record({ phase: 'agent_loop', action: initialHandoffSummary, status: 'blocked' })
+    return { steps: step, toolCalls, done: true, blocked: true, summary: initialHandoffSummary, workflowState }
+  }
   const messages: ChatMessage[] = [
     { role: 'system', content: renderSystemContext(latestContext) },
     { role: 'user', content: renderInitialUserContext(latestContext, firstView) },
@@ -98,7 +118,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     } catch (error) {
       emit('error', `LLM call failed: ${(error as Error).message}`, step)
       ctx.trace.record({ phase: 'agent_loop', action: `LLM error: ${(error as Error).message}`, status: 'error' })
-      return { steps: step, toolCalls, done: false, blocked: true, summary: `LLM error: ${(error as Error).message}` }
+      return {
+        steps: step,
+        toolCalls,
+        done: false,
+        blocked: true,
+        summary: `LLM error: ${(error as Error).message}`,
+        workflowState,
+      }
     }
 
     if (completion.content.trim()) {
@@ -140,6 +167,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         currentUrl,
         refLabel: call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined,
         freshness: latestContext.freshness,
+        workflowState,
       })
 
       // Gate risky actions before running.
@@ -160,6 +188,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           observation: policyDecision.reason,
           status: decision === 'approve' ? 'ok' : 'blocked',
         })
+        workflowState = transitionWorkflowState({
+          previous: workflowState,
+          currentUrl,
+          page: latestContext.page,
+          form: latestContext.form,
+          policyDecision,
+          gateKind: kind,
+          gateDecision: decision,
+        }).state
         emit('gate', `[${kind}] ${call.name}(${argBrief}) → ${decision}`, step)
         if (kind === 'final_submit') {
           const note = `BLOCKED by final-submit safety gate (${decision}). Do not retry this action; call agent_done and hand the final submission to the human.`
@@ -176,6 +213,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           blocked = true
           done = true
           summary = `Final submit requires manual takeover (gate: ${decision}).`
+          workflowState = transitionWorkflowState({
+            previous: workflowState,
+            currentUrl,
+            page: latestContext.page,
+            form: latestContext.form,
+            policyDecision,
+            gateKind: kind,
+            gateDecision: decision,
+            agentDoneBlocked: true,
+          }).state
           break
         }
         if (decision !== 'approve') {
@@ -194,6 +241,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             blocked = true
             done = true
             summary = `Human ${decision} the ${kind} step.`
+            workflowState = transitionWorkflowState({
+              previous: workflowState,
+              currentUrl,
+              page: latestContext.page,
+              form: latestContext.form,
+              policyDecision,
+              gateKind: kind,
+              gateDecision: decision,
+              agentDoneBlocked: true,
+            }).state
           }
           continue
         }
@@ -261,6 +318,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         blocked = Boolean((result.data as { blocked?: boolean } | undefined)?.blocked)
         summary = (call.arguments.summary as string) || result.observation
       }
+      workflowState = transitionWorkflowState({
+        previous: workflowState,
+        currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
+        page: latestContext.page,
+        form: latestContext.form,
+        toolName: call.name,
+        toolResult: result,
+        policyDecision,
+        ...(result.done ? { agentDoneBlocked: blocked } : {}),
+      }).state
       rememberRecentAction(recentActions, {
         step,
         toolName: call.name,
@@ -283,7 +350,34 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
 
     if (!done) {
-      latestContext = await buildLoopContext(input, recentActions, blockers)
+      latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+      const contextWorkflow = transitionWorkflowState({
+        previous: workflowState,
+        currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
+        page: latestContext.page,
+        form: latestContext.form,
+      })
+      workflowState = contextWorkflow.state
+      if (contextWorkflow.changed) {
+        latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+      }
+      const handoffSummary = workflowHandoffSummary(workflowState)
+      if (handoffSummary) {
+        done = true
+        blocked = true
+        summary = handoffSummary
+        blockers.push(handoffSummary)
+        rememberRecentAction(recentActions, {
+          step,
+          toolName: 'workflow_state',
+          argumentsSummary: `phase=${workflowState.phase}`,
+          status: 'blocked',
+          observation: handoffSummary,
+        })
+        emit('done', handoffSummary, step)
+        ctx.trace.record({ phase: 'agent_loop', action: handoffSummary, status: 'blocked' })
+        break
+      }
       messages.push({ role: 'user', content: `UPDATED_CONTEXT\n${renderUserContext(latestContext)}` })
     }
 
@@ -296,7 +390,41 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     ctx.trace.record({ phase: 'agent_loop', action: summary, status: 'warn' })
   }
 
-  return { steps: step, toolCalls, done, blocked, summary }
+  return { steps: step, toolCalls, done, blocked, summary, workflowState }
+}
+
+function buildLoopContextWithWorkflow(
+  input: AgentLoopInput,
+  workflowState: WorkflowState,
+  recentActions: ContextRecentAction[],
+  blockers: string[],
+) {
+  return buildLoopContext(
+    {
+      goal: input.goal,
+      resume: input.resume,
+      ctx: input.ctx,
+      extraContext: input.extraContext,
+      safetyMode: input.safetyMode,
+      workflowState,
+    },
+    recentActions,
+    blockersWithWorkflow(blockers, workflowState),
+  )
+}
+
+function blockersWithWorkflow(blockers: string[], workflowState: WorkflowState): string[] {
+  const next = [...blockers]
+  if (workflowState.humanHandoffRequired && workflowState.blocker && !next.includes(workflowState.blocker)) {
+    next.push(workflowState.blocker)
+  }
+  return next
+}
+
+function workflowHandoffSummary(workflowState: WorkflowState): string | undefined {
+  if (workflowState.phase === 'login_required') return 'Human login required before continuing.'
+  if (workflowState.phase === 'captcha_required') return 'Human verification required before continuing.'
+  return undefined
 }
 
 function briefArgs(name: string, args: Record<string, unknown>): string {

@@ -1,6 +1,7 @@
 import type { ContextFreshness } from '../context/types.js'
 import type { GateDecision, GateKind } from '../sdk/human.js'
 import type { RiskLevel } from '../sdk/trace.js'
+import type { WorkflowPhase, WorkflowState } from '../workflow/workflow-state.js'
 
 export type PolicyAction = 'allow' | 'gate' | 'block' | 'auto_confirm'
 
@@ -30,10 +31,14 @@ export interface ToolPolicyInput {
   currentUrl?: string
   refLabel?: string
   freshness?: PolicyFreshnessSummary | ContextFreshness
+  workflowState?: WorkflowState
+  workflowPhase?: WorkflowPhase
 }
 
 const FINAL_ACTION_TEXT =
   /submit|投递|提交|申请|递交|deliver|apply|send|confirm|确认|pay|支付|publish|发布/i
+const APPLY_ENTRY_TEXT = /apply|投递|投递简历|立即投递|申请职位|start application|开始申请/i
+const REVIEW_SUBMIT_TEXT = /submit|提交|提交申请|确认提交|confirm|确认|pay|支付|publish|发布|send|递交/i
 
 export function decideToolPolicy(input: ToolPolicyInput): PolicyDecision {
   const riskLevel = policyRiskLevel(input.risk)
@@ -71,9 +76,14 @@ export function decideToolPolicy(input: ToolPolicyInput): PolicyDecision {
   }
 }
 
-export function gateKindForTool(input: Pick<ToolPolicyInput, 'toolName' | 'args' | 'currentUrl' | 'refLabel'>): GateKind {
+export function gateKindForTool(
+  input: Pick<ToolPolicyInput, 'toolName' | 'args' | 'currentUrl' | 'refLabel' | 'workflowState' | 'workflowPhase'>,
+): GateKind {
+  const phase = workflowPhaseFor(input)
+  if (phase === 'login_required') return 'login'
+  if (phase === 'captcha_required') return 'captcha'
   if (input.toolName === 'browser_click') return gateKindForClick(input)
-  if (input.toolName === 'browser_click_text') return gateKindForClickText(input.args)
+  if (input.toolName === 'browser_click_text') return gateKindForClickText(input.args, phase)
   return 'high_risk_action'
 }
 
@@ -92,8 +102,13 @@ export function requiresHumanGate(risk: RiskLevel | undefined): boolean {
   return risk === 'L3' || risk === 'L4'
 }
 
-function gateKindForClick(input: Pick<ToolPolicyInput, 'args' | 'currentUrl' | 'refLabel'>): GateKind {
+function gateKindForClick(
+  input: Pick<ToolPolicyInput, 'args' | 'currentUrl' | 'refLabel' | 'workflowState' | 'workflowPhase'>,
+): GateKind {
   const label = String(input.refLabel ?? '')
+  const phase = workflowPhaseFor(input)
+  const workflowKind = workflowGateKindForText(label, phase)
+  if (workflowKind) return workflowKind
   const currentUrl = input.currentUrl ?? ''
   const isAlibabaDetailEntry =
     /talent-holding\.alibaba\.com\/off-campus\/position-detail/i.test(currentUrl) &&
@@ -102,9 +117,28 @@ function gateKindForClick(input: Pick<ToolPolicyInput, 'args' | 'currentUrl' | '
   return FINAL_ACTION_TEXT.test(label) ? 'final_submit' : 'high_risk_action'
 }
 
-function gateKindForClickText(args: Record<string, unknown>): GateKind {
+function gateKindForClickText(args: Record<string, unknown>, phase: WorkflowPhase | undefined): GateKind {
   const text = String(args.text ?? '')
+  const workflowKind = workflowGateKindForText(text, phase)
+  if (workflowKind) return workflowKind
   return FINAL_ACTION_TEXT.test(text) ? 'final_submit' : 'high_risk_action'
+}
+
+function workflowGateKindForText(text: string, phase: WorkflowPhase | undefined): GateKind | undefined {
+  if (!phase) return undefined
+  if ((phase === 'job_detail' || phase === 'entering_application') && APPLY_ENTRY_TEXT.test(text)) {
+    return 'high_risk_action'
+  }
+  if ((phase === 'reviewing' || phase === 'ready_for_final_submit') && REVIEW_SUBMIT_TEXT.test(text)) {
+    return 'final_submit'
+  }
+  if (phase === 'login_required') return 'login'
+  if (phase === 'captcha_required') return 'captcha'
+  return undefined
+}
+
+function workflowPhaseFor(input: Pick<ToolPolicyInput, 'workflowState' | 'workflowPhase'>): WorkflowPhase | undefined {
+  return input.workflowPhase ?? input.workflowState?.phase
 }
 
 function isAutoConfirmClick(toolName: string): boolean {
