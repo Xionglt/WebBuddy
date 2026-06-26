@@ -6,13 +6,15 @@ import {
   renderUserContext,
 } from '../../agent/prompt-assembler.js'
 import type { ContextRecentAction } from '../../context/types.js'
+import { decideToolPolicy, shouldStopAfterGateDecision, type PolicyDecision } from '../../policy/agent-policy.js'
 import { sessionManager } from '../../session/manager.js'
 import type { HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
 import type { ResumeProfile } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
+import { ToolExecutionBoundary } from '../../tools/tool-execution.js'
 import { pageView } from './page-view.js'
-import { ToolRegistry, requiresGate, type ToolContext } from './tool-registry.js'
+import { ToolRegistry, type ToolContext } from './tool-registry.js'
 
 export interface AgentEvent {
   step: number
@@ -46,24 +48,6 @@ export interface AgentLoopResult {
 
 const DEFAULT_MAX_STEPS = 16
 
-/** Decide which gate kind a risky click maps to (submit vs generic high-risk). */
-function gateKindForClick(args: Record<string, unknown>, ctx: ToolContext): 'final_submit' | 'high_risk_action' {
-  const ref = String(args.ref ?? '')
-  const stored = sessionManager.get(ctx.sessionId)?.latestSnapshot?.refMap.get(ref)
-  const label = [stored?.name, stored?.text].filter(Boolean).join(' ')
-  const currentUrl = sessionManager.get(ctx.sessionId)?.page.url() ?? ''
-  const isAlibabaDetailEntry =
-    /talent-holding\.alibaba\.com\/off-campus\/position-detail/i.test(currentUrl) &&
-    /投递简历|立即投递|apply/i.test(label)
-  if (isAlibabaDetailEntry) return 'high_risk_action'
-  return /submit|投递|提交|申请|递交|deliver|apply|send/i.test(label) ? 'final_submit' : 'high_risk_action'
-}
-
-function gateKindForClickText(args: Record<string, unknown>): 'final_submit' | 'high_risk_action' {
-  const text = String(args.text ?? '')
-  return /submit|投递|提交|申请|递交|deliver|apply|send|confirm|确认|pay|支付/i.test(text) ? 'final_submit' : 'high_risk_action'
-}
-
 /**
  * The generic ReAct-style loop: the LLM picks browser tools itself, we execute
  * them (gating risky ones), feed observations back, until the model calls
@@ -78,6 +62,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     onEvent?.({ step, level, message })
 
   const tools = registry.toOpenAITools()
+  const toolExecution = new ToolExecutionBoundary(registry)
 
   // Snapshot the already-open page so the model starts from the real form
   // instead of guessing a URL to open. (The orchestrator opens the target first.)
@@ -99,10 +84,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let summary = 'no summary'
   const recentActions: ContextRecentAction[] = []
   const blockers: string[] = []
-  const initialContext = await buildLoopContext(input, recentActions, blockers)
+  let latestContext = await buildLoopContext(input, recentActions, blockers)
   const messages: ChatMessage[] = [
-    { role: 'system', content: renderSystemContext(initialContext) },
-    { role: 'user', content: renderInitialUserContext(initialContext, firstView) },
+    { role: 'system', content: renderSystemContext(latestContext) },
+    { role: 'user', content: renderInitialUserContext(latestContext, firstView) },
   ]
 
   while (step < maxSteps) {
@@ -146,32 +131,39 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const toolCategory = tool?.category
       const risk = registry.resolveRisk(call.name, call.arguments, ctx)
       const argBrief = briefArgs(call.name, call.arguments)
+      const currentUrl = sessionManager.get(ctx.sessionId)?.page.url()
+      const policyDecision = decideToolPolicy({
+        toolName: call.name,
+        args: call.arguments,
+        risk,
+        safetyMode,
+        currentUrl,
+        refLabel: call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined,
+        freshness: latestContext.freshness,
+      })
 
       // Gate risky actions before running.
-      if (requiresGate(risk) && safetyMode === 'raw' && (call.name === 'browser_click' || call.name === 'browser_click_text')) {
+      if (policyDecision.action === 'auto_confirm') {
         call.arguments.confirmed = true
-      } else if (requiresGate(risk)) {
-        const kind =
-          call.name === 'browser_click'
-            ? gateKindForClick(call.arguments, ctx)
-            : call.name === 'browser_click_text'
-              ? gateKindForClickText(call.arguments)
-              : 'high_risk_action'
+      } else if (policyDecision.action === 'gate') {
+        const kind = policyDecision.gateKind ?? 'high_risk_action'
         const decision = await gate.confirm(kind, `Agent wants to ${call.name} (${argBrief})`, {
-          url: sessionManager.get(ctx.sessionId)?.page.url(),
+          url: currentUrl,
           risk,
+          detail: policyDecision.requiresFreshContext ? policyDecision.reason : undefined,
         })
         ctx.trace.record({
           phase: 'agent_loop',
           action: `GATE [${kind}] ${call.name}(${argBrief}) → ${decision}`,
-          url: sessionManager.get(ctx.sessionId)?.page.url(),
+          url: currentUrl,
           risk,
+          observation: policyDecision.reason,
           status: decision === 'approve' ? 'ok' : 'blocked',
         })
         emit('gate', `[${kind}] ${call.name}(${argBrief}) → ${decision}`, step)
         if (kind === 'final_submit') {
           const note = `BLOCKED by final-submit safety gate (${decision}). Do not retry this action; call agent_done and hand the final submission to the human.`
-          messages.push(toolMessage(call.id, note))
+          messages.push(toolMessage(call.id, noteWithPolicy(note, policyDecision)))
           blockers.push(`final_submit gate stopped ${call.name}(${argBrief}) with decision=${decision}`)
           rememberRecentAction(recentActions, {
             step,
@@ -179,7 +171,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             argumentsSummary: argBrief,
             status: 'blocked',
             risk,
-            observation: note,
+            observation: noteWithPolicy(note, policyDecision),
           })
           blocked = true
           done = true
@@ -188,7 +180,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         }
         if (decision !== 'approve') {
           const note = `BLOCKED by human gate (${decision}). Do not retry this action; call agent_done if you cannot proceed.`
-          messages.push(toolMessage(call.id, note))
+          messages.push(toolMessage(call.id, noteWithPolicy(note, policyDecision)))
           blockers.push(`${kind} gate stopped ${call.name}(${argBrief}) with decision=${decision}`)
           rememberRecentAction(recentActions, {
             step,
@@ -196,9 +188,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             argumentsSummary: argBrief,
             status: 'blocked',
             risk,
-            observation: note,
+            observation: noteWithPolicy(note, policyDecision),
           })
-          if (decision === 'takeover') {
+          if (shouldStopAfterGateDecision(decision)) {
             blocked = true
             done = true
             summary = `Human ${decision} the ${kind} step.`
@@ -226,7 +218,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })
       let result
       try {
-        result = await registry.run(call.name, call.arguments, ctx)
+        const execution = await toolExecution.execute({
+          toolName: call.name,
+          args: call.arguments,
+          ctx,
+          metadata: {
+            step,
+            riskLevel: policyDecision.riskLevel,
+            category: toolCategory,
+            argBrief,
+          },
+        })
+        result = execution.result
         toolSpan?.end({
           status: result.observation.startsWith('FAILED') ? 'failed' : 'success',
           output: result,
@@ -280,8 +283,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
 
     if (!done) {
-      const updatedContext = await buildLoopContext(input, recentActions, blockers)
-      messages.push({ role: 'user', content: `UPDATED_CONTEXT\n${renderUserContext(updatedContext)}` })
+      latestContext = await buildLoopContext(input, recentActions, blockers)
+      messages.push({ role: 'user', content: `UPDATED_CONTEXT\n${renderUserContext(latestContext)}` })
     }
 
     if (done) break
@@ -304,6 +307,17 @@ function briefArgs(name: string, args: Record<string, unknown>): string {
     parts.push(`${k}=${s}`)
   }
   return parts.length ? parts.join(', ') : '(no args)'
+}
+
+function labelForClick(args: Record<string, unknown>, ctx: ToolContext): string {
+  const ref = String(args.ref ?? '')
+  const stored = sessionManager.get(ctx.sessionId)?.latestSnapshot?.refMap.get(ref)
+  return [stored?.name, stored?.text].filter(Boolean).join(' ')
+}
+
+function noteWithPolicy(note: string, decision: PolicyDecision): string {
+  if (!decision.reason.toLowerCase().includes('stale')) return note
+  return `${note}\nPolicy: ${decision.reason}`
 }
 
 function rememberRecentAction(
