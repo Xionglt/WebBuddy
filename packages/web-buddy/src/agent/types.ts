@@ -4,6 +4,7 @@ import type { ChatCompletion, ChatMessage, ChatOptions } from '../sdk/llm.js'
 import type { ResumeProfile } from '../sdk/resume.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
 import type { TaskState } from '../task/task-state.js'
+import type { WorkflowState } from '../workflow/workflow-state.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
@@ -47,6 +48,7 @@ export interface AgentRuntimeResult {
   blocked: boolean
   summary: string
   stopReason: AgentStopReason
+  workflowState?: WorkflowState
 }
 
 export interface PromptAssemblerInput {
@@ -55,6 +57,7 @@ export interface PromptAssemblerInput {
   ctx: Pick<ToolContext, 'sessionId'>
   extraContext?: string
   taskState?: TaskState
+  workflowState?: WorkflowState
   safetyMode?: AgentSafetyMode
 }
 

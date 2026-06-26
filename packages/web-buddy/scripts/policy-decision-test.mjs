@@ -19,6 +19,40 @@ assert.equal(finalSubmit.gateKind, 'final_submit')
 assert.equal(finalSubmit.requiresFreshContext, true)
 assert.match(finalSubmit.reason, /final-submit/i)
 
+const applyEntry = decideToolPolicy({
+  toolName: 'browser_click_text',
+  args: { text: 'Apply' },
+  risk: 'L3',
+  safetyMode: 'guarded',
+  workflowPhase: 'job_detail',
+})
+assert.equal(applyEntry.action, 'gate')
+assert.equal(applyEntry.gateKind, 'high_risk_action')
+
+const applicationEntry = decideToolPolicy({
+  toolName: 'browser_click_text',
+  args: { text: '立即投递' },
+  risk: 'L3',
+  safetyMode: 'guarded',
+  workflowState: {
+    schemaVersion: 'workflow-state/v1',
+    phase: 'entering_application',
+    confidence: 'medium',
+    reason: 'Opening application flow.',
+    updatedAt: '2026-06-26T00:00:00.000Z',
+  },
+})
+assert.equal(applicationEntry.gateKind, 'high_risk_action')
+
+const workflowFinalSubmit = decideToolPolicy({
+  toolName: 'browser_click_text',
+  args: { text: 'Submit application' },
+  risk: 'L3',
+  safetyMode: 'guarded',
+  workflowPhase: 'ready_for_final_submit',
+})
+assert.equal(workflowFinalSubmit.gateKind, 'final_submit')
+
 const ordinaryClick = decideToolPolicy({
   toolName: 'browser_click_text',
   args: { text: 'Add another experience' },

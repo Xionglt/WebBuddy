@@ -50,6 +50,13 @@ try {
     completionCriteria: ['Required fields are filled', 'Final submit is not clicked'],
     updatedAt: '2026-06-25T00:00:30.000Z',
   }
+  const workflowState = {
+    schemaVersion: 'workflow-state/v1',
+    phase: 'filling_application',
+    confidence: 'medium',
+    reason: 'Application fields are present.',
+    updatedAt: '2026-06-25T00:00:30.000Z',
+  }
 
   const provider = {
     getPageState(sessionId) {
@@ -75,6 +82,7 @@ try {
     safetyNotes: ['Do not submit final applications.'],
     blockers: ['captcha not present'],
     taskState,
+    workflowState,
     updatedAt: '2026-06-25T00:01:00.000Z',
   })
 
@@ -88,6 +96,7 @@ try {
   assert.equal(snapshot.safetyNotes[0], 'Do not submit final applications.')
   assert.equal(snapshot.blockers[0], 'captcha not present')
   assert.deepEqual(snapshot.taskState, taskState)
+  assert.deepEqual(snapshot.workflowState, workflowState)
   assert.equal(snapshot.freshness.staleAfterMs, 30_000)
   assert.equal(snapshot.freshness.pageStateUpdatedAt, pageState.updatedAt)
   assert.equal(snapshot.freshness.formStateUpdatedAt, formState.updatedAt)
