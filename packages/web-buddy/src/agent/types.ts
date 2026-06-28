@@ -1,14 +1,17 @@
 import type { ContextRecentAction } from '../context/types.js'
+import type { KernelEvent } from '../kernel/kernel-events.js'
+import type { AgentRunController } from '../kernel/run-controller.js'
 import type { HumanGate } from '../sdk/human.js'
 import type { ChatCompletion, ChatMessage, ChatOptions } from '../sdk/llm.js'
 import type { ResumeProfile } from '../sdk/resume.js'
+import type { SessionRecorder } from '../session/index.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
 import type { TaskState } from '../task/task-state.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
-export type AgentStopReason = 'agent_done' | 'blocked' | 'step_budget' | 'llm_error' | 'unknown'
+export type AgentStopReason = 'agent_done' | 'blocked' | 'step_budget' | 'llm_error' | 'aborted' | 'unknown'
 
 export type AgentRuntimeEventLevel = 'think' | 'act' | 'observe' | 'gate' | 'warn' | 'error' | 'done'
 
@@ -33,10 +36,15 @@ export interface AgentRuntimeInput {
   gate: HumanGate
   maxSteps?: number
   onEvent?: (event: AgentRuntimeEvent) => void
+  onKernelEvent?: (event: KernelEvent) => void
   /** Extra context lines (e.g. the matched job title) appended to the system prompt. */
   extraContext?: string
   /** `raw` removes job-application workflow guardrails so the model drives the browser directly. */
   safetyMode?: AgentSafetyMode
+  /** Optional append-only session recorder for resumable runtime state. */
+  session?: SessionRecorder
+  /** Optional kernel-level run controller for abort/pause/status integration. */
+  controller?: AgentRunController
 }
 
 export interface AgentRuntimeResult {

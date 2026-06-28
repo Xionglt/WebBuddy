@@ -141,8 +141,34 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
     metrics.events += 1
     const hay = JSON.stringify(event)
     if (/handoff|manual|WEB_HANDOFF_WAITING/i.test(hay)) metrics.manualHandoffs += 1
+    applyPolicyDecisionEvent(metrics, event)
     applyContextSelectionEvent(metrics, event)
   }
+}
+
+function applyPolicyDecisionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event !== 'policy_decision') return
+
+  const data = tracePayloadValue(event.data)
+  if (!isRecord(data)) {
+    metrics.policy.decisions += 1
+    return
+  }
+
+  metrics.policy.decisions += 1
+  const action = stringValue(data.action)
+  if (action === 'allow') metrics.policy.allows += 1
+  else if (action === 'gate') metrics.policy.gates += 1
+  else if (action === 'block') {
+    metrics.policy.blocks += 1
+    incrementCount(metrics.policy.blockedReasonCounts, stringValue(data.reason) ?? 'unknown')
+  } else if (action === 'auto_confirm') metrics.policy.autoConfirms += 1
+
+  const gateKind = stringValue(data.gateKind)
+  if (gateKind) incrementCount(metrics.policy.gateKindCounts, gateKind)
+
+  const policyCode = stringValue(data.policyCode)
+  if (policyCode) incrementCount(metrics.policy.policyCodeCounts, policyCode)
 }
 
 function applyContextSelectionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
@@ -314,6 +340,14 @@ function tracePayloadValue(value: unknown): unknown {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function incrementCount(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

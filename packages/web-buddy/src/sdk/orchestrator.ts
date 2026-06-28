@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { browserFormSnapshot } from '../browser/form-snapshot.js'
 import { browserOpen } from '../browser/open.js'
 import { browserSnapshot } from '../browser/snapshot.js'
@@ -16,9 +16,17 @@ import { readResume, writeSampleResumePdf, type ResumeProfile } from './resume.j
 import { attemptApply, scrapeJobDetail, scrapeJobList, waitForAlibabaLoginClear, type ScrapedJob } from './alibaba.js'
 import { TraceRecorder, type TraceSummary } from './trace.js'
 import type { RunSource } from '../metrics/trace-inputs.js'
+import {
+  FileSessionRecorder,
+  FileSessionStore,
+  type AgentSession,
+  type AgentSessionSource,
+  type AgentSessionStatus,
+  type SessionRecorder,
+} from '../session/index.js'
 
 /**
- * Unified job-application agent. One pipeline, five presets:
+ * Unified local Web Agent orchestrator. One pipeline, plus safe demos:
  *
  *   fill       — GENERIC: open any site (cookie login) and let the LLM-driven
  *                agent loop fill the application form from the resume. The
@@ -33,17 +41,20 @@ import type { RunSource } from '../metrics/trace-inputs.js'
  *                only when the target is localhost/sandbox.
  *   demo-form  — offline mock form; fills via the agent loop (or heuristic
  *                fallback when no model key), gated at submit. Never submits.
+ *   demo-research — offline read-only research page; observes, summarizes, and
+ *                writes trace/metrics without login, form fill, or submit.
  *
  * The local LLM agent loop (`runtime/local/agent-loop.ts`) is the single filling mechanism —
  * there is no hardcoded field mapping for the generic path.
  */
 
-export type AgentMode = 'raw' | 'fill' | 'match' | 'alibaba-apply' | 'demo-form' | 'auto-apply'
+export type AgentMode = 'raw' | 'fill' | 'match' | 'alibaba-apply' | 'demo-form' | 'demo-research' | 'auto-apply'
 
 export const DEFAULT_ALIBABA_APPLY_PROMPT =
   '这是我的个人简历文件，然后现在我想去阿里官方招聘网站进行投递，然后请帮我找到适合我的岗位，然后帮我进行投递，填写表单，充分利用网站信息'
 
 export type FinalState =
+  | 'completed'
   | 'resume_parsed'
   | 'no_jobs'
   | 'no_match'
@@ -69,6 +80,7 @@ export interface AgentRunResult {
   finalState: FinalState
   message: string
   summary: TraceSummary
+  session?: AgentSession
 }
 
 export interface RunOptions {
@@ -124,6 +136,57 @@ function mockApplicationFormUrl(profile: ResumeProfile): string {
   return `data:text/html,${encodeURIComponent(html)}`
 }
 
+function researchBriefingUrl(): string {
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Atlas Help Center Research Fixture</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f8fb;margin:0;color:#1f2937}
+  header{background:#fff;border-bottom:1px solid #e5e7eb;padding:28px 40px}
+  main{max-width:960px;margin:0 auto;padding:28px 24px 48px}
+  h1{font-size:28px;margin:0 0 8px} h2{font-size:18px;margin:28px 0 12px}
+  .sub{color:#6b7280;max-width:720px;line-height:1.5}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:16px}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb}
+  th,td{text-align:left;border-bottom:1px solid #eef0f3;padding:10px 12px;font-size:14px}
+  th{background:#f3f4f6;color:#374151}
+  details{background:#fff;border:1px solid #e5e7eb;border-radius:8px;margin:8px 0;padding:12px 14px}
+  summary{cursor:pointer;font-weight:600}
+</style></head><body>
+<header>
+  <h1>Atlas Help Center</h1>
+  <div class="sub">A local read-only fixture for testing web research. It contains product facts, pricing, limits, and FAQ answers without using a live account or external network.</div>
+</header>
+<main>
+  <section aria-labelledby="overview">
+    <h2 id="overview">Product Overview</h2>
+    <div class="grid">
+      <article class="card"><strong>Audience</strong><p>Small operations teams that need auditable browser automation.</p></article>
+      <article class="card"><strong>Core promise</strong><p>Read pages, understand forms, and stop before sensitive actions.</p></article>
+      <article class="card"><strong>Safety</strong><p>Login, captcha, upload, payment, and final submit require human handoff.</p></article>
+    </div>
+  </section>
+  <section aria-labelledby="plans">
+    <h2 id="plans">Plans And Limits</h2>
+    <table>
+      <thead><tr><th>Plan</th><th>Monthly runs</th><th>Trace retention</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr><td>Starter</td><td>100</td><td>7 days</td><td>Local evaluation</td></tr>
+        <tr><td>Team</td><td>1,000</td><td>30 days</td><td>Shared review workflows</td></tr>
+        <tr><td>Audit</td><td>5,000</td><td>180 days</td><td>Regulated browser tasks</td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section aria-labelledby="faq">
+    <h2 id="faq">FAQ</h2>
+    <details open><summary>Does Atlas auto-submit forms?</summary><p>No. Final submit is a sensitive action and remains behind a human gate.</p></details>
+    <details><summary>Can it solve captchas?</summary><p>No. Captchas are treated as human verification and require handoff.</p></details>
+    <details><summary>What does a run produce?</summary><p>Each run writes a trace, screenshots, metrics, agent state, and optional safety report.</p></details>
+  </section>
+</main></body></html>`
+  return `data:text/html,${encodeURIComponent(html)}`
+}
+
 function applyBrowserEnv(config: AgentConfig): void {
   const env = process.env
   if (env.PLAYWRIGHT_HEADLESS === undefined) {
@@ -169,7 +232,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
   const highlight = config.browser.visualHighlight
 
   applyBrowserEnv(config)
-  if (mode === 'demo-form') process.env.PLAYWRIGHT_ALLOW_DATA_URLS = 'true'
+  if (mode === 'demo-form' || mode === 'demo-research') process.env.PLAYWRIGHT_ALLOW_DATA_URLS = 'true'
 
   const runtimeProfile = options.profile ?? 'debug'
   const trace = new TraceRecorder(config.trace.outDir, {
@@ -179,13 +242,36 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     profile: runtimeProfile,
     goal: options.taskPrompt,
   })
+  const sessionRecorder = await createRunSession({
+    config,
+    trace,
+    mode,
+    source: options.source ?? 'local-runtime',
+    goal: options.taskPrompt ?? defaultGoalForMode(mode),
+    emit,
+  })
+  const finalizeRun = (args: Omit<FinalizeArgs, 'session'>) =>
+    finalize({ ...args, session: sessionRecorder })
   const sessionId = 'default'
   trace.record({ phase: 'boot', action: `Agent start (mode=${mode}, headless=${config.browser.headless}, llm=${hasModelKey(config)})`, status: 'ok' })
 
   try {
+    if (mode === 'demo-research') {
+      const summary = await runResearchDemo(sessionId, trace, emit)
+      return finalizeRun({
+        mode,
+        profile: emptyProfile('research-demo'),
+        matches: [],
+        finalState: 'completed',
+        message: `Read-only research demo completed: ${summary.headingCount} headings, ${summary.planCount} plan rows, ${summary.faqCount} FAQ items.`,
+        trace,
+        emit,
+      })
+    }
+
     const profile = await ensureResume(config, trace, emit)
     if ((mode === 'alibaba-apply' || mode === 'raw') && !llm.hasKey) {
-      return finalize({
+      return finalizeRun({
         mode,
         profile,
         matches: [],
@@ -229,12 +315,12 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
 
       const jobs = await scrapeStructuredJobList(sessionId)
       if (jobs.length === 0) {
-        return finalize({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No structured job cards found on the target page.', trace, emit })
+        return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No structured job cards found on the target page.', trace, emit })
       }
       matches = matchJobs(profile, jobs)
       const best = matches[0]
       if (!best || best.score <= 0) {
-        return finalize({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found on the target page.', trace, emit })
+        return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found on the target page.', trace, emit })
       }
       chosenJob = best.job
       extraContext = `Matched job: ${best.job.title}. Match score: ${best.score.toFixed(2)}. ${best.reason}`
@@ -252,7 +338,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       const listUrl = startUrl ?? config.alibabaCareersUrl
       const { jobs } = await scrapeJobList(sessionId, listUrl, trace)
       if (jobs.length === 0) {
-        return finalize({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the Alibaba list page.', trace, emit })
+        return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the Alibaba list page.', trace, emit })
       }
 
       emit({ phase: 'scrape_list', message: `Scraped ${jobs.length} Alibaba jobs. Opening top ${Math.min(config.maxJobsToDetail, jobs.length)} for detail…`, level: 'info' })
@@ -268,7 +354,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       matches = await refineMatchesWithLlm(matches, profile, llm)
       const best = matches[0]
       if (!best || best.score <= 0) {
-        return finalize({ mode, profile, matches, finalState: 'no_match', message: 'No suitable Alibaba job match found.', trace, emit })
+        return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: 'No suitable Alibaba job match found.', trace, emit })
       }
 
       chosenJob = best.job
@@ -285,7 +371,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
 
       const apply = await attemptApply(sessionId, best.job as ScrapedJob, gate, trace)
       if (apply.gateDecision !== 'approve') {
-        return finalize({
+        return finalizeRun({
           mode,
           profile,
           matches,
@@ -316,7 +402,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
             status: decision === 'approve' ? 'ok' : 'blocked',
           })
           if (decision !== 'approve') {
-            return finalize({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}" but stopped at Alibaba login/captcha hand-off.`, trace, emit })
+            return finalizeRun({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}" but stopped at Alibaba login/captcha hand-off.`, trace, emit })
           }
 
           await apply.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
@@ -330,7 +416,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
           })
         }
         if (!loginCleared) {
-          return finalize({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}" but Alibaba login did not complete after repeated hand-offs.`, trace, emit })
+          return finalizeRun({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}" but Alibaba login did not complete after repeated hand-offs.`, trace, emit })
         }
 
         sessionManager.adoptPage(sessionId, apply.page)
@@ -351,7 +437,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       const listUrl = startUrl ?? config.alibabaCareersUrl
       const { jobs } = await scrapeJobList(sessionId, listUrl, trace)
       if (jobs.length === 0) {
-        return finalize({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the list page.', trace, emit })
+        return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the list page.', trace, emit })
       }
       emit({ phase: 'scrape_list', message: `Scraped ${jobs.length} jobs. Opening top ${Math.min(config.maxJobsToDetail, jobs.length)} for detail…`, level: 'info' })
       const preRanked = matchJobs(profile, jobs).slice(0, config.maxJobsToDetail)
@@ -364,7 +450,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       matches = matchJobs(profile, pool)
       if (llm.hasKey) matches = await refineMatchesWithLlm(matches, profile, llm)
       const best = matches[0]
-      if (!best) return finalize({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found.', trace, emit })
+      if (!best) return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found.', trace, emit })
       chosenJob = best.job
       extraContext = `Matched job: ${best.job.title} (${best.job.category || ''}). Match score: ${best.score.toFixed(2)}. ${best.reason}`
       trace.record({ phase: 'match', action: `Best match: ${best.job.title} (score ${best.score.toFixed(2)}).`, status: best.score <= 0 ? 'warn' : 'ok', observation: best.reason })
@@ -373,7 +459,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       // match mode is read-only: hand off at the gate (no navigation into apply).
       const decision = await gate.confirm('final_submit', `Enter Alibaba's application flow for "${best.job.title}"?`, { url: best.job.detailUrl })
       trace.record({ phase: 'apply', action: `Apply hand-off (match mode): ${decision}`, url: best.job.detailUrl, risk: 'L3', status: 'blocked' })
-      return finalize({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}". Application flow handed to human (gate: ${decision}).`, trace, emit })
+      return finalizeRun({ mode, profile, matches, chosenJob, finalState: 'login_required', message: `Matched "${best.job.title}". Application flow handed to human (gate: ${decision}).`, trace, emit })
     } else {
       // mode === 'fill' : generic. Requires a target URL.
       startUrl = startUrl ?? config.alibabaCareersUrl
@@ -412,7 +498,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         fill.stoppedAt === 'submitted'
           ? `Applied to "${chosenJob?.title || 'matched job'}" on the local/sandbox site.`
           : `Filled "${chosenJob?.title || 'matched job'}" but stopped at "${fill.stoppedAt}".`
-      return finalize({ mode, profile, matches, chosenJob, finalState, message, trace, emit })
+      return finalizeRun({ mode, profile, matches, chosenJob, finalState, message, trace, emit })
     }
 
     const useLlm = llm.hasKey
@@ -433,15 +519,17 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         safetyMode: mode === 'raw' ? 'raw' : 'guarded',
         maxSteps: config.agent.maxSteps,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
+        session: sessionRecorder,
       })
       await captureFinalScreenshot(sessionId, trace)
       const finalState: FinalState = loopResult.blocked
         ? (loopResult.summary.toLowerCase().includes('submit') ? 'stopped_at_submit' : 'blocked')
         : 'filled'
-      return finalize({
+      return finalizeRun({
         mode, profile, matches, chosenJob, finalState,
         message: loopResult.summary + (loopResult.blocked ? ' (stopped)' : ' (draft filled — not submitted)'),
         trace, emit,
+        recordSessionFinal: false,
       })
     }
 
@@ -453,13 +541,120 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       fill.stoppedAt === 'submit' ? 'stopped_at_submit'
         : fill.stoppedAt === 'save' ? 'stopped_at_submit'
           : 'filled'
-    return finalize({ mode, profile, matches, chosenJob, finalState, message: `Heuristic fill stopped at "${fill.stoppedAt}" — not submitted.`, trace, emit })
+    return finalizeRun({ mode, profile, matches, chosenJob, finalState, message: `Heuristic fill stopped at "${fill.stoppedAt}" — not submitted.`, trace, emit })
   } catch (error) {
     trace.record({ phase: 'fatal', action: `Agent error: ${(error as Error).message}`, status: 'error' })
     emit({ phase: 'fatal', message: (error as Error).message, level: 'error' })
-    return finalize({ mode, profile: { skills: [], experience: [], education: [], keywords: [], source: 'json' }, matches: [], finalState: 'error', message: (error as Error).message, trace, emit })
+    return finalizeRun({ mode, profile: { skills: [], experience: [], education: [], keywords: [], source: 'json' }, matches: [], finalState: 'error', message: (error as Error).message, trace, emit })
   } finally {
     if (gate instanceof CliHumanGate) gate.close()
+  }
+}
+
+async function runResearchDemo(
+  sessionId: string,
+  trace: TraceRecorder,
+  emit: (e: AgentEvent) => void,
+): Promise<{ headingCount: number; planCount: number; faqCount: number }> {
+  const url = researchBriefingUrl()
+  const open = await browserOpen({ url, sessionId, waitUntil: 'domcontentloaded' })
+  if (!open.ok) throw new Error(open.error.message)
+
+  const page = sessionManager.get(sessionId)?.page
+  trace.record({
+    phase: 'open_research',
+    action: 'Opened local read-only research fixture.',
+    url: page?.url(),
+    risk: 'L0',
+    status: 'ok',
+    screenshotPath: await trace.screenshot(page, 'research-open'),
+  })
+  emit({ phase: 'open_research', message: 'Opened local read-only research fixture.', level: 'info' })
+
+  const snapshot = await browserSnapshot({ sessionId, maxElements: 120 })
+  trace.record({
+    phase: 'observation',
+    action: 'browser_snapshot captured research fixture.',
+    url: page?.url(),
+    risk: 'L0',
+    toolCategory: 'observation',
+    status: snapshot.ok ? 'ok' : 'warn',
+    observation: snapshot.observation,
+  })
+  emit({ phase: 'observation', message: snapshot.observation, level: snapshot.ok ? 'observe' : 'warn' })
+
+  const summary = page ? await page.evaluate(() => {
+    const text = (value: string | null | undefined) => (value || '').replace(/\s+/g, ' ').trim()
+    const headings = Array.from(document.querySelectorAll('h1,h2')).map((node) => text(node.textContent))
+    const plans = Array.from(document.querySelectorAll('tbody tr')).map((row) => {
+      const cells = Array.from(row.querySelectorAll('td')).map((cell) => text(cell.textContent))
+      return {
+        plan: cells[0] || '',
+        monthlyRuns: cells[1] || '',
+        traceRetention: cells[2] || '',
+        bestFor: cells[3] || '',
+      }
+    })
+    const faqs = Array.from(document.querySelectorAll('details')).map((node) => ({
+      question: text(node.querySelector('summary')?.textContent),
+      answer: text(node.querySelector('p')?.textContent),
+    }))
+    return {
+      title: document.title,
+      headings,
+      plans,
+      faqs,
+      safetySignals: faqs
+        .map((item) => `${item.question} ${item.answer}`)
+        .filter((line) => /submit|captcha|handoff|trace|safety/i.test(line)),
+    }
+  }) : { title: '', headings: [], plans: [], faqs: [], safetySignals: [] }
+
+  const artifactPath = trace.agentTrace?.writeArtifact('research-summary.json', `${JSON.stringify(summary, null, 2)}\n`)
+  trace.agentTrace?.recordEvent('research_summary', { path: artifactPath, summary })
+  trace.record({
+    phase: 'summarize',
+    action: 'Extracted structured research brief from page content.',
+    url: page?.url(),
+    risk: 'L0',
+    status: 'ok',
+    observation: [
+      `title=${summary.title}`,
+      `headings=${summary.headings.join(' | ')}`,
+      `plans=${summary.plans.map((plan) => `${plan.plan}:${plan.monthlyRuns}`).join(', ')}`,
+      `safety=${summary.safetySignals.length}`,
+    ].join('\n'),
+  })
+  emit({
+    phase: 'summarize',
+    message: `Structured page summary: ${summary.plans.length} plan rows, ${summary.faqs.length} FAQ items.`,
+    level: 'done',
+  })
+
+  trace.record({
+    phase: 'observation',
+    action: 'Captured final read-only research page state.',
+    url: page?.url(),
+    risk: 'L0',
+    status: 'ok',
+    screenshotPath: await trace.screenshot(page, 'research-final'),
+  })
+
+  return {
+    headingCount: summary.headings.length,
+    planCount: summary.plans.length,
+    faqCount: summary.faqs.length,
+  }
+}
+
+function emptyProfile(sourceLabel: string): ResumeProfile {
+  return {
+    name: sourceLabel,
+    skills: [],
+    experience: [],
+    education: [],
+    keywords: [],
+    source: 'json',
   }
 }
 
@@ -564,7 +759,7 @@ async function refreshFinalObservation(sessionId: string, trace: TraceRecorder):
   }
 }
 
-function finalize(args: {
+interface FinalizeArgs {
   mode: AgentMode
   profile: ResumeProfile
   matches: MatchScore[]
@@ -573,10 +768,110 @@ function finalize(args: {
   message: string
   trace: TraceRecorder
   emit: (e: AgentEvent) => void
-}): AgentRunResult {
+  session?: SessionRecorder
+  recordSessionFinal?: boolean
+}
+
+async function createRunSession(args: {
+  config: AgentConfig
+  trace: TraceRecorder
+  mode: AgentMode
+  source: RunSource
+  goal: string
+  emit: (e: AgentEvent) => void
+}): Promise<SessionRecorder> {
+  const store = new FileSessionStore({ rootDir: join(args.config.trace.outDir, 'sessions') })
+  const session = await store.create({
+    runId: args.trace.runId,
+    source: sessionSourceFromRunSource(args.source),
+    goal: args.goal,
+    mode: args.mode,
+    traceRunId: args.trace.runId,
+  })
+  return new FileSessionRecorder(store, session, {
+    bestEffort: true,
+    warn: (message) => args.emit({ phase: 'session', message, level: 'warn' }),
+  })
+}
+
+async function finalize(args: FinalizeArgs): Promise<AgentRunResult> {
   const summary = args.trace.finish()
+  const status = sessionStatusForFinalState(args.finalState)
+  if (args.session) {
+    if (args.recordSessionFinal !== false) {
+      await args.session.transcript({
+        type: 'final_result',
+        status,
+        result: {
+          finalState: args.finalState,
+          message: args.message,
+          tracePath: summary.tracePath,
+        },
+        ...(status === 'blocked' || status === 'failed' ? { reason: args.message } : {}),
+      })
+      await args.session.event({
+        type: sessionEventTypeForStatus(status),
+        message: args.message,
+        data: {
+          finalState: args.finalState,
+          tracePath: summary.tracePath,
+        },
+      })
+    }
+    await args.session.updateStatus(status, {
+      ...(status === 'blocked' ? { blockedReason: args.message } : {}),
+      ...(status === 'failed' ? { error: args.message } : {}),
+    })
+  }
   args.emit({ phase: 'done', message: `${args.message} (trace: ${summary.tracePath})`, level: 'done' })
-  return { mode: args.mode, profile: args.profile, matches: args.matches, chosenJob: args.chosenJob, finalState: args.finalState, message: args.message, summary }
+  return {
+    mode: args.mode,
+    profile: args.profile,
+    matches: args.matches,
+    chosenJob: args.chosenJob,
+    finalState: args.finalState,
+    message: args.message,
+    summary,
+    ...(args.session ? { session: args.session.session } : {}),
+  }
+}
+
+function defaultGoalForMode(mode: AgentMode): string {
+  if (mode === 'demo-research') return 'Run the offline read-only research demo.'
+  if (mode === 'demo-form') return 'Fill the offline demo application form safely.'
+  if (mode === 'match') return 'Match the resume to visible job postings and stop before application handoff.'
+  if (mode === 'auto-apply') return 'Run the structured job board apply workflow.'
+  if (mode === 'raw') return DEFAULT_ALIBABA_APPLY_PROMPT
+  return 'Fill the application form on the current page using the resume.'
+}
+
+function sessionSourceFromRunSource(source: RunSource): AgentSessionSource {
+  if (source === 'cli-demo') return 'cli'
+  if (source === 'web-ui') return 'web'
+  if (source === 'benchmark') return 'benchmark'
+  if (source === 'sdk') return 'sdk'
+  return 'sdk'
+}
+
+function sessionStatusForFinalState(finalState: FinalState): Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'> {
+  if (finalState === 'error') return 'failed'
+  if (
+    finalState === 'blocked' ||
+    finalState === 'login_required' ||
+    finalState === 'no_jobs' ||
+    finalState === 'no_match' ||
+    finalState === 'stopped_at_submit'
+  ) {
+    return 'blocked'
+  }
+  return 'completed'
+}
+
+function sessionEventTypeForStatus(status: Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'>) {
+  if (status === 'completed') return 'session_completed'
+  if (status === 'failed') return 'session_failed'
+  if (status === 'aborted') return 'session_aborted'
+  return 'session_blocked'
 }
 
 // Re-exports for SDK consumers.

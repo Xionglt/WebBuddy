@@ -98,6 +98,66 @@ try {
           },
         },
       }),
+      JSON.stringify({
+        event: 'policy_decision',
+        data: {
+          kind: 'json',
+          value: policyEvent({
+            action: 'allow',
+            riskLevel: 'low',
+            policyCode: 'policy.low_risk.allow',
+            ruleId: 'policy.low_risk.allow.v1',
+            reason: 'Tool risk does not require a human gate.',
+          }),
+        },
+      }),
+      JSON.stringify({
+        event: 'policy_decision',
+        data: {
+          kind: 'json',
+          value: policyEvent({
+            action: 'gate',
+            riskLevel: 'high',
+            gateKind: 'final_submit',
+            policyCode: 'policy.workflow.final_submit',
+            ruleId: 'policy.workflow.final_submit.v1',
+            reason: 'Submit-like action in review phase requires the final-submit safety gate.',
+            workflowPhase: 'ready_for_final_submit',
+            requiresFreshContext: true,
+          }),
+        },
+      }),
+      JSON.stringify({
+        event: 'policy_decision',
+        data: {
+          kind: 'json',
+          value: policyEvent({
+            action: 'auto_confirm',
+            riskLevel: 'high',
+            gateKind: 'high_risk_action',
+            policyCode: 'policy.raw.auto_confirm',
+            ruleId: 'policy.raw.auto_confirm.v1',
+            reason: 'Raw safety mode auto-confirms high-risk click actions for compatibility.',
+            requiresFreshContext: true,
+          }),
+        },
+      }),
+      JSON.stringify({
+        event: 'policy_decision',
+        data: {
+          kind: 'json',
+          value: policyEvent({
+            action: 'block',
+            riskLevel: 'critical',
+            gateKind: 'captcha',
+            policyCode: 'policy.workflow.captcha_required',
+            ruleId: 'policy.workflow.captcha_required.v1',
+            reason: 'Captcha step requires the captcha human gate.',
+            workflowPhase: 'captcha_required',
+            requiresFreshContext: true,
+          }),
+        },
+      }),
     ].join('\n') + '\n')
     writeFileSync(stdoutLog, 'hello stdout')
     writeFileSync(stderrLog, 'warn')
@@ -153,6 +213,25 @@ try {
       CURRENT_PAGE_STATE: 420,
       CURRENT_FORM_STATE: 45,
       RECENT_ACTIONS: 300,
+    })
+    assert.equal(result.metrics.policy.decisions, 4)
+    assert.equal(result.metrics.policy.allows, 1)
+    assert.equal(result.metrics.policy.gates, 1)
+    assert.equal(result.metrics.policy.blocks, 1)
+    assert.equal(result.metrics.policy.autoConfirms, 1)
+    assert.deepEqual(result.metrics.policy.gateKindCounts, {
+      final_submit: 1,
+      high_risk_action: 1,
+      captcha: 1,
+    })
+    assert.deepEqual(result.metrics.policy.policyCodeCounts, {
+      'policy.low_risk.allow': 1,
+      'policy.workflow.final_submit': 1,
+      'policy.raw.auto_confirm': 1,
+      'policy.workflow.captcha_required': 1,
+    })
+    assert.deepEqual(result.metrics.policy.blockedReasonCounts, {
+      'Captcha step requires the captcha human gate.': 1,
     })
     assert.equal(result.metrics.stdoutBytes, Buffer.byteLength('hello stdout'))
     assert.equal(JSON.parse(readFileSync(result.path, 'utf8')).schemaVersion, 'run-metrics/v1')
@@ -226,6 +305,16 @@ try {
     assert.equal(metrics.pageStateAgeMs, 0)
     assert.equal(metrics.formStateAgeMs, 0)
     assert.deepEqual(metrics.promptSectionChars, {})
+    assert.deepEqual(metrics.policy, {
+      decisions: 0,
+      allows: 0,
+      gates: 0,
+      blocks: 0,
+      autoConfirms: 0,
+      gateKindCounts: {},
+      policyCodeCounts: {},
+      blockedReasonCounts: {},
+    })
     assert.deepEqual(metrics.warnings, ['missing fixture'])
   }
 
@@ -245,4 +334,15 @@ function span(input) {
     latencyMs: 100,
     ...input,
   })
+}
+
+function policyEvent(input) {
+  return {
+    schemaVersion: 'policy-audit/v1',
+    at: '2026-06-23T00:00:00.000Z',
+    sessionId: 'test',
+    step: 1,
+    toolName: 'browser_click_text',
+    ...input,
+  }
 }

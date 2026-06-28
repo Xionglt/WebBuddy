@@ -4,6 +4,17 @@ import type { PromptSectionId } from '../context/types.js'
 export type RunMetricsStatus = 'completed' | 'blocked' | 'incomplete' | 'failed' | 'unknown'
 export type FailureCategory = 'login' | 'captcha' | 'form' | 'navigation' | 'model' | 'tool' | 'unknown'
 
+export interface PolicyMetrics {
+  decisions: number
+  allows: number
+  gates: number
+  blocks: number
+  autoConfirms: number
+  gateKindCounts: Record<string, number>
+  policyCodeCounts: Record<string, number>
+  blockedReasonCounts: Record<string, number>
+}
+
 export interface RunMetrics {
   schemaVersion: 'run-metrics/v1'
   generatedAt: string
@@ -45,6 +56,7 @@ export interface RunMetrics {
   runLogBytes: number
   promptBytes: number
   failureCategory: FailureCategory
+  policy: PolicyMetrics
   warnings: string[]
 }
 
@@ -99,6 +111,20 @@ export function emptyRunMetrics(input: {
     runLogBytes: 0,
     promptBytes: 0,
     failureCategory: 'unknown',
+    policy: emptyPolicyMetrics(),
     warnings: input.warnings ? [...input.warnings] : [],
+  }
+}
+
+export function emptyPolicyMetrics(): PolicyMetrics {
+  return {
+    decisions: 0,
+    allows: 0,
+    gates: 0,
+    blocks: 0,
+    autoConfirms: 0,
+    gateKindCounts: {},
+    policyCodeCounts: {},
+    blockedReasonCounts: {},
   }
 }

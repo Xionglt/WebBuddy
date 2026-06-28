@@ -9,6 +9,7 @@ export class StopConditionManager {
   inferStopReason(result: AgentLoopResult, context: StopConditionContext = {}): AgentStopReason {
     const summary = result.summary.toLowerCase()
 
+    if (summary.includes('run aborted')) return 'aborted'
     if (summary.includes('llm error')) return 'llm_error'
     if (result.blocked) return 'blocked'
     if (result.done) return 'agent_done'

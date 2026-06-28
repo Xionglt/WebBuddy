@@ -9,6 +9,10 @@ export interface ToolExecutionInput {
     riskLevel?: string
     category?: string
     argBrief?: string
+    policyAction?: string
+    policyCode?: string
+    policyRuleId?: string
+    policyGateKind?: string
   }
 }
 

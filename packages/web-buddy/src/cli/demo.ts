@@ -1,5 +1,5 @@
 /**
- * job-agent CLI — drive the visual browser job-application agent.
+ * web-agent / job-agent CLI — drive the local auditable Web Agent runtime.
  *
  *   job-agent raw <url>           RAW: LLM drives browser directly
  *   job-agent fill <url>          GENERIC: cookie-login + LLM-driven form fill
@@ -7,6 +7,7 @@
  *   job-agent alibaba-apply       Alibaba official site: match + enter flow + fill
  *   job-agent match [--list-url]  Alibaba: scrape list+details, match, hand off
  *   job-agent demo-form           offline mock form, visible fill (always works)
+ *   job-agent demo-research       offline read-only research page (always works)
  *   job-agent login <url>         interactive: log in once, save cookies
  *   job-agent --help
  *
@@ -15,6 +16,7 @@
  */
 import * as readline from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
+import { relative } from 'node:path'
 import { loadConfig, type AgentConfig } from '../sdk/config.js'
 import { DEFAULT_ALIBABA_APPLY_PROMPT, runJobApplicationAgent, type AgentMode } from '../sdk/orchestrator.js'
 import { sessionManager } from '../session/manager.js'
@@ -161,7 +163,8 @@ async function run(mode: AgentMode, f: Flags, startUrl?: string) {
       : mode === 'match' ? 'alibaba match'
         : mode === 'alibaba-apply' ? 'alibaba apply'
           : mode === 'auto-apply' ? 'structured auto apply'
-            : 'offline demo form',
+            : mode === 'demo-research' ? 'offline research demo'
+              : 'offline demo form',
     config, mode,
     startUrl ? { target: startUrl } : undefined,
   )
@@ -179,6 +182,10 @@ async function run(mode: AgentMode, f: Flags, startUrl?: string) {
   console.log(` message     : ${result.message}`)
   if (result.chosenJob) console.log(` chosen job  : ${result.chosenJob.title}`)
   console.log(` trace       : ${result.summary.tracePath}`)
+  if (result.session) {
+    console.log(` session     : ${relative(process.cwd(), `${result.session.outputDir}/session.json`)}`)
+    console.log(` transcript  : ${relative(process.cwd(), result.session.transcriptPath)}`)
+  }
   console.log(`             : ${result.summary.steps} steps, ${result.summary.screenshots} screenshots, max risk ${result.summary.maxRiskReached ?? '—'}`)
   console.log('━'.repeat(64))
   await finishBrowser(f, config)
@@ -206,7 +213,7 @@ async function loginCommand(url: string, f: Flags) {
 }
 
 const HELP = `
-job-agent — visual browser job-application agent
+web-agent / job-agent — local auditable Web Agent runtime
 
 USAGE
   job-agent <command> [options]
@@ -228,6 +235,8 @@ COMMANDS
   match [--list-url U]  Alibaba preset. Scrape the position list + details,
                         match to your resume, hand off at the gate (read-only).
   demo-form             Offline mock form, visible fill. Always works, no key.
+  demo-research         Offline read-only web research fixture. Always works,
+                        no key, login, captcha, or submit.
   login <url>           Open the site, let you log in manually, save cookies
                         so later 'fill' runs skip login.
 
@@ -248,6 +257,7 @@ OPTIONS
 
 EXAMPLES
   job-agent demo-form                              # 30s offline demo
+  job-agent demo-research --headless               # read-only research demo
   job-agent raw https://talent-holding.alibaba.com/off-campus/position-list?lang=zh --resume ./resume.pdf
   job-agent login https://talent-holding.alibaba.com/...
   MODEL_API_KEY=sk-... job-agent fill https://talent-holding.alibaba.com/...
@@ -325,6 +335,7 @@ async function main() {
     }
     case 'match': await run('match', f); break
     case 'demo-form': await run('demo-form', f); break
+    case 'demo-research': await run('demo-research', f); break
     case 'login': {
       const url = positionals[0]
       if (!url) { console.error('login requires a URL: job-agent login <url>'); process.exit(2) }

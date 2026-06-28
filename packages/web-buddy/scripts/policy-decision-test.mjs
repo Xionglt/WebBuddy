@@ -18,6 +18,10 @@ assert.equal(finalSubmit.riskLevel, 'high')
 assert.equal(finalSubmit.gateKind, 'final_submit')
 assert.equal(finalSubmit.requiresFreshContext, true)
 assert.match(finalSubmit.reason, /final-submit/i)
+assert.equal(finalSubmit.schemaVersion, 'policy-decision/v1')
+assert.equal(finalSubmit.policyCode, 'policy.high_risk.gate')
+assert.equal(finalSubmit.ruleId, 'policy.high_risk.gate.v1')
+assert(finalSubmit.auditTags.includes('gate:final_submit'))
 
 const applyEntry = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -28,6 +32,7 @@ const applyEntry = decideToolPolicy({
 })
 assert.equal(applyEntry.action, 'gate')
 assert.equal(applyEntry.gateKind, 'high_risk_action')
+assert.equal(applyEntry.policyCode, 'policy.workflow.apply_entry')
 
 const applicationEntry = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -52,6 +57,7 @@ const workflowFinalSubmit = decideToolPolicy({
   workflowPhase: 'ready_for_final_submit',
 })
 assert.equal(workflowFinalSubmit.gateKind, 'final_submit')
+assert.equal(workflowFinalSubmit.policyCode, 'policy.workflow.final_submit')
 
 const ordinaryClick = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -73,6 +79,7 @@ const rawSubmit = decideToolPolicy({
 assert.equal(rawSubmit.action, 'auto_confirm')
 assert.equal(rawSubmit.gateKind, 'final_submit')
 assert.equal(rawSubmit.requiresFreshContext, true)
+assert.equal(rawSubmit.policyCode, 'policy.raw.auto_confirm')
 
 const staleSubmit = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -92,6 +99,7 @@ assert.equal(staleSubmit.gateKind, 'final_submit')
 assert.equal(staleSubmit.requiresFreshContext, true)
 assert.match(staleSubmit.reason, /stale/i)
 assert.match(staleSubmit.reason, /form ageMs=45000/)
+assert.equal(staleSubmit.policyCode, 'policy.freshness.high_risk_stale')
 
 assert.equal(
   gateKindForTool({
