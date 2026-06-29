@@ -38,6 +38,36 @@
 - 下一轮建议优先处理什么。
 ```
 
+## 2026-06-29 Phase 2C ToolExecutionService v1 文档定位
+
+### 背景
+
+- Phase 2B 已经把 `AgentRuntime.run()` 包进 `AgentKernel -> QueryLoop -> runAgentLoop`，但实际工具执行生命周期仍留在 `runAgentLoop` 内。
+- Plan 3 需要说明它和 Plan 2 的关系：Plan 2 是运行入口和控制壳，Plan 3 是把单个工具调用的执行层拆成 `ToolExecutionService v1`。
+
+### 改动
+
+- 更新 Phase 2 总纲，补充 `PLAN/phase2/plan3.md` 入口，并明确 Plan 2 / Plan 3 的位置：
+  - Plan 2 = 把运行入口包进 Kernel。
+  - Plan 3 = 把工具执行从 `runAgentLoop` 拆出去。
+- 说明 `ToolExecutionService v1` 只负责已经通过 policy / gate 后的单个工具调用生命周期，包括 timeout、abort-before-execution 和 error normalization。
+- 明确边界：`PolicyEngine` 继续负责风险判断，后续 `PermissionEngine` 负责通用许可和确认队列，`HumanGate` 负责人与系统之间的确认交互。
+- 更新 package README，补充 Phase 2 Kernel / ToolExecutionService 定位和 Phase 2C 验证命令。
+
+### 验证
+
+- `git diff --check` 通过。
+
+### 结论
+
+- Phase 2C 文档口径收窄为工具执行层 v1，不夸大为完整 pause / resume / retry。
+- `ToolExecutionService` 不是 PermissionEngine，也不接管 workflow completion；它只把工具执行结果变得可观察、可归一、可测试。
+
+### 遗留问题 / 下一步
+
+- 继续保持 `runAgentLoop` 兼容入口。
+- 后续如果实现 PermissionEngine / WorkflowEngine，需要继续沿用这里定义的边界，不让工具执行层承担任务决策。
+
 ## 2026-06-28 Phase 2B AgentKernel Skeleton + QueryLoop
 
 ### 改动

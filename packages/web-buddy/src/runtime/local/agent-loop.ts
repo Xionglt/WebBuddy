@@ -20,7 +20,8 @@ import type { HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
 import type { ResumeProfile } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
-import { ToolExecutionBoundary } from '../../tools/tool-execution.js'
+import { ToolExecutionService } from '../../tools/tool-execution-service.js'
+import { toLegacyToolRunResult } from '../../tools/tool-result.js'
 import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
 import { transitionWorkflowState } from '../../workflow/workflow-transition.js'
 import { pageView } from './page-view.js'
@@ -50,6 +51,8 @@ export interface AgentLoopInput {
   session?: SessionRecorder
   /** Optional kernel/run-controller abort signal. Checked before model/tool work. */
   abortSignal?: AbortSignal
+  /** Optional execution service for tests or alternate local runtimes. */
+  toolExecutionService?: ToolExecutionService
 }
 
 export interface AgentLoopResult {
@@ -77,7 +80,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     onEvent?.({ step, level, message })
 
   const tools = registry.toOpenAITools()
-  const toolExecution = new ToolExecutionBoundary(registry)
+  const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
   const session = input.session
 
   let step = 0
@@ -494,22 +497,38 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })
       let result
       try {
-        const execution = await toolExecution.execute({
-          toolName: call.name,
-          args: call.arguments,
-          ctx,
-          metadata: {
-            step,
-            riskLevel: policyDecision.riskLevel,
-            category: toolCategory,
-            argBrief,
-            policyAction: policyDecision.action,
-            policyCode: policyDecision.policyCode,
-            policyRuleId: policyDecision.ruleId,
-            policyGateKind: policyDecision.gateKind,
+        const execution = await toolExecution.execute(
+          {
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
           },
-        })
-        result = execution.result
+          {
+            schemaVersion: 'tool-use-context/v1',
+            runId: session?.session.runId ?? ctx.trace.runId,
+            sessionId: session?.session.sessionId ?? ctx.sessionId,
+            turnId,
+            step,
+            toolCallId: call.id,
+            local: ctx,
+            abortSignal: input.abortSignal,
+            metadata: {
+              step,
+              riskLevel: policyDecision.riskLevel,
+              category: toolCategory,
+              argBrief,
+              policyAction: policyDecision.action,
+              policyCode: policyDecision.policyCode,
+              policyRuleId: policyDecision.ruleId,
+              policyGateKind: policyDecision.gateKind,
+            },
+          },
+        )
+        if (execution.error?.fatal) {
+          if (execution.error.cause instanceof Error) throw execution.error.cause
+          throw new Error(execution.error.message)
+        }
+        result = toLegacyToolRunResult(execution)
         toolSpan?.end({
           status: result.observation.startsWith('FAILED') ? 'failed' : 'success',
           output: result,

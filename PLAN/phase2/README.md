@@ -3,7 +3,8 @@
 > 本文档是 Phase 2 的主纲领。Phase 1 的历史计划已经归档到 `PLAN/phase1/`。
 > Phase 2 对应之前讨论里的“Phase 6 底层能力建设”，目标不是继续堆 Web demo，而是先把 Agent 必需的通用底座补稳。
 > 架构图见 `PLAN/phase2/architecture-clear.md`；完整大图见 `PLAN/phase2/architecture.md`。如果 Markdown 预览不渲染 Mermaid，直接用浏览器打开 `PLAN/phase2/architecture.html`。
-> 第一份实施计划见 `PLAN/phase2/plan1.md`。第二份实施计划见 `PLAN/phase2/plan2.md`。
+> 第一份实施计划见 `PLAN/phase2/plan1.md`。第二份实施计划见 `PLAN/phase2/plan2.md`。第三份实施计划见 `PLAN/phase2/plan3.md`。
+> Plan 2 完成后的通俗解释和架构变化图见 `PLAN/phase2/plan2-completion-explanation.md`。
 
 ## 1. 阶段定位
 
@@ -44,6 +45,79 @@
 Phase 2 的核心目标：
 
 > 把项目从 Web 自动化 runtime，升级为可恢复、可确认、可解释、可复用经验的 Agent Kernel。Web 只是第一个垂直执行域，不能成为底层架构的全部。
+
+### 1.1 Plan 2 / Plan 3 的当前位置
+
+Plan 2 和 Plan 3 是 Phase 2 拆 `runAgentLoop` 的两个连续步骤，但它们拆的是不同层次：
+
+```text
+Plan 2 = 把运行入口包进 Kernel。
+Plan 3 = 把工具执行从 runAgentLoop 拆出去。
+```
+
+Plan 2 完成后的运行链路是：
+
+```text
+AgentRuntime.run()
+  -> AgentKernel.start()
+    -> QueryLoop.run()
+      -> runAgentLoop()
+```
+
+也就是说，Plan 2 没有重写主循环，而是先把外部入口、run 生命周期、abort 控制、turn snapshot 和 kernel result 放到稳定边界里。`runAgentLoop` 仍然负责模型调用、工具调用、Policy、HumanGate、workflow transition 和 session recording。
+
+Plan 3 的位置是在这个 wrapper 里面继续拆执行层：
+
+```text
+QueryLoop
+  -> runAgentLoop
+    -> ToolExecutionService
+```
+
+Plan 3 不是让 `QueryLoop` 直接调度 tools，也不是重写模型 turn。它只把“policy / gate 已经放行之后，单个工具调用如何执行”从 `runAgentLoop` 里抽成 `ToolExecutionService v1`。
+
+`ToolExecutionService v1` 解决的是工具执行生命周期问题：
+
+- 给单个 tool call 建立 `ToolUseContext`。
+- 记录 queued / running / succeeded / failed / cancelled / timed_out 等执行状态。
+- 统一 timeout。
+- 统一 abort-before-execution。
+- 统一 error normalization，把异常、超时、未知工具、失败 observation 归一成稳定结果。
+- 保持 `ToolExecutionBoundary`、`AgentRuntimeResult`、session transcript 和模型可见 observation 兼容。
+
+它不解决任务决策问题：
+
+- `PolicyEngine` 仍负责风险判断和 allow / gate / block / auto-confirm 建议。
+- `PermissionEngine` 是后续阶段的通用许可和确认队列，不属于 Plan 3 v1。
+- `HumanGate` 仍负责和用户确认或 handoff。
+- `WorkflowState` / 后续 `WorkflowEngine` 仍负责任务阶段和完成证据。
+- `ToolExecutionService` 不决定是否允许执行工具，不写 workflow 结论，也不做自动 retry。
+
+Phase 2C v1 的边界要写窄：
+
+- 做 timeout。
+- 做 abort-before-execution。
+- 做 error normalization。
+- 不承诺完整 pause / resume。
+- 不承诺自动 retry。
+- 不承诺强制中断已经进入 Playwright 的动作。
+- 不做并发工具执行、streaming tool output、tool result token budget、PermissionEngine 或 WorkflowEngine。
+
+新增验证入口：
+
+```bash
+npm run test:tool-execution-service
+```
+
+完整兼容验证仍应覆盖：
+
+```bash
+npm run test:tool-execution
+npm run test:agent-loop
+npm run test:kernel
+npm run test:session
+npm run test:mvp
+```
 
 ## 2. 第一性原理
 
@@ -1220,7 +1294,8 @@ Phase 2 不优先做复杂多 Agent。原因：
 目标：
 
 - 工具调用进入统一生命周期。
-- 支持 abort、timeout、progress、error normalization。
+- v1 只承诺 timeout、abort-before-execution 和 error normalization。
+- 保持现有 `runAgentLoop`、PolicyEngine、HumanGate、workflow transition、session transcript 和模型 observation 兼容。
 
 改动：
 
@@ -1230,9 +1305,20 @@ Phase 2 不优先做复杂多 Agent。原因：
 
 验收：
 
-- 每次工具调用有 queued/running/completed/failed 事件。
-- timeout 有明确错误。
-- abort 能停止 pending tool。
+- 每次工具调用有 queued/running/succeeded/failed/cancelled/timed_out 状态。
+- timeout 有明确 `FAILED (TOOL_TIMEOUT)` observation 和 normalized error。
+- abort-before-execution 不调用工具。
+- 普通成功 observation 和已有 `FAILED (...)` observation 不被改写。
+- policy / HumanGate / final submit 行为不变。
+- `npm run test:tool-execution-service` 作为新增 service-level 验证入口。
+
+不做：
+
+- 不做完整 pause / resume。
+- 不做自动 retry。
+- 不做并发工具执行。
+- 不做 streaming tool output。
+- 不引入 PermissionEngine 或 WorkflowEngine。
 
 ## 5.4 Phase 2D: PermissionEngine
 

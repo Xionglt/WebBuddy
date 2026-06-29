@@ -77,12 +77,59 @@ npm run report:safety
 npm run report:safety -- --run-id <runId>
 npm run report:safety -- --trace-dir ../../output/traces/<sessionId>
 npm run benchmark:research
+npm run test:tool-execution
 npm run test:kernel
 npm run test:session
 ```
 
 The research benchmark validates `metrics.json`, `page-state-latest.json`,
 `research-summary.json`, and `safety-report.json`.
+
+## Phase 2 Kernel Notes
+
+Phase 2 is splitting the local runtime in small compatibility-preserving steps.
+Plan 2 wrapped the runtime entry in Kernel control:
+
+```text
+AgentRuntime.run()
+  -> AgentKernel.start()
+    -> QueryLoop.run()
+      -> runAgentLoop()
+```
+
+Plan 3 moves single-tool execution out of `runAgentLoop` without making
+`QueryLoop` own tool scheduling yet:
+
+```text
+QueryLoop
+  -> runAgentLoop
+    -> ToolExecutionService
+```
+
+`ToolExecutionService v1` is an execution layer for one already-approved tool
+call. It owns tool use context, execution state, timeout, abort-before-execution,
+and error normalization. It preserves normal successful observations and
+existing `FAILED (...)` observations so the model-visible behavior stays
+compatible.
+
+Boundaries:
+
+- `PolicyEngine` decides risk and allow / gate / block / auto-confirm before
+  tools execute.
+- `HumanGate` keeps user confirmation and handoff behavior.
+- The future `PermissionEngine` will own general permission rules and approval
+  queues; it is not part of ToolExecutionService v1.
+- Workflow state and future evidence checks remain outside the execution
+  service.
+
+Phase 2C v1 does not claim full pause/resume, automatic retry, concurrent tool
+execution, streaming tool output, or forced cancellation of an already-running
+Playwright action.
+
+Plan 3 adds the dedicated service-level verification command
+`npm run test:tool-execution-service`; keep `npm run test:tool-execution`,
+`npm run test:agent-loop`, `npm run test:kernel`, `npm run test:session`, and
+`npm run test:mvp` as compatibility checks around it.
 
 ## CLI
 
