@@ -44,3 +44,11 @@ export class ToolExecutionBoundary {
     }
   }
 }
+
+export { ToolExecutionService } from './tool-execution-service.js'
+export type { ToolExecutionRegistry, ToolExecutionServiceOptions } from './tool-execution-service.js'
+export type { NormalizedToolResult, ToolTerminalStatus } from './tool-result.js'
+export type { NormalizedToolError, NormalizedToolErrorKind } from './tool-errors.js'
+export { toLegacyToolRunResult } from './tool-result.js'
+export type { ToolExecutionState, ToolExecutionStatus } from './tool-progress.js'
+export type { ToolCall, ToolExecutionMetadata, ToolUseContext } from './tool-contract.js'
