@@ -131,6 +131,33 @@ Plan 3 adds the dedicated service-level verification command
 `npm run test:agent-loop`, `npm run test:kernel`, `npm run test:session`, and
 `npm run test:mvp` as compatibility checks around it.
 
+Plan 4 / Phase 2D is the permission boundary step after ToolExecutionService:
+
+```text
+runAgentLoop
+  -> PolicyEngine
+  -> PermissionEngine
+  -> ApprovalQueue if ask
+  -> HumanGate if ask
+  -> ToolExecutionService
+```
+
+The split is intentionally narrow:
+
+- `PolicyEngine` remains the risk and policy recommendation layer
+  (`allow` / `gate` / `block` / `auto_confirm`).
+- `PermissionEngine` maps the policy recommendation and runtime context to
+  `allow` / `ask` / `deny`.
+- `ApprovalQueue v1` records in-memory pending/resolved approvals for the
+  current process; it does not decide risk, persist permissions, or replace UI.
+- `HumanGate` still performs the actual user prompt or handoff.
+
+Phase 2D v1 does not claim a complete Task Cockpit approval UI, persistent
+permission store, cross-process approval recovery, or "always allow" rules.
+When implemented, it should add `npm run test:permission` and either
+`npm run test:approval-queue` or include approval queue coverage inside
+`test:permission`.
+
 ## CLI
 
 After `npm run build`:
