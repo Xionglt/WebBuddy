@@ -117,7 +117,7 @@ const stale = engine.evaluate({
     staleAfterMs: 30_000,
   },
 })
-assert.equal(stale.action, 'gate')
+assert.equal(stale.action, 'block')
 assert.equal(stale.requiresFreshContext, true)
 assert.equal(stale.policyCode, 'policy.freshness.high_risk_stale')
 assert.match(stale.reason, /Context appears stale/i)
