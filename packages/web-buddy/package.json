@@ -42,6 +42,7 @@
     "test:agent-loop": "node ./scripts/agent-loop-test.mjs",
     "test:agent-runtime": "node ./scripts/agent-runtime-test.mjs",
     "test:token-budget": "node ./scripts/token-budget-test.mjs",
+    "test:context-compaction": "node ./scripts/context-compaction-test.mjs",
     "test:kernel": "npm run build && node ./scripts/agent-kernel-test.mjs",
     "test:trace-inputs": "npm run build && node ./scripts/trace-inputs-test.mjs",
     "test:metrics": "npm run build && node ./scripts/metrics-test.mjs",
