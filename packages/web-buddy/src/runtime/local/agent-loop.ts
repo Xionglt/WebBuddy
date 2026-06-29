@@ -21,7 +21,7 @@ import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
 import type { ResumeProfile } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
-import { toLegacyToolRunResult } from '../../tools/tool-result.js'
+import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/tool-result.js'
 import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
 import { transitionWorkflowState } from '../../workflow/workflow-transition.js'
 import { pageView } from './page-view.js'
@@ -496,8 +496,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         },
       })
       let result
+      let execution: NormalizedToolResult | undefined
       try {
-        const execution = await toolExecution.execute(
+        execution = await toolExecution.execute(
           {
             id: call.id,
             name: call.name,
@@ -530,7 +531,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         }
         result = toLegacyToolRunResult(execution)
         toolSpan?.end({
-          status: result.observation.startsWith('FAILED') ? 'failed' : 'success',
+          status: execution.ok ? 'success' : 'failed',
           output: result,
           metadata: {
             pageChanged: result.pageChanged,
@@ -568,7 +569,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         await finalizeSession('failed', { steps: step, toolCalls, toolName: call.name, error: message, workflowState }, message)
         throw error
       }
-      const toolOk = !result.observation.startsWith('FAILED')
+      const toolOk = execution?.ok ?? !result.observation.startsWith('FAILED')
       const compactResult = compactToolResult(result)
       await sessionTranscript({
         type: 'tool_result',
