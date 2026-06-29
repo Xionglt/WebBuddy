@@ -7,12 +7,20 @@
  *   npm run test:agent-loop   (after build)
  */
 import assert from 'node:assert'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { COMPACTED_RUN_CONTEXT_PREFIX } from '../dist/context/run-summary.js'
+import { observationManager } from '../dist/observation/observation-manager.js'
+import { ApprovalQueue } from '../dist/permission/index.js'
 import { runJobApplicationAgent } from '../dist/sdk/orchestrator.js'
 import { loadConfig } from '../dist/sdk/config.js'
 import { writeSampleResumePdf } from '../dist/sdk/resume.js'
+import { TraceRecorder } from '../dist/sdk/trace.js'
+import { FileSessionRecorder, FileSessionStore, readJsonLines } from '../dist/session/index.js'
 import { sessionManager } from '../dist/session/manager.js'
+import { runAgentLoop } from '../dist/runtime/local/agent-loop.js'
+import { ToolRegistry } from '../dist/runtime/local/tool-registry.js'
 
 // A minimal LlmGateway stand-in: returns scripted tool calls. Each turn it
 // inspects the latest snapshot to find the right ref for the field it fills —
@@ -98,6 +106,418 @@ assert.strictEqual(agentState.finalStatus, 'completed')
 // The agent must have used the agent loop (think/act/observe events).
 const sawAct = events.some((e) => e.level === 'act' && /browser_type/.test(e.message))
 assert(sawAct, 'agent loop should have typed via browser_type')
+
+async function runPermissionScenarios() {
+  const root = mkdtempSync(join(tmpdir(), 'mfa-agent-loop-permission-'))
+  const trace = new TraceRecorder(root, {
+    runId: 'agent-loop-permission-run',
+    source: 'local-runtime',
+    scenario: 'agent-loop-permission-test',
+    profile: 'test',
+    goal: 'Verify PermissionEngine integration.',
+  })
+  const store = new FileSessionStore({ rootDir: join(root, 'sessions') })
+
+  try {
+    const approve = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-approve',
+      call: { id: 'approve-click', name: 'browser_click_text', arguments: { text: 'Open details' } },
+      risk: 'L3',
+      gateDecisions: ['approve'],
+      seedFresh: true,
+      withSession: true,
+    })
+    assert.equal(approve.toolCalls.length, 1, 'approved high-risk action should execute')
+    assert.equal(approve.toolCalls[0].args.confirmed, true, 'approved high-risk action should receive confirmed=true')
+    assert.equal(approve.gate.requests[0].kind, 'high_risk_action')
+    assert.equal(approve.queue.snapshot().approved.length, 1)
+    assertTranscriptIncludes(approve.transcript, ['policy_decision', 'permission_decision', 'approval_request', 'approval_decision', 'tool_result'])
+    assert(approve.events.some((event) => event.type === 'permission_evaluated'), 'events should include permission_evaluated')
+    assert(approve.events.some((event) => event.type === 'approval_requested'), 'events should include approval_requested')
+    assert(approve.events.some((event) => event.type === 'approval_resolved'), 'events should include approval_resolved')
+    assert(approve.events.some((event) => event.type === 'human_gate_requested'), 'old human_gate_requested event should remain')
+    assert(approve.events.some((event) => event.type === 'human_gate_resolved'), 'old human_gate_resolved event should remain')
+    assert(!approve.transcript.some((entry) => entry.type === 'context_compaction'), 'unset maxInputTokens should not compact')
+
+    const finalSubmit = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-final-submit',
+      call: { id: 'final-submit-click', name: 'browser_click_text', arguments: { text: 'Submit application' } },
+      risk: 'L3',
+      gateDecisions: ['approve'],
+      seedFresh: true,
+    })
+    assert.equal(finalSubmit.result.blocked, true, 'final submit should remain blocked after approval')
+    assert.equal(finalSubmit.toolCalls.length, 0, 'final submit tool must not execute')
+    assert.equal(finalSubmit.gate.requests[0].kind, 'final_submit')
+    assert.equal(finalSubmit.queue.snapshot().approved.length, 1)
+
+    const policyDeny = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-policy-deny',
+      call: { id: 'deny-click', name: 'browser_click_text', arguments: { text: 'Open details' } },
+      risk: 'L3',
+      gateDecisions: ['approve'],
+      seedFresh: false,
+      withSession: true,
+    })
+    assert.equal(policyDeny.result.blocked, true, 'policy block should become permission deny')
+    assert.equal(policyDeny.toolCalls.length, 0, 'permission deny should not execute the tool')
+    assert.equal(policyDeny.gate.requests.length, 0, 'permission deny should not call HumanGate')
+    assert.equal(policyDeny.queue.snapshot().all.length, 0, 'permission deny should not enqueue approval')
+    const denyEntry = policyDeny.transcript.find((entry) => entry.type === 'permission_decision')
+    assert.equal(denyEntry?.decision?.action, 'deny')
+
+    const rawAutoConfirm = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-raw-auto-confirm',
+      call: { id: 'raw-click', name: 'browser_click_text', arguments: { text: 'Submit application' } },
+      risk: 'L3',
+      safetyMode: 'raw',
+      gateDecisions: ['takeover'],
+      seedFresh: false,
+      withSession: true,
+    })
+    assert.equal(rawAutoConfirm.result.blocked, false, 'raw auto_confirm should allow execution')
+    assert.equal(rawAutoConfirm.toolCalls.length, 1, 'raw auto_confirm should execute the tool')
+    assert.equal(rawAutoConfirm.toolCalls[0].args.confirmed, true, 'raw auto_confirm should set confirmed=true')
+    assert.equal(rawAutoConfirm.gate.requests.length, 0, 'raw auto_confirm should not call HumanGate')
+    assert.equal(rawAutoConfirm.queue.snapshot().all.length, 0, 'raw auto_confirm should not enqueue approval')
+    const rawPermission = rawAutoConfirm.transcript.find((entry) => entry.type === 'permission_decision')
+    assert.equal(rawPermission?.decision?.action, 'allow')
+
+    const upload = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-upload',
+      call: { id: 'upload-file', name: 'browser_upload_file', arguments: { filePath: '/tmp/resume.pdf' } },
+      risk: 'L4',
+      gateDecisions: ['approve'],
+      seedFresh: true,
+    })
+    assert.equal(upload.toolCalls.length, 1, 'approved upload should execute')
+    assert.equal(upload.toolCalls[0].args.confirmed, true, 'approved upload should receive confirmed=true')
+    assert.equal(upload.gate.requests[0].kind, 'upload_resume')
+
+    const declined = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-decline',
+      call: { id: 'decline-click', name: 'browser_click_text', arguments: { text: 'Open details' } },
+      risk: 'L3',
+      gateDecisions: ['decline'],
+      seedFresh: true,
+    })
+    assert.equal(declined.result.blocked, true, 'HumanGate decline should block the workflow')
+    assert.equal(declined.toolCalls.length, 0, 'HumanGate decline should not execute the tool')
+    assert.equal(declined.queue.snapshot().denied.length, 1)
+
+    const takeover = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'permission-takeover',
+      call: { id: 'takeover-click', name: 'browser_click_text', arguments: { text: 'Open details' } },
+      risk: 'L3',
+      gateDecisions: ['takeover'],
+      seedFresh: true,
+    })
+    assert.equal(takeover.result.blocked, true, 'HumanGate takeover should block the workflow')
+    assert.equal(takeover.toolCalls.length, 0, 'HumanGate takeover should not execute the tool')
+    assert.equal(takeover.queue.snapshot().cancelled.length, 1)
+
+    trace.finish()
+  } finally {
+    await sessionManager.closeAll().catch(() => {})
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+async function runLoopScenario({
+  trace,
+  store,
+  sessionId,
+  call,
+  risk,
+  safetyMode = 'guarded',
+  gateDecisions,
+  seedFresh,
+  withSession = false,
+}) {
+  if (seedFresh) seedFreshObservation(sessionId)
+  const toolCalls = []
+  const queue = new ApprovalQueue()
+  const gate = new RecordingGate(gateDecisions)
+  const registry = new ToolRegistry([
+    {
+      name: call.name,
+      description: `Test tool ${call.name}`,
+      category: 'action',
+      parameters: { type: 'object', properties: {} },
+      inherentRisk: risk,
+      async run(args) {
+        toolCalls.push({ name: call.name, args: { ...args } })
+        return { observation: `${call.name} executed`, pageChanged: false }
+      },
+    },
+  ])
+  const session = withSession
+    ? await createRecorder(store, `session-${sessionId}`, `${trace.runId}-${sessionId}`)
+    : undefined
+
+  const result = await runAgentLoop({
+    goal: 'Exercise permission integration.',
+    resume: testProfile(),
+    llm: new OneToolThenDoneLlm(call),
+    registry,
+    ctx: { sessionId, highlight: false, trace },
+    gate,
+    maxSteps: 3,
+    safetyMode,
+    approvalQueue: queue,
+    session,
+  })
+
+  const transcript = session ? await readJsonLines(session.session.transcriptPath) : []
+  const events = session ? await readJsonLines(session.session.eventsPath) : []
+  return { result, toolCalls, queue, gate, transcript, events }
+}
+
+async function runCompactionScenario() {
+  const root = mkdtempSync(join(tmpdir(), 'mfa-agent-loop-compaction-'))
+  const trace = new TraceRecorder(root, {
+    runId: 'agent-loop-compaction-run',
+    source: 'local-runtime',
+    scenario: 'agent-loop-compaction-test',
+    profile: 'test',
+    goal: 'Verify runAgentLoop context compaction integration.',
+  })
+  const store = new FileSessionStore({ rootDir: join(root, 'sessions') })
+  const sessionId = 'compaction-loop'
+  const markerCalls = []
+  const llm = new CompactionAwareLlm()
+  const registry = new ToolRegistry([
+    {
+      name: 'make_large_context',
+      description: 'Create enough observation text to trigger compaction.',
+      category: 'observation',
+      parameters: { type: 'object', properties: {} },
+      inherentRisk: 'L1',
+      async run() {
+        return { observation: `large observation\n${'A'.repeat(24_000)}`, pageChanged: false }
+      },
+    },
+    {
+      name: 'compaction_marker',
+      description: 'Records that the loop continued after compaction.',
+      category: 'action',
+      parameters: {
+        type: 'object',
+        properties: {
+          marker: { type: 'string' },
+        },
+      },
+      inherentRisk: 'L1',
+      async run(args) {
+        markerCalls.push({ ...args })
+        return { observation: 'compaction marker executed', pageChanged: false }
+      },
+    },
+  ])
+
+  try {
+    seedFreshObservation(sessionId)
+    const session = await createRecorder(
+      store,
+      'session-compaction-loop',
+      `${trace.runId}-session`,
+      'Exercise context compaction integration.',
+    )
+    const result = await runAgentLoop({
+      goal: 'Exercise context compaction integration.',
+      resume: testProfile(),
+      llm,
+      registry,
+      ctx: { sessionId, highlight: false, trace },
+      gate: new RecordingGate([]),
+      maxSteps: 4,
+      session,
+      contextBudget: {
+        maxInputTokens: 1200,
+        compactThresholdRatio: 1,
+        keepRecentMessages: 4,
+      },
+    })
+
+    const transcript = await readJsonLines(session.session.transcriptPath)
+    const events = await readJsonLines(session.session.eventsPath)
+    const compactionEntry = transcript.find((entry) => entry.type === 'context_compaction')
+
+    assert.equal(result.done, true, 'compaction scenario should finish')
+    assert.equal(result.blocked, false, 'compaction scenario should not block')
+    assert(llm.sawCompacted, 'LLM should receive COMPACTED_RUN_CONTEXT after compaction')
+    assert.equal(markerCalls.length, 1, 'loop should execute a tool after compacting messages')
+    assert(compactionEntry, 'transcript should include context_compaction')
+    assert.equal(compactionEntry.summary.goal, 'Exercise context compaction integration.')
+    assert(compactionEntry.summary.source.inputMessageCount > 0, 'summary should record source message count')
+    assert(events.some((event) => event.type === 'token_budget_updated'), 'events should include token_budget_updated')
+    assert(events.some((event) => event.type === 'context_compacted'), 'events should include context_compacted')
+    assert.equal(llm.compactedMessages[0]?.role, 'system', 'compacted message set should keep the system message first')
+    assert(
+      llm.compactedMessages.some((message) => message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)),
+      'compacted message set should include COMPACTED_RUN_CONTEXT',
+    )
+
+    trace.finish()
+  } finally {
+    await sessionManager.closeAll().catch(() => {})
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+async function createRecorder(store, sessionId, runId, goal = 'Exercise permission integration.') {
+  const session = await store.create({
+    sessionId,
+    runId,
+    source: 'test',
+    goal,
+    mode: 'test',
+    traceRunId: runId,
+  })
+  return new FileSessionRecorder(store, session)
+}
+
+class CompactionAwareLlm {
+  constructor() {
+    this.hasKey = true
+    this.label = 'compaction-loop-llm'
+    this.turn = 0
+    this.sawCompacted = false
+    this.afterCompactionToolRequested = false
+    this.compactedMessages = []
+  }
+
+  async chatWithTools(messages) {
+    this.turn += 1
+    const sawCompacted = messages.some((message) => (
+      message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
+    ))
+    if (sawCompacted) {
+      this.sawCompacted = true
+      this.compactedMessages = messages
+    }
+    if (sawCompacted && !this.afterCompactionToolRequested) {
+      this.afterCompactionToolRequested = true
+      return {
+        content: 'Compacted context is available; continuing with the next tool.',
+        toolCalls: [{ id: 'compact-after', name: 'compaction_marker', arguments: { marker: 'after_compaction' } }],
+      }
+    }
+    if (!sawCompacted && this.turn === 1) {
+      return {
+        content: 'Creating a large observation before compaction.',
+        toolCalls: [{ id: 'compact-before', name: 'make_large_context', arguments: {} }],
+      }
+    }
+    return { content: 'Compaction scenario complete.', toolCalls: [] }
+  }
+}
+
+class OneToolThenDoneLlm {
+  constructor(call) {
+    this.hasKey = true
+    this.label = 'permission-loop-llm'
+    this.call = call
+    this.turn = 0
+  }
+
+  async chatWithTools() {
+    this.turn += 1
+    if (this.turn === 1) {
+      return { content: 'Requesting one tool.', toolCalls: [this.call] }
+    }
+    return { content: 'Permission scenario complete.', toolCalls: [] }
+  }
+}
+
+class RecordingGate {
+  constructor(decisions) {
+    this.decisions = [...decisions]
+    this.requests = []
+  }
+
+  async confirm(kind, message, context) {
+    this.requests.push({ kind, message, context })
+    return this.decisions.shift() ?? 'takeover'
+  }
+}
+
+function seedFreshObservation(sessionId) {
+  observationManager.refreshPageState({
+    sessionId,
+    snapshot: {
+      snapshotId: `snap-${sessionId}`,
+      url: 'https://example.test/apply',
+      title: 'Application form',
+      textSummary: 'Application form with safe draft actions and a final submit button.',
+      elements: [
+        element('e1', 'button', 'Open details', 'L3'),
+        element('e2', 'button', 'Submit application', 'L3'),
+      ],
+      stats: {
+        elementCount: 2,
+        interactiveCount: 2,
+        formCount: 1,
+        linkCount: 0,
+        buttonCount: 2,
+        inputCount: 0,
+        truncated: false,
+      },
+    },
+  })
+}
+
+function element(ref, tag, name, risk) {
+  return {
+    ref,
+    tag,
+    name,
+    text: name,
+    visible: true,
+    risk,
+    locatorHints: {},
+    fingerprint: {},
+  }
+}
+
+function assertTranscriptIncludes(transcript, expectedTypes) {
+  const types = transcript.map((entry) => entry.type)
+  for (const expected of expectedTypes) {
+    assert(types.includes(expected), `transcript should include ${expected}`)
+  }
+}
+
+function testProfile() {
+  return {
+    name: 'Zhang San',
+    email: 'zhangsan@example.com',
+    phone: '13800001234',
+    location: 'Hangzhou',
+    summary: 'Frontend engineer',
+    skills: ['TypeScript', 'Playwright'],
+    experience: [],
+    education: [],
+    keywords: [],
+    source: 'json',
+  }
+}
+
+await runPermissionScenarios()
+await runCompactionScenario()
 
 console.log('\nagent-loop-test: PASS')
 

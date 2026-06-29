@@ -15,6 +15,10 @@ export class PermissionEngine {
     this.rules = options.rules ?? defaultPermissionRules()
   }
 
+  decide(request: PermissionRequest): PermissionDecision {
+    return this.evaluate(request)
+  }
+
   evaluate(request: PermissionRequest): PermissionDecision {
     for (const rule of this.rules) {
       const decision = rule.evaluate(request, { now: this.now })

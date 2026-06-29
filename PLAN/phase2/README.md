@@ -6,6 +6,8 @@
 > 第一份实施计划见 `PLAN/phase2/plan1.md`。第二份实施计划见 `PLAN/phase2/plan2.md`。第三份实施计划见 `PLAN/phase2/plan3.md`。第四份实施计划见 `PLAN/phase2/plan4.md`。
 > Plan 2 完成后的通俗解释和架构变化图见 `PLAN/phase2/plan2-completion-explanation.md`。
 > Plan 3 完成后的功能、意义和第一性原理沉淀见 `PLAN/phase2/plan3-completion-explanation.md`。
+> Plan 4 完成后的 PermissionEngine / ApprovalQueue 集成说明见 `PLAN/phase2/plan4-completion-explanation.md`。
+> 第五份实施计划见 `PLAN/phase2/plan5.md`。
 
 ## 1. 阶段定位
 

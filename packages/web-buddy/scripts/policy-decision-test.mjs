@@ -94,7 +94,7 @@ const staleSubmit = decideToolPolicy({
     staleAfterMs: 30_000,
   },
 })
-assert.equal(staleSubmit.action, 'gate')
+assert.equal(staleSubmit.action, 'block')
 assert.equal(staleSubmit.gateKind, 'final_submit')
 assert.equal(staleSubmit.requiresFreshContext, true)
 assert.match(staleSubmit.reason, /stale/i)

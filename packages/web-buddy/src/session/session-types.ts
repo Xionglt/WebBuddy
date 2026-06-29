@@ -72,6 +72,32 @@ export interface PolicyDecisionEntry extends TranscriptEntryBase {
   decision: unknown
 }
 
+export interface PermissionDecisionEntry extends TranscriptEntryBase {
+  type: 'permission_decision'
+  permissionRequestId: string
+  toolCallId?: string
+  toolName?: string
+  request: unknown
+  decision: unknown
+}
+
+export interface ApprovalRequestEntry extends TranscriptEntryBase {
+  type: 'approval_request'
+  approvalId: string
+  permissionRequestId: string
+  toolCallId?: string
+  status: 'pending'
+  request: unknown
+}
+
+export interface ApprovalDecisionEntry extends TranscriptEntryBase {
+  type: 'approval_decision'
+  approvalId: string
+  permissionRequestId: string
+  toolCallId?: string
+  decision: unknown
+}
+
 export interface WorkflowSnapshotEntry extends TranscriptEntryBase {
   type: 'workflow_snapshot'
   workflowState: unknown
@@ -104,6 +130,9 @@ export type TranscriptEntry =
   | ToolCallEntry
   | ToolResultEntry
   | PolicyDecisionEntry
+  | PermissionDecisionEntry
+  | ApprovalRequestEntry
+  | ApprovalDecisionEntry
   | WorkflowSnapshotEntry
   | ContextCompactionEntry
   | FinalResultEntry

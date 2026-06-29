@@ -87,7 +87,7 @@ export class PolicyEngine {
         : workflowRuleFor(input, gateKind, workflowPhase) ?? highRiskGateRule(gateKind)
 
     return buildDecision({
-      action: rawAutoConfirm ? 'auto_confirm' : 'gate',
+      action: rawAutoConfirm ? 'auto_confirm' : freshnessCue ? 'block' : 'gate',
       riskLevel,
       gateKind,
       requiresFreshContext,

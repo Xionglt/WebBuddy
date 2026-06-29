@@ -5,7 +5,28 @@ import {
   renderSystemContext,
   renderUserContext,
 } from '../../agent/prompt-assembler.js'
+import {
+  contextCompactor as defaultContextCompactor,
+  type ContextCompactionInput,
+  type ContextCompactionResult,
+} from '../../context/compaction.js'
+import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
 import type { ContextRecentAction } from '../../context/types.js'
+import { estimateTokenBudget, type TokenBudgetOptions, type TokenBudgetSnapshot } from '../../kernel/token-budget.js'
+import { ApprovalQueue } from '../../permission/approval-queue.js'
+import { PermissionEngine } from '../../permission/permission-engine.js'
+import {
+  createToolPermissionRequest,
+  createWorkflowHandoffPermissionRequest,
+  type ApprovalEnqueueInput,
+  type ApprovalRequest,
+  type ApprovalResolution,
+  type ApprovalResolveDecision,
+  type ApprovalResolvePatch,
+  type ApprovalResolveResult,
+  type PermissionDecision,
+  type PermissionRequest,
+} from '../../permission/permission-types.js'
 import { decideToolPolicy, shouldStopAfterGateDecision, type PolicyEngineDecision } from '../../policy/agent-policy.js'
 import { createPolicyAuditEvent } from '../../policy/policy-audit.js'
 import { sessionManager } from '../../session/manager.js'
@@ -16,7 +37,7 @@ import {
   type SessionRecorder,
 } from '../../session/index.js'
 import { abortReason } from '../../kernel/run-controller.js'
-import type { HumanGate } from '../../sdk/human.js'
+import type { GateDecision, GateKind, HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
 import type { ResumeProfile } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
@@ -53,6 +74,14 @@ export interface AgentLoopInput {
   abortSignal?: AbortSignal
   /** Optional execution service for tests or alternate local runtimes. */
   toolExecutionService?: ToolExecutionService
+  /** Optional permission decision service for tests or alternate runtimes. */
+  permissionEngine?: AgentLoopPermissionEngine
+  /** Optional in-memory approval queue for tests or embedding runtimes. */
+  approvalQueue?: AgentLoopApprovalQueue
+  /** Optional context budget. When maxInputTokens is unset, the loop estimates but does not compact. */
+  contextBudget?: ContextBudgetOptions
+  /** Optional deterministic compactor for tests or alternate local runtimes. */
+  contextCompactor?: AgentLoopContextCompactor
 }
 
 export interface AgentLoopResult {
@@ -64,7 +93,29 @@ export interface AgentLoopResult {
   workflowState?: WorkflowState
 }
 
+export interface AgentLoopPermissionEngine {
+  decide(request: PermissionRequest): PermissionDecision
+}
+
+export interface AgentLoopApprovalQueue {
+  enqueue(request: ApprovalEnqueueInput | ApprovalRequest): ApprovalRequest
+  resolve(
+    approvalId: string,
+    result: ApprovalResolveResult | ApprovalResolveDecision,
+    patch?: Omit<ApprovalResolvePatch, 'status' | 'decision'>,
+  ): ApprovalRequest
+}
+
+export interface ContextBudgetOptions extends TokenBudgetOptions {
+  keepRecentMessages?: number
+}
+
+export interface AgentLoopContextCompactor {
+  compact(input: ContextCompactionInput): ContextCompactionResult
+}
+
 const DEFAULT_MAX_STEPS = 16
+const DEFAULT_KEEP_RECENT_MESSAGES = 6
 
 /**
  * The generic ReAct-style loop: the LLM picks browser tools itself, we execute
@@ -81,6 +132,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
   const tools = registry.toOpenAITools()
   const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
+  const permissionEngine = input.permissionEngine ?? new PermissionEngine()
+  const approvalQueue = input.approvalQueue ?? new ApprovalQueue()
   const session = input.session
 
   let step = 0
@@ -92,6 +145,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let sessionFinalized = false
   const recentActions: ContextRecentAction[] = []
   const blockers: string[] = []
+  const permissionRequests: PermissionRequest[] = []
+  const permissionDecisions: PermissionDecision[] = []
+  const approvals: ApprovalRequest[] = []
 
   const sessionAction = async (label: string, action: () => Promise<void>) => {
     if (!session) return
@@ -118,6 +174,147 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       data: { workflowState: state },
     })
     await sessionWorkflow(state)
+  }
+  const recordPermissionEvaluation = async (
+    request: PermissionRequest,
+    decision: PermissionDecision,
+    currentStep: number,
+  ) => {
+    const toolCallId = permissionToolCallId(request)
+    const toolName = permissionToolName(request)
+    const requestMetadata = permissionRequestMetadata(request)
+    const decisionMetadata = permissionMetadata(decision)
+    ctx.trace.agentTrace?.recordEvent('permission_decision', {
+      step: currentStep,
+      request: requestMetadata,
+      decision: decisionMetadata,
+    })
+    await sessionTranscript({
+      type: 'permission_decision',
+      ...(request.turnId ? { turnId: request.turnId } : {}),
+      permissionRequestId: request.requestId,
+      ...(toolCallId ? { toolCallId } : {}),
+      ...(toolName ? { toolName } : {}),
+      request: requestMetadata,
+      decision: decisionMetadata,
+    })
+    await sessionEvent({
+      type: 'permission_evaluated',
+      ...(request.turnId ? { turnId: request.turnId } : {}),
+      ...(toolCallId ? { toolCallId } : {}),
+      message: `${permissionSubjectLabel(request)}: ${decision.action}`,
+      data: { request: requestMetadata, decision: decisionMetadata },
+    })
+  }
+  const decidePermission = async (request: PermissionRequest, currentStep: number): Promise<PermissionDecision> => {
+    const decision = permissionEngine.decide(request)
+    permissionRequests.push(request)
+    permissionDecisions.push(decision)
+    await recordPermissionEvaluation(request, decision, currentStep)
+    return decision
+  }
+  const enqueueApproval = async (
+    request: PermissionRequest,
+    decision: PermissionDecision,
+    currentStep: number,
+  ): Promise<ApprovalRequest> => {
+    const approval = approvalQueue.enqueue(approvalInputFor(request, decision))
+    rememberApproval(approvals, approval)
+    const approvalData = approvalMetadata(approval)
+    ctx.trace.agentTrace?.recordEvent('approval_requested', { step: currentStep, approval: approvalData })
+    await sessionTranscript({
+      type: 'approval_request',
+      ...(approval.turnId ? { turnId: approval.turnId } : {}),
+      approvalId: approval.approvalId,
+      permissionRequestId: approval.permissionRequestId ?? request.requestId,
+      ...(approval.toolCallId ? { toolCallId: approval.toolCallId } : {}),
+      status: 'pending',
+      request: approvalData,
+    })
+    await sessionEvent({
+      type: 'approval_requested',
+      ...(approval.turnId ? { turnId: approval.turnId } : {}),
+      ...(approval.toolCallId ? { toolCallId: approval.toolCallId } : {}),
+      message: `Approval requested: ${approval.gateKind}.`,
+      data: { approval: approvalData },
+    })
+    return approval
+  }
+  const resolveApproval = async (
+    approval: ApprovalRequest,
+    gateDecision: GateDecision,
+    currentStep: number,
+  ): Promise<ApprovalRequest> => {
+    const resolved = approvalQueue.resolve(approval.approvalId, {
+      decision: gateDecision,
+      source: 'human_gate',
+      reason: `HumanGate returned ${gateDecision}.`,
+    })
+    rememberApproval(approvals, resolved)
+    const approvalData = approvalMetadata(resolved)
+    const resolutionData = resolved.resolution ? approvalResolutionMetadata(resolved.resolution) : undefined
+    ctx.trace.agentTrace?.recordEvent('approval_resolved', {
+      step: currentStep,
+      approval: approvalData,
+      resolution: resolutionData,
+    })
+    await sessionTranscript({
+      type: 'approval_decision',
+      ...(resolved.turnId ? { turnId: resolved.turnId } : {}),
+      approvalId: resolved.approvalId,
+      permissionRequestId: resolved.permissionRequestId ?? approval.permissionRequestId ?? approval.approvalId,
+      ...(resolved.toolCallId ? { toolCallId: resolved.toolCallId } : {}),
+      decision: { decision: gateDecision, approval: approvalData, resolution: resolutionData },
+    })
+    await sessionEvent({
+      type: 'approval_resolved',
+      ...(resolved.turnId ? { turnId: resolved.turnId } : {}),
+      ...(resolved.toolCallId ? { toolCallId: resolved.toolCallId } : {}),
+      message: `Approval resolved: ${gateDecision}.`,
+      data: { approval: approvalData, resolution: resolutionData },
+    })
+    return resolved
+  }
+  const recordWorkflowHandoffPermission = async (state: WorkflowState, currentStep: number, reason: string) => {
+    const handoffKind = workflowHandoffKind(state)
+    if (!handoffKind) return
+    const turnId = turnIdForStep(currentStep)
+    const request = createWorkflowHandoffPermissionRequest({
+      handoffKind,
+      reason,
+      runId: session?.session.runId ?? ctx.trace.runId,
+      sessionId: session?.session.sessionId ?? ctx.sessionId,
+      turnId,
+      step: currentStep,
+      workflowState: state,
+      currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
+    })
+    const decision = await decidePermission(request, currentStep)
+    if (decision.action !== 'ask') return
+
+    const approval = await enqueueApproval(request, decision, currentStep)
+    await sessionEvent({
+      type: 'human_gate_requested',
+      turnId,
+      message: `Gate requested for workflow handoff: ${handoffKind}.`,
+      data: { kind: handoffKind, reason: decision.reason, approvalId: approval.approvalId },
+    })
+    const gateDecision = await gate.confirm(handoffKind, approval.message, approval.context)
+    const resolvedApproval = await resolveApproval(approval, gateDecision, currentStep)
+    await sessionEvent({
+      type: 'human_gate_resolved',
+      turnId,
+      message: `Gate resolved: ${gateDecision}.`,
+      data: { kind: handoffKind, decision: gateDecision, approvalId: resolvedApproval.approvalId },
+    })
+    ctx.trace.record({
+      phase: 'agent_loop',
+      action: `GATE [${handoffKind}] workflow_handoff → ${gateDecision}`,
+      url: request.currentUrl,
+      risk: request.risk,
+      observation: decision.reason,
+      status: 'blocked',
+    })
   }
   const finalizeSession = async (
     status: Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'>,
@@ -202,15 +399,74 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   await recordWorkflowSnapshot(workflowState, step, 'Initial workflow snapshot.')
   const initialHandoffSummary = workflowHandoffSummary(workflowState)
   if (initialHandoffSummary) {
+    await recordWorkflowHandoffPermission(workflowState, step, initialHandoffSummary)
     emit('done', initialHandoffSummary, step)
     ctx.trace.record({ phase: 'agent_loop', action: initialHandoffSummary, status: 'blocked' })
     await finalizeSession('blocked', { steps: step, toolCalls, summary: initialHandoffSummary, workflowState }, initialHandoffSummary)
     return { steps: step, toolCalls, done: true, blocked: true, summary: initialHandoffSummary, workflowState }
   }
-  const messages: ChatMessage[] = [
+  let messages: ChatMessage[] = [
     { role: 'system', content: renderSystemContext(latestContext) },
     { role: 'user', content: renderInitialUserContext(latestContext, firstView) },
   ]
+  const maybeCompactMessages = async (turnId: string) => {
+    const tokenBudget = estimateTokenBudget(messages, input.contextBudget)
+    await sessionEvent({
+      type: 'token_budget_updated',
+      turnId,
+      message: 'Token budget updated.',
+      data: { tokenBudget },
+    })
+
+    if (!tokenBudget.compactRecommended) return
+
+    const compactor = input.contextCompactor ?? defaultContextCompactor
+    const compaction = compactor.compact({
+      goal,
+      runId: session?.session.runId ?? ctx.trace.runId,
+      sessionId: session?.session.sessionId ?? ctx.sessionId,
+      turnId,
+      step,
+      messages,
+      latestContext,
+      workflowState,
+      recentActions,
+      blockers,
+      permissionRequests,
+      permissionDecisions,
+      approvals,
+    })
+    const reason = compactReason(tokenBudget)
+    const compactedMessages = compactedMessageSet(messages, {
+      systemContent: renderSystemContext(latestContext),
+      compactedMessage: compaction.compactedMessage,
+      keepRecentMessages: input.contextBudget?.keepRecentMessages ?? DEFAULT_KEEP_RECENT_MESSAGES,
+    })
+    const postCompactionTokenBudget = estimateTokenBudget(compactedMessages, input.contextBudget)
+
+    await sessionTranscript({
+      type: 'context_compaction',
+      turnId,
+      summaryId: compaction.summary.summaryId,
+      reason,
+      tokenBudget,
+      summary: compaction.summary,
+    })
+    await sessionEvent({
+      type: 'context_compacted',
+      turnId,
+      message: `Context compacted: ${reason}`,
+      data: {
+        summaryId: compaction.summary.summaryId,
+        summary: compaction.summary,
+        tokenBudget,
+        postCompactionTokenBudget,
+        stats: compaction.stats,
+      },
+    })
+
+    messages = compactedMessages
+  }
 
   while (step < maxSteps) {
     step += 1
@@ -218,6 +474,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     await sessionEvent({ type: 'turn_started', turnId, message: `Turn ${step} started.` })
     const abortedBeforeModel = await checkAbort(turnId)
     if (abortedBeforeModel) return abortedBeforeModel
+    await maybeCompactMessages(turnId)
+    const abortedAfterCompaction = await checkAbort(turnId)
+    if (abortedAfterCompaction) return abortedAfterCompaction
     let completion
     try {
       completion = await llm.chatWithTools(messages, { tools, temperature: 0.2 })
@@ -308,13 +567,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         message: `${call.name}(${argBrief})`,
         data: { name: call.name, risk, argBrief },
       })
+      const refLabel = call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined
       const policyDecision = decideToolPolicy({
         toolName: call.name,
         args: call.arguments,
         risk,
         safetyMode,
         currentUrl,
-        refLabel: call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined,
+        refLabel,
         freshness: latestContext.freshness,
         workflowState,
       })
@@ -340,63 +600,97 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         data: { decision: policyMetadata(policyDecision) },
       })
 
-      // Gate risky actions before running.
-      if (policyDecision.action === 'block') {
-        const note = `BLOCKED by policy [${policyDecision.policyCode}]. ${policyDecision.reason}`
-        messages.push(toolMessage(call.id, noteWithPolicy(note, policyDecision)))
-        blockers.push(`${call.name}(${argBrief}) blocked by ${policyDecision.policyCode}: ${policyDecision.reason}`)
+      const permissionRequest = createToolPermissionRequest({
+        call: {
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        },
+        policyDecision,
+        risk,
+        currentUrl,
+        workflowState,
+        runId: session?.session.runId ?? ctx.trace.runId,
+        sessionId: session?.session.sessionId ?? ctx.sessionId,
+        turnId,
+        step,
+        argBrief,
+        toolCategory,
+        refLabel,
+        freshness: latestContext.freshness,
+      })
+      const permissionDecision = await decidePermission(permissionRequest, step)
+
+      if (permissionDecision.action === 'deny') {
+        const note = `BLOCKED by permission [${permissionDecision.ruleId}]. ${permissionDecision.reason}`
+        const observation = noteWithPermission(note, policyDecision, permissionDecision)
+        messages.push(toolMessage(call.id, observation))
+        blockers.push(`${call.name}(${argBrief}) denied by ${permissionDecision.ruleId}: ${permissionDecision.reason}`)
         rememberRecentAction(recentActions, {
           step,
           toolName: call.name,
           argumentsSummary: argBrief,
           status: 'blocked',
           risk,
-          observation: noteWithPolicy(note, policyDecision),
+          observation,
         })
         blocked = true
         done = true
-        summary = `Policy blocked ${call.name}: ${policyDecision.reason}`
+        summary = policyDecision.action === 'block'
+          ? `Policy blocked ${call.name}: ${policyDecision.reason}`
+          : `Permission denied ${call.name}: ${permissionDecision.reason}`
         workflowState = transitionWorkflowState({
           previous: workflowState,
           currentUrl,
           page: latestContext.page,
           form: latestContext.form,
           policyDecision,
-          gateKind: policyDecision.gateKind,
+          gateKind: permissionDecision.gateKind ?? policyDecision.gateKind,
           agentDoneBlocked: true,
         }).state
-        await recordWorkflowSnapshot(workflowState, step, `Policy blocked ${call.name}.`)
-        emit('gate', `[policy:block] ${call.name}(${argBrief})`, step)
+        await recordWorkflowSnapshot(workflowState, step, `Permission denied ${call.name}.`)
+        emit('gate', `[permission:deny] ${call.name}(${argBrief})`, step)
         break
-      } else if (policyDecision.action === 'auto_confirm') {
-        call.arguments.confirmed = true
-      } else if (policyDecision.action === 'gate') {
-        const kind = policyDecision.gateKind ?? 'high_risk_action'
+      }
+
+      if (permissionDecision.action === 'allow') {
+        if (policyDecision.action === 'auto_confirm') markConfirmed(call)
+      } else if (permissionDecision.action === 'ask') {
+        const approval = await enqueueApproval(permissionRequest, permissionDecision, step)
+        const kind = approval.gateKind
         await sessionEvent({
           type: 'human_gate_requested',
           turnId,
           toolCallId: call.id,
           message: `Gate requested for ${call.name}.`,
-          data: { kind, risk, reason: policyDecision.reason },
+          data: {
+            kind,
+            risk,
+            reason: permissionDecision.reason,
+            permissionRequestId: permissionRequest.requestId,
+            approvalId: approval.approvalId,
+          },
         })
-        const decision = await gate.confirm(kind, `Agent wants to ${call.name} (${argBrief})`, {
-          url: currentUrl,
-          risk,
-          detail: policyDecision.reason,
-        })
+        const decision = await gate.confirm(kind, approval.message, approval.context)
+        const resolvedApproval = await resolveApproval(approval, decision, step)
         await sessionEvent({
           type: 'human_gate_resolved',
           turnId,
           toolCallId: call.id,
           message: `Gate resolved: ${decision}.`,
-          data: { kind, decision },
+          data: {
+            kind,
+            decision,
+            permissionRequestId: permissionRequest.requestId,
+            approvalId: resolvedApproval.approvalId,
+          },
         })
         ctx.trace.record({
           phase: 'agent_loop',
           action: `GATE [${kind}] ${call.name}(${argBrief}) → ${decision}`,
           url: currentUrl,
           risk,
-          observation: policyDecision.reason,
+          observation: permissionDecision.reason,
           status: decision === 'approve' ? 'ok' : 'blocked',
         })
         workflowState = transitionWorkflowState({
@@ -412,15 +706,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         emit('gate', `[${kind}] ${call.name}(${argBrief}) → ${decision}`, step)
         if (kind === 'final_submit') {
           const note = `BLOCKED by final-submit safety gate (${decision}). Do not retry this action; call agent_done and hand the final submission to the human.`
-          messages.push(toolMessage(call.id, noteWithPolicy(note, policyDecision)))
-          blockers.push(`final_submit gate stopped ${call.name}(${argBrief}) with decision=${decision}: ${policyDecision.reason}`)
+          const observation = noteWithPermission(note, policyDecision, permissionDecision)
+          messages.push(toolMessage(call.id, observation))
+          blockers.push(`final_submit gate stopped ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
           rememberRecentAction(recentActions, {
             step,
             toolName: call.name,
             argumentsSummary: argBrief,
             status: 'blocked',
             risk,
-            observation: noteWithPolicy(note, policyDecision),
+            observation,
           })
           blocked = true
           done = true
@@ -440,17 +735,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         }
         if (decision !== 'approve') {
           const note = `BLOCKED by human gate (${decision}). Do not retry this action; call agent_done if you cannot proceed.`
-          messages.push(toolMessage(call.id, noteWithPolicy(note, policyDecision)))
-          blockers.push(`${kind} gate stopped ${call.name}(${argBrief}) with decision=${decision}: ${policyDecision.reason}`)
+          const observation = noteWithPermission(note, policyDecision, permissionDecision)
+          messages.push(toolMessage(call.id, observation))
+          blockers.push(`${kind} gate stopped ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
           rememberRecentAction(recentActions, {
             step,
             toolName: call.name,
             argumentsSummary: argBrief,
             status: 'blocked',
             risk,
-            observation: noteWithPolicy(note, policyDecision),
+            observation,
           })
-          if (shouldStopAfterGateDecision(decision)) {
+          if (decision === 'decline' || shouldStopAfterGateDecision(decision)) {
             blocked = true
             done = true
             summary = `Human ${decision} the ${kind} step.`
@@ -465,12 +761,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
               agentDoneBlocked: true,
             }).state
             await recordWorkflowSnapshot(workflowState, step, `Human gate stopped ${call.name}.`)
+            break
           }
           continue
         }
-        // approved → mark confirmed for clicks
-        if (call.name === 'browser_click' || call.name === 'browser_click_text') call.arguments.confirmed = true
+        markConfirmed(call)
       }
+
+      const abortedBeforeExecution = await checkAbort(turnId)
+      if (abortedBeforeExecution) return abortedBeforeExecution
 
       emit('act', `${call.name}(${argBrief})`, step)
       await sessionEvent({
@@ -663,6 +962,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         emit('done', handoffSummary, step)
         ctx.trace.record({ phase: 'agent_loop', action: handoffSummary, status: 'blocked' })
         await recordWorkflowSnapshot(workflowState, step, handoffSummary)
+        await recordWorkflowHandoffPermission(workflowState, step, handoffSummary)
         break
       }
       messages.push({ role: 'user', content: `UPDATED_CONTEXT\n${renderUserContext(latestContext)}` })
@@ -695,6 +995,68 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
 function turnIdForStep(step: number): string {
   return `turn_${String(step).padStart(3, '0')}`
+}
+
+function compactReason(tokenBudget: TokenBudgetSnapshot): string {
+  const estimated = tokenBudget.estimatedTotalTokens ?? 0
+  const threshold = tokenBudget.compactThresholdTokens
+  if (threshold !== undefined) {
+    return `Estimated context ${estimated} tokens reached compaction threshold ${threshold}.`
+  }
+  return `Estimated context ${estimated} tokens reached compaction threshold.`
+}
+
+function compactedMessageSet(
+  messages: ChatMessage[],
+  input: {
+    systemContent: string
+    compactedMessage: ChatMessage
+    keepRecentMessages: number
+  },
+): ChatMessage[] {
+  return [
+    { role: 'system', content: input.systemContent },
+    input.compactedMessage,
+    ...recentMessagesForCompaction(messages, input.keepRecentMessages),
+  ]
+}
+
+function recentMessagesForCompaction(messages: ChatMessage[], keepRecentMessages: number): ChatMessage[] {
+  const keep = normalizeKeepRecentMessages(keepRecentMessages)
+  if (keep === 0) return []
+  const candidates = messages.filter((message) => (
+    message.role !== 'system' && !isCompactedRunContextMessage(message)
+  ))
+  return sanitizeRecentMessageTail(candidates.slice(Math.max(0, candidates.length - keep)))
+}
+
+function sanitizeRecentMessageTail(messages: ChatMessage[]): ChatMessage[] {
+  let tail = [...messages]
+  while (tail[0]?.role === 'tool') tail = tail.slice(1)
+
+  while (tail[0]?.role === 'assistant' && tail[0].tool_calls?.length) {
+    const missingToolCallIds = new Set(tail[0].tool_calls.map((toolCall) => toolCall.id))
+    let index = 1
+    while (index < tail.length && tail[index].role === 'tool') {
+      const toolCallId = tail[index].tool_call_id
+      if (toolCallId) missingToolCallIds.delete(toolCallId)
+      index += 1
+    }
+    if (missingToolCallIds.size === 0) break
+    tail = tail.slice(index)
+    while (tail[0]?.role === 'tool') tail = tail.slice(1)
+  }
+
+  return tail
+}
+
+function normalizeKeepRecentMessages(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_KEEP_RECENT_MESSAGES
+  return Math.max(0, Math.floor(value))
+}
+
+function isCompactedRunContextMessage(message: ChatMessage): boolean {
+  return message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
 }
 
 function sessionEventTypeForStatus(status: Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'>) {
@@ -738,6 +1100,12 @@ function workflowHandoffSummary(workflowState: WorkflowState): string | undefine
   return undefined
 }
 
+function workflowHandoffKind(workflowState: WorkflowState): Extract<GateKind, 'login' | 'captcha'> | undefined {
+  if (workflowState.phase === 'login_required') return 'login'
+  if (workflowState.phase === 'captcha_required') return 'captcha'
+  return undefined
+}
+
 function briefArgs(name: string, args: Record<string, unknown>): string {
   const parts: string[] = []
   for (const [k, v] of Object.entries(args)) {
@@ -754,8 +1122,18 @@ function labelForClick(args: Record<string, unknown>, ctx: ToolContext): string 
   return [stored?.name, stored?.text].filter(Boolean).join(' ')
 }
 
-function noteWithPolicy(note: string, decision: PolicyEngineDecision): string {
-  return `${note}\nPolicy [${decision.policyCode}]: ${decision.reason}`
+function markConfirmed(call: { name: string; arguments: Record<string, unknown> }): void {
+  if (call.name === 'browser_click' || call.name === 'browser_click_text' || call.name === 'browser_upload_file') {
+    call.arguments.confirmed = true
+  }
+}
+
+function noteWithPermission(note: string, policy: PolicyEngineDecision, permission: PermissionDecision): string {
+  return [
+    note,
+    `Policy [${policy.policyCode}]: ${policy.reason}`,
+    `Permission [${permission.ruleId}]: ${permission.reason}`,
+  ].join('\n')
 }
 
 function policyMetadata(decision: PolicyEngineDecision): Record<string, unknown> {
@@ -770,6 +1148,193 @@ function policyMetadata(decision: PolicyEngineDecision): Record<string, unknown>
     workflowPhase: decision.workflowPhase,
     auditTags: decision.auditTags,
   }
+}
+
+function permissionRequestMetadata(request: PermissionRequest): Record<string, unknown> {
+  return {
+    schemaVersion: request.schemaVersion,
+    requestId: request.requestId,
+    runId: request.runId,
+    sessionId: request.sessionId,
+    turnId: request.turnId,
+    step: request.step,
+    requestedAt: request.requestedAt,
+    subject: permissionSubjectMetadata(request),
+    risk: request.risk,
+    riskLevel: request.riskLevel,
+    currentUrl: request.currentUrl,
+    workflowPhase: request.workflowPhase,
+    gateKind: request.gateKind,
+    policy: { ...request.policy, auditTags: [...request.policy.auditTags] },
+    context: request.context
+      ? {
+          ...request.context,
+          ...(request.context.freshness && typeof request.context.freshness === 'object'
+            ? { freshness: { ...(request.context.freshness as Record<string, unknown>) } }
+            : {}),
+        }
+      : undefined,
+  }
+}
+
+function permissionSubjectMetadata(request: PermissionRequest): Record<string, unknown> {
+  if (request.subject.kind === 'tool_call') {
+    return {
+      ...request.subject,
+      args: { ...request.subject.args },
+    }
+  }
+  return { ...request.subject }
+}
+
+function permissionMetadata(decision: PermissionDecision): Record<string, unknown> {
+  return {
+    schemaVersion: decision.schemaVersion,
+    requestId: decision.requestId,
+    action: decision.action,
+    source: decision.source,
+    ruleId: decision.ruleId,
+    policyCode: decision.policyCode,
+    policyRuleId: decision.policyRuleId,
+    risk: decision.risk,
+    riskLevel: decision.riskLevel,
+    reason: decision.reason,
+    decidedAt: decision.decidedAt,
+    gateKind: decision.gateKind,
+    requiresFreshContext: decision.requiresFreshContext,
+    rememberable: decision.rememberable,
+    remember: {
+      supportedScopes: [...decision.remember.supportedScopes],
+      defaultScope: decision.remember.defaultScope,
+    },
+    auditTags: [...decision.auditTags],
+  }
+}
+
+function approvalInputFor(request: PermissionRequest, decision: PermissionDecision): ApprovalEnqueueInput {
+  const gateKind = decision.gateKind ?? request.gateKind ?? fallbackGateKind(request)
+  const toolCallId = permissionToolCallId(request)
+  const toolName = permissionToolName(request)
+  const argBrief = request.subject.kind === 'tool_call' ? request.subject.argBrief : undefined
+  return {
+    id: approvalIdFor(request),
+    runId: request.runId,
+    sessionId: request.sessionId,
+    ...(request.turnId ? { turnId: request.turnId } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    permissionRequestId: request.requestId,
+    reason: decision.reason,
+    gateKind,
+    ...(request.risk ? { risk: request.risk } : {}),
+    riskLevel: decision.riskLevel,
+    title: approvalTitle(gateKind),
+    message: approvalMessage(request),
+    context: {
+      ...(request.currentUrl ? { url: request.currentUrl } : {}),
+      ...(request.risk ? { risk: request.risk } : {}),
+      detail: decision.reason,
+      ...(toolName ? { toolName } : {}),
+      ...(argBrief ? { argBrief } : {}),
+      policyCode: request.policy.policyCode,
+      ruleId: decision.ruleId,
+      ...(request.workflowPhase ? { workflowPhase: request.workflowPhase } : {}),
+      permissionReason: decision.reason,
+    },
+    metadata: {
+      permission: permissionMetadata(decision),
+      policy: { ...request.policy, auditTags: [...request.policy.auditTags] },
+    },
+  }
+}
+
+function approvalIdFor(request: PermissionRequest): string {
+  return request.requestId.replace(/^perm_/, 'appr_')
+}
+
+function approvalTitle(gateKind: GateKind): string {
+  if (gateKind === 'final_submit') return 'Approval required: Final submission'
+  if (gateKind === 'upload_resume') return 'Approval required: Upload resume'
+  if (gateKind === 'save_resume') return 'Approval required: Save resume draft'
+  if (gateKind === 'login') return 'Approval required: Login'
+  if (gateKind === 'captcha') return 'Approval required: Captcha / verification'
+  return 'Approval required: High-risk action'
+}
+
+function approvalMessage(request: PermissionRequest): string {
+  if (request.subject.kind === 'tool_call') {
+    return `Agent wants to ${request.subject.toolName} (${request.subject.argBrief ?? briefArgs(request.subject.toolName, request.subject.args)})`
+  }
+  return request.subject.reason
+}
+
+function fallbackGateKind(request: PermissionRequest): GateKind {
+  if (request.subject.kind === 'workflow_handoff') return request.subject.handoffKind
+  return 'high_risk_action'
+}
+
+function approvalMetadata(approval: ApprovalRequest): Record<string, unknown> {
+  return {
+    schemaVersion: approval.schemaVersion,
+    id: approval.id,
+    approvalId: approval.approvalId,
+    permissionRequestId: approval.permissionRequestId,
+    runId: approval.runId,
+    sessionId: approval.sessionId,
+    turnId: approval.turnId,
+    toolCallId: approval.toolCallId,
+    status: approval.status,
+    kind: approval.kind,
+    gateKind: approval.gateKind,
+    risk: approval.risk,
+    riskLevel: approval.riskLevel,
+    title: approval.title,
+    message: approval.message,
+    reason: approval.reason,
+    context: approval.context ? { ...approval.context } : undefined,
+    allowedDecisions: [...approval.allowedDecisions],
+    createdAt: approval.createdAt,
+    updatedAt: approval.updatedAt,
+    resolvedAt: approval.resolvedAt,
+    expiresAt: approval.expiresAt,
+    resolution: approval.resolution ? approvalResolutionMetadata(approval.resolution) : undefined,
+    metadata: approval.metadata ? { ...approval.metadata } : undefined,
+  }
+}
+
+function approvalResolutionMetadata(resolution: ApprovalResolution): Record<string, unknown> {
+  return {
+    schemaVersion: resolution.schemaVersion,
+    id: resolution.id,
+    approvalId: resolution.approvalId,
+    permissionRequestId: resolution.permissionRequestId,
+    status: resolution.status,
+    decision: resolution.decision,
+    source: resolution.source,
+    reason: resolution.reason,
+    resolvedAt: resolution.resolvedAt,
+    decidedAt: resolution.decidedAt,
+    data: resolution.data ? { ...resolution.data } : undefined,
+  }
+}
+
+function permissionToolCallId(request: PermissionRequest): string | undefined {
+  return request.subject.kind === 'tool_call' ? request.subject.toolCallId : undefined
+}
+
+function permissionToolName(request: PermissionRequest): string | undefined {
+  return request.subject.kind === 'tool_call' ? request.subject.toolName : undefined
+}
+
+function permissionSubjectLabel(request: PermissionRequest): string {
+  if (request.subject.kind === 'tool_call') return request.subject.toolName
+  return `workflow_${request.subject.handoffKind}`
+}
+
+function rememberApproval(approvals: ApprovalRequest[], approval: ApprovalRequest, maxApprovals = 24): void {
+  const existingIndex = approvals.findIndex((item) => item.approvalId === approval.approvalId)
+  if (existingIndex >= 0) approvals[existingIndex] = approval
+  else approvals.push(approval)
+  if (approvals.length > maxApprovals) approvals.splice(0, approvals.length - maxApprovals)
 }
 
 function rememberRecentAction(
