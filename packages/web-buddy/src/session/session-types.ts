@@ -77,6 +77,14 @@ export interface WorkflowSnapshotEntry extends TranscriptEntryBase {
   workflowState: unknown
 }
 
+export interface ContextCompactionEntry extends TranscriptEntryBase {
+  type: 'context_compaction'
+  summaryId: string
+  reason: string
+  tokenBudget: unknown
+  summary: unknown
+}
+
 export interface FinalResultEntry extends TranscriptEntryBase {
   type: 'final_result'
   status: 'completed' | 'blocked' | 'failed' | 'aborted'
@@ -97,6 +105,7 @@ export type TranscriptEntry =
   | ToolResultEntry
   | PolicyDecisionEntry
   | WorkflowSnapshotEntry
+  | ContextCompactionEntry
   | FinalResultEntry
   | ErrorEntry
 

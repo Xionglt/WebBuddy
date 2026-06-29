@@ -4,6 +4,7 @@ export type {
   AgentSessionSource,
   AgentSessionStatus,
   AssistantMessageEntry,
+  ContextCompactionEntry,
   CreateSessionInput,
   ErrorEntry,
   FinalResultEntry,

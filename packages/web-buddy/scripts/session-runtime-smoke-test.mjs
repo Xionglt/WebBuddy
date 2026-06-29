@@ -95,6 +95,41 @@ try {
   assert.equal(result.done, true)
   assert.equal(result.blocked, false)
 
+  await recorder.transcript({
+    type: 'context_compaction',
+    summaryId: 'smoke-context-compaction',
+    reason: 'session smoke additive compatibility check',
+    tokenBudget: {
+      compactRecommended: false,
+      estimatedTokens: 128,
+    },
+    summary: {
+      schemaVersion: 'compact-run-summary/v1',
+      goal: 'Verify runtime session recording.',
+    },
+  })
+  await recorder.event({
+    type: 'token_budget_updated',
+    message: 'Token budget updated.',
+    data: {
+      tokenBudget: {
+        compactRecommended: false,
+        estimatedTokens: 128,
+      },
+    },
+  })
+  await recorder.event({
+    type: 'context_compacted',
+    message: 'Context compacted.',
+    data: {
+      summaryId: 'smoke-context-compaction',
+      tokenBudget: {
+        compactRecommended: false,
+        estimatedTokens: 128,
+      },
+    },
+  })
+
   const updated = await store.get(session.sessionId)
   assert.equal(updated?.status, 'completed')
   assert(existsSync(session.workflowPath), 'workflow.json should exist after runtime run')
@@ -104,11 +139,14 @@ try {
   for (const expected of ['user_message', 'assistant_message', 'tool_call', 'tool_result', 'workflow_snapshot', 'final_result']) {
     assert(types.includes(expected), `transcript should include ${expected}`)
   }
+  assert(types.includes('context_compaction'), 'transcript should accept additive context_compaction entries')
 
   const events = await readJsonLines(session.eventsPath)
   assert(events.some((event) => event.type === 'session_started'), 'events should include session_started')
   assert(events.some((event) => event.type === 'tool_completed'), 'events should include tool_completed')
   assert(events.some((event) => event.type === 'session_completed'), 'events should include session_completed')
+  assert(events.some((event) => event.type === 'token_budget_updated'), 'events should accept additive token_budget_updated')
+  assert(events.some((event) => event.type === 'context_compacted'), 'events should accept additive context_compacted')
 
   const workflow = JSON.parse(readFileSync(session.workflowPath, 'utf8'))
   assert.equal(workflow.workflowState.schemaVersion, 'workflow-state/v1')

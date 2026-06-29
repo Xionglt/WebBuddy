@@ -9,6 +9,8 @@ export type KernelEventType =
   | 'tool_completed'
   | 'tool_failed'
   | 'policy_evaluated'
+  | 'token_budget_updated'
+  | 'context_compacted'
   | 'workflow_updated'
   | 'human_gate_requested'
   | 'human_gate_resolved'
