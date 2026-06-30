@@ -19,6 +19,16 @@ try {
     now: '2026-06-28T00:00:00.000Z',
   })
   const recorder = new FileSessionRecorder(store, session)
+  const completionGateDecision = {
+    schemaVersion: 'completion-gate-decision/v1',
+    action: 'allow',
+    recommendedStatus: 'completed',
+    reason: 'Workflow evidence is sufficient for completion.',
+    missingCriteria: [],
+    blockers: [],
+    workflowPhase: 'observing',
+    evidenceIds: ['store-workflow-evidence'],
+  }
 
   assert(existsSync(join(session.outputDir, 'session.json')), 'session.json should exist')
   assert(existsSync(session.transcriptPath), 'transcript.jsonl should exist')
@@ -54,6 +64,11 @@ try {
     },
   })
   await recorder.transcript({
+    type: 'completion_gate',
+    turnId: 'turn-additive',
+    decision: completionGateDecision,
+  })
+  await recorder.transcript({
     type: 'context_compaction',
     turnId: 'turn-additive',
     summaryId: 'store-context-compaction',
@@ -82,6 +97,12 @@ try {
     data: { evidenceIds: ['store-workflow-evidence'] },
   })
   await recorder.event({
+    type: 'completion_gate_evaluated',
+    turnId: 'turn-additive',
+    message: 'Completion gate evaluated.',
+    data: completionGateDecision,
+  })
+  await recorder.event({
     type: 'context_compacted',
     turnId: 'turn-additive',
     message: 'Context compacted.',
@@ -101,6 +122,7 @@ try {
     'assistant_message',
     'workflow_evidence',
     'workflow_evaluation',
+    'completion_gate',
     'context_compaction',
   ])
   for (const entry of transcript) {
@@ -109,12 +131,22 @@ try {
     assert.equal(entry.runId, session.runId)
     assert(entry.entryId, 'transcript entries should have entry ids')
   }
+  const completionGate = transcript.find((entry) => entry.type === 'completion_gate')
+  assert(completionGate, 'transcript should include completion_gate')
+  assert.equal(completionGate.decision.action, 'allow')
+  assert.equal(completionGate.decision.recommendedStatus, 'completed')
+  assert.deepEqual(completionGate.decision.evidenceIds, ['store-workflow-evidence'])
 
   const events = await readJsonLines(session.eventsPath)
   assert(events.some((event) => event.type === 'session_created'), 'events should include session_created')
   assert(events.some((event) => event.type === 'session_started'), 'events should include session_started')
   assert(events.some((event) => event.type === 'workflow_evidence_recorded'), 'events should include workflow_evidence_recorded')
   assert(events.some((event) => event.type === 'workflow_evaluated'), 'events should include workflow_evaluated')
+  const completionGateEvent = events.find((event) => event.type === 'completion_gate_evaluated')
+  assert(completionGateEvent, 'events should include completion_gate_evaluated')
+  assert.equal(completionGateEvent.data.action, 'allow')
+  assert.equal(completionGateEvent.data.recommendedStatus, 'completed')
+  assert.deepEqual(completionGateEvent.data.evidenceIds, ['store-workflow-evidence'])
   assert(events.some((event) => event.type === 'context_compacted'), 'events should include context_compacted')
 
   const workflow = JSON.parse(readFileSync(session.workflowPath, 'utf8'))

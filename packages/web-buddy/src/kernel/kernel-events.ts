@@ -17,6 +17,7 @@ export type KernelEventType =
   | 'workflow_updated'
   | 'workflow_evidence_recorded'
   | 'workflow_evaluated'
+  | 'completion_gate_evaluated'
   | 'human_gate_requested'
   | 'human_gate_resolved'
   | 'session_blocked'

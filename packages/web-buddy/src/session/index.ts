@@ -6,6 +6,7 @@ export type {
   ApprovalDecisionEntry,
   ApprovalRequestEntry,
   AssistantMessageEntry,
+  CompletionGateEntry,
   ContextCompactionEntry,
   CreateSessionInput,
   ErrorEntry,
