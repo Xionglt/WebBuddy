@@ -21,6 +21,7 @@ import { FileSessionRecorder, FileSessionStore, readJsonLines } from '../dist/se
 import { sessionManager } from '../dist/session/manager.js'
 import { runAgentLoop } from '../dist/runtime/local/agent-loop.js'
 import { ToolRegistry } from '../dist/runtime/local/tool-registry.js'
+import { WorkflowEngine } from '../dist/workflow/workflow-engine.js'
 
 // A minimal LlmGateway stand-in: returns scripted tool calls. Each turn it
 // inspects the latest snapshot to find the right ref for the field it fills —
@@ -133,14 +134,26 @@ async function runPermissionScenarios() {
     assert.equal(approve.toolCalls[0].args.confirmed, true, 'approved high-risk action should receive confirmed=true')
     assert.equal(approve.gate.requests[0].kind, 'high_risk_action')
     assert.equal(approve.queue.snapshot().approved.length, 1)
-    assertTranscriptIncludes(approve.transcript, ['policy_decision', 'permission_decision', 'approval_request', 'approval_decision', 'tool_result'])
+    assertTranscriptIncludes(approve.transcript, [
+      'policy_decision',
+      'permission_decision',
+      'approval_request',
+      'approval_decision',
+      'workflow_evidence',
+      'workflow_evaluation',
+      'workflow_snapshot',
+      'tool_result',
+    ])
     assert(approve.events.some((event) => event.type === 'permission_evaluated'), 'events should include permission_evaluated')
     assert(approve.events.some((event) => event.type === 'approval_requested'), 'events should include approval_requested')
     assert(approve.events.some((event) => event.type === 'approval_resolved'), 'events should include approval_resolved')
+    assert(approve.events.some((event) => event.type === 'workflow_evidence_recorded'), 'events should include workflow_evidence_recorded')
+    assert(approve.events.some((event) => event.type === 'workflow_evaluated'), 'events should include workflow_evaluated')
     assert(approve.events.some((event) => event.type === 'human_gate_requested'), 'old human_gate_requested event should remain')
     assert(approve.events.some((event) => event.type === 'human_gate_resolved'), 'old human_gate_resolved event should remain')
     assert(!approve.transcript.some((entry) => entry.type === 'context_compaction'), 'unset maxInputTokens should not compact')
 
+    const finalSubmitWorkflow = new RecordingWorkflowEngine()
     const finalSubmit = await runLoopScenario({
       trace,
       store,
@@ -149,11 +162,50 @@ async function runPermissionScenarios() {
       risk: 'L3',
       gateDecisions: ['approve'],
       seedFresh: true,
+      withSession: true,
+      workflowEngine: finalSubmitWorkflow,
     })
     assert.equal(finalSubmit.result.blocked, true, 'final submit should remain blocked after approval')
     assert.equal(finalSubmit.toolCalls.length, 0, 'final submit tool must not execute')
     assert.equal(finalSubmit.gate.requests[0].kind, 'final_submit')
     assert.equal(finalSubmit.queue.snapshot().approved.length, 1)
+    assert(finalSubmitWorkflow.calls.length >= 3, 'workflow engine should evaluate initial, approval, and final-submit blocker states')
+    assert(
+      finalSubmitWorkflow.calls.some((call) => call.policyFacts?.some((fact) => fact.gateKind === 'final_submit')),
+      'workflow engine should receive final-submit policy facts',
+    )
+    assertTranscriptIncludes(finalSubmit.transcript, ['workflow_evidence', 'workflow_evaluation', 'workflow_snapshot'])
+
+    const agentDoneWorkflow = new RecordingWorkflowEngine()
+    const agentDone = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'workflow-agent-done',
+      call: { id: 'agent-done-call', name: 'agent_done', arguments: { summary: 'Workflow complete.', blocked: false } },
+      risk: 'L1',
+      gateDecisions: [],
+      seedFresh: true,
+      withSession: true,
+      workflowEngine: agentDoneWorkflow,
+    })
+    assert.equal(agentDone.result.done, true, 'agent_done scenario should finish')
+    assert.equal(agentDone.result.blocked, false, 'agent_done scenario should preserve unblocked completion')
+    assert(agentDoneWorkflow.calls.length >= 3, 'workflow engine should evaluate initial, before agent_done, and after agent_done')
+    assert(
+      agentDoneWorkflow.calls.some((call) => {
+        const latest = call.recentActions?.at(-1)
+        return latest?.toolName === 'agent_done' && !latest.toolResult
+      }),
+      'workflow engine should be called before agent_done execution',
+    )
+    assert(
+      agentDoneWorkflow.calls.some((call) => {
+        const latest = call.recentActions?.at(-1)
+        return latest?.toolName === 'agent_done' && latest.toolResult?.done === true
+      }),
+      'workflow engine should be called after agent_done execution',
+    )
+    assertTranscriptIncludes(agentDone.transcript, ['workflow_evidence', 'workflow_evaluation', 'workflow_snapshot'])
 
     const policyDeny = await runLoopScenario({
       trace,
@@ -247,6 +299,7 @@ async function runLoopScenario({
   gateDecisions,
   seedFresh,
   withSession = false,
+  workflowEngine,
 }) {
   if (seedFresh) seedFreshObservation(sessionId)
   const toolCalls = []
@@ -261,6 +314,14 @@ async function runLoopScenario({
       inherentRisk: risk,
       async run(args) {
         toolCalls.push({ name: call.name, args: { ...args } })
+        if (call.name === 'agent_done') {
+          return {
+            observation: `agent_done: ${args.summary}`,
+            done: true,
+            data: { blocked: Boolean(args.blocked) },
+            pageChanged: false,
+          }
+        }
         return { observation: `${call.name} executed`, pageChanged: false }
       },
     },
@@ -280,6 +341,7 @@ async function runLoopScenario({
     safetyMode,
     approvalQueue: queue,
     session,
+    workflowEngine,
   })
 
   const transcript = session ? await readJsonLines(session.session.transcriptPath) : []
@@ -453,6 +515,21 @@ class RecordingGate {
   async confirm(kind, message, context) {
     this.requests.push({ kind, message, context })
     return this.decisions.shift() ?? 'takeover'
+  }
+}
+
+class RecordingWorkflowEngine {
+  constructor() {
+    this.inner = new WorkflowEngine()
+    this.calls = []
+    this.evaluations = []
+  }
+
+  evaluate(input) {
+    this.calls.push(input)
+    const evaluation = this.inner.evaluate(input)
+    this.evaluations.push(evaluation)
+    return evaluation
   }
 }
 

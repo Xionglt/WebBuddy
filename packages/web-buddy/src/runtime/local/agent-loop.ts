@@ -41,10 +41,12 @@ import type { GateDecision, GateKind, HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
 import type { ResumeProfile } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
+import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
 import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/tool-result.js'
+import { workflowEngine as defaultWorkflowEngine, type WorkflowEngineEvaluation, type WorkflowEngineInput } from '../../workflow/workflow-engine.js'
+import { EvidenceStore, type AddWorkflowEvidenceInput, type WorkflowEvidence } from '../../workflow/workflow-evidence.js'
 import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
-import { transitionWorkflowState } from '../../workflow/workflow-transition.js'
 import { pageView } from './page-view.js'
 import { ToolRegistry, type ToolContext } from './tool-registry.js'
 
@@ -82,6 +84,8 @@ export interface AgentLoopInput {
   contextBudget?: ContextBudgetOptions
   /** Optional deterministic compactor for tests or alternate local runtimes. */
   contextCompactor?: AgentLoopContextCompactor
+  /** Optional workflow evaluator for tests or alternate local runtimes. */
+  workflowEngine?: AgentLoopWorkflowEngine
 }
 
 export interface AgentLoopResult {
@@ -114,6 +118,10 @@ export interface AgentLoopContextCompactor {
   compact(input: ContextCompactionInput): ContextCompactionResult
 }
 
+export interface AgentLoopWorkflowEngine {
+  evaluate(input: WorkflowEngineInput): WorkflowEngineEvaluation
+}
+
 const DEFAULT_MAX_STEPS = 16
 const DEFAULT_KEEP_RECENT_MESSAGES = 6
 
@@ -134,6 +142,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
   const permissionEngine = input.permissionEngine ?? new PermissionEngine()
   const approvalQueue = input.approvalQueue ?? new ApprovalQueue()
+  const workflowEngine = input.workflowEngine ?? defaultWorkflowEngine
+  const workflowEvidenceStore = new EvidenceStore()
   const session = input.session
 
   let step = 0
@@ -165,6 +175,83 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     sessionAction('workflow', () => session!.workflow(state))
   const sessionStatus = async (status: AgentSessionStatus, patch?: Parameters<SessionRecorder['updateStatus']>[1]) =>
     sessionAction('status', () => session!.updateStatus(status, patch))
+  const addWorkflowEvidence = async (
+    evidenceInput: AddWorkflowEvidenceInput,
+    currentStep: number,
+  ): Promise<WorkflowEvidence> => {
+    const evidence = workflowEvidenceStore.add({
+      sessionId: session?.session.sessionId ?? ctx.sessionId,
+      runId: session?.session.runId ?? ctx.trace.runId,
+      ...evidenceInput,
+    })
+    const turnId = evidence.turnId ?? turnIdForStep(currentStep)
+    await sessionTranscript({ type: 'workflow_evidence', turnId, evidence })
+    await sessionEvent({
+      type: 'workflow_evidence_recorded',
+      turnId,
+      ...(evidence.toolCallId ? { toolCallId: evidence.toolCallId } : {}),
+      message: `Workflow evidence recorded: ${evidence.kind}.`,
+      data: {
+        evidenceId: evidence.id,
+        kind: evidence.kind,
+        phase: evidence.phase,
+        summary: evidence.summary,
+      },
+    })
+    return evidence
+  }
+  const addContextWorkflowEvidence = async (
+    context: Pick<WorkflowEngineInput, 'page' | 'form'> & { turnId?: string; toolCallId?: string },
+    currentStep: number,
+  ) => {
+    if (context.page) {
+      await addWorkflowEvidence({
+        kind: 'page',
+        summary: workflowPageEvidenceSummary(context.page),
+        source: 'runtime_context',
+        confidence: context.page.pageType === 'unknown' ? 'medium' : 'high',
+        phase: workflowState.phase,
+        ...(context.turnId ? { turnId: context.turnId } : {}),
+        ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
+        data: workflowPageEvidenceData(context.page),
+      }, currentStep)
+    }
+    if (context.form) {
+      await addWorkflowEvidence({
+        kind: 'form',
+        summary: workflowFormEvidenceSummary(context.form),
+        source: 'runtime_context',
+        confidence: context.form.missingRequired.length === 0 ? 'high' : 'medium',
+        phase: workflowState.phase,
+        ...(context.turnId ? { turnId: context.turnId } : {}),
+        ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
+        data: workflowFormEvidenceData(context.form),
+      }, currentStep)
+    }
+  }
+  const recordWorkflowEvaluation = async (
+    evaluation: WorkflowEngineEvaluation,
+    currentStep: number,
+    reason: string,
+  ) => {
+    await sessionTranscript({
+      type: 'workflow_evaluation',
+      turnId: turnIdForStep(currentStep),
+      evaluation,
+    })
+    await sessionEvent({
+      type: 'workflow_evaluated',
+      turnId: turnIdForStep(currentStep),
+      message: reason,
+      data: {
+        phase: evaluation.state.phase,
+        changed: evaluation.changed,
+        blockerCount: evaluation.blockers.length,
+        evidenceIds: evaluation.evidenceIds,
+        reason: evaluation.reason,
+      },
+    })
+  }
   const recordWorkflowSnapshot = async (state: WorkflowState, currentStep: number, reason: string) => {
     await sessionTranscript({ type: 'workflow_snapshot', turnId: turnIdForStep(currentStep), workflowState: state })
     await sessionEvent({
@@ -174,6 +261,109 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       data: { workflowState: state },
     })
     await sessionWorkflow(state)
+  }
+  const evaluateWorkflow = async (
+    currentStep: number,
+    reason: string,
+    evaluationInput: Omit<WorkflowEngineInput, 'previous' | 'evidenceSnapshot'> & {
+      turnId?: string
+      toolCallId?: string
+      policyDecision?: PolicyEngineDecision
+      permissionRequest?: PermissionRequest
+      permissionDecision?: PermissionDecision
+      approval?: ApprovalRequest
+      approvalResolution?: ApprovalResolution
+      toolName?: string
+      toolResult?: NormalizedToolResult | LocalToolRunResult
+    } = {},
+  ): Promise<WorkflowEngineEvaluation> => {
+    await addContextWorkflowEvidence(evaluationInput, currentStep)
+    if (evaluationInput.policyDecision) {
+      await addWorkflowEvidence({
+        kind: 'policy',
+        summary: `Policy ${evaluationInput.policyDecision.action}: ${evaluationInput.policyDecision.reason}`,
+        source: 'policy_engine',
+        confidence: 'high',
+        phase: workflowState.phase,
+        ...(evaluationInput.turnId ? { turnId: evaluationInput.turnId } : {}),
+        ...(evaluationInput.toolCallId ? { toolCallId: evaluationInput.toolCallId } : {}),
+        data: policyMetadata(evaluationInput.policyDecision),
+      }, currentStep)
+    }
+    if (evaluationInput.permissionDecision) {
+      await addWorkflowEvidence({
+        kind: 'permission',
+        summary: `Permission ${evaluationInput.permissionDecision.action}: ${evaluationInput.permissionDecision.reason}`,
+        source: 'permission_engine',
+        confidence: 'high',
+        phase: workflowState.phase,
+        ...(evaluationInput.turnId ? { turnId: evaluationInput.turnId } : {}),
+        ...(evaluationInput.toolCallId ? { toolCallId: evaluationInput.toolCallId } : {}),
+        data: {
+          ...(evaluationInput.permissionRequest ? { request: permissionRequestMetadata(evaluationInput.permissionRequest) } : {}),
+          decision: permissionMetadata(evaluationInput.permissionDecision),
+        },
+      }, currentStep)
+    }
+    if (evaluationInput.approval) {
+      await addWorkflowEvidence({
+        kind: 'approval',
+        summary: `Approval ${evaluationInput.approval.status}: ${evaluationInput.approval.reason}`,
+        source: 'approval_queue',
+        confidence: 'high',
+        phase: workflowState.phase,
+        ...(evaluationInput.turnId ? { turnId: evaluationInput.turnId } : {}),
+        ...(evaluationInput.toolCallId ? { toolCallId: evaluationInput.toolCallId } : {}),
+        data: {
+          approval: approvalMetadata(evaluationInput.approval),
+          ...(evaluationInput.approvalResolution
+            ? { resolution: approvalResolutionMetadata(evaluationInput.approvalResolution) }
+            : {}),
+        },
+      }, currentStep)
+    }
+    if (evaluationInput.toolName && evaluationInput.toolResult) {
+      await addWorkflowEvidence({
+        kind: 'tool_result',
+        summary: workflowToolResultSummary(evaluationInput.toolName, evaluationInput.toolResult),
+        source: evaluationInput.toolName,
+        confidence: 'medium',
+        phase: workflowState.phase,
+        ...(evaluationInput.turnId ? { turnId: evaluationInput.turnId } : {}),
+        ...(evaluationInput.toolCallId ? { toolCallId: evaluationInput.toolCallId } : {}),
+        data: workflowToolResultEvidenceData(evaluationInput.toolResult),
+      }, currentStep)
+    }
+
+    const evaluation = workflowEngine.evaluate({
+      ...evaluationInput,
+      previous: workflowState,
+      recentActions: workflowRecentActions(recentActions, evaluationInput),
+      policyFacts: evaluationInput.policyDecision ? [evaluationInput.policyDecision] : undefined,
+      permissionFacts: [...permissionRequests, ...permissionDecisions],
+      approvalFacts: [...approvals],
+      evidenceSnapshot: workflowEvidenceStore.snapshot(),
+    })
+    workflowState = evaluation.state
+    await recordWorkflowEvaluation(evaluation, currentStep, reason)
+    await recordWorkflowSnapshot(workflowState, currentStep, reason)
+    await addWorkflowEvidence({
+      kind: 'workflow_state',
+      summary: `Workflow state is ${workflowState.phase}: ${workflowState.reason}`,
+      source: 'workflow_engine',
+      confidence: workflowState.confidence,
+      phase: workflowState.phase,
+      ...(evaluationInput.turnId ? { turnId: evaluationInput.turnId } : {}),
+      ...(evaluationInput.toolCallId ? { toolCallId: evaluationInput.toolCallId } : {}),
+      data: {
+        state: workflowState,
+        changed: evaluation.changed,
+        blockers: evaluation.blockers,
+        matchedCriteria: evaluation.matchedCriteria,
+        missingCriteria: evaluation.missingCriteria,
+      },
+    }, currentStep)
+    return evaluation
   }
   const recordPermissionEvaluation = async (
     request: PermissionRequest,
@@ -315,6 +505,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       observation: decision.reason,
       status: 'blocked',
     })
+    await evaluateWorkflow(currentStep, `Workflow handoff ${handoffKind} resolved ${gateDecision}.`, {
+      turnId,
+      currentUrl: request.currentUrl,
+      permissionRequest: request,
+      permissionDecision: decision,
+      approval: resolvedApproval,
+      approvalResolution: resolvedApproval.resolution,
+      gateKind: handoffKind,
+      gateDecision,
+    })
   }
   const finalizeSession = async (
     status: Extract<AgentSessionStatus, 'completed' | 'blocked' | 'failed' | 'aborted'>,
@@ -386,17 +586,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
 
   let latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
-  const initialWorkflow = transitionWorkflowState({
-    previous: workflowState,
+  const initialWorkflow = await evaluateWorkflow(step, 'Initial workflow snapshot.', {
     currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
     page: latestContext.page,
     form: latestContext.form,
   })
-  workflowState = initialWorkflow.state
   if (initialWorkflow.changed) {
     latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
   }
-  await recordWorkflowSnapshot(workflowState, step, 'Initial workflow snapshot.')
   const initialHandoffSummary = workflowHandoffSummary(workflowState)
   if (initialHandoffSummary) {
     await recordWorkflowHandoffPermission(workflowState, step, initialHandoffSummary)
@@ -639,16 +836,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         summary = policyDecision.action === 'block'
           ? `Policy blocked ${call.name}: ${policyDecision.reason}`
           : `Permission denied ${call.name}: ${permissionDecision.reason}`
-        workflowState = transitionWorkflowState({
-          previous: workflowState,
+        await evaluateWorkflow(step, `Permission denied ${call.name}.`, {
+          turnId,
+          toolCallId: call.id,
           currentUrl,
           page: latestContext.page,
           form: latestContext.form,
           policyDecision,
+          permissionRequest,
+          permissionDecision,
           gateKind: permissionDecision.gateKind ?? policyDecision.gateKind,
           agentDoneBlocked: true,
-        }).state
-        await recordWorkflowSnapshot(workflowState, step, `Permission denied ${call.name}.`)
+        })
         emit('gate', `[permission:deny] ${call.name}(${argBrief})`, step)
         break
       }
@@ -693,16 +892,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           observation: permissionDecision.reason,
           status: decision === 'approve' ? 'ok' : 'blocked',
         })
-        workflowState = transitionWorkflowState({
-          previous: workflowState,
+        await evaluateWorkflow(step, `Human gate ${kind} resolved ${decision}.`, {
+          turnId,
+          toolCallId: call.id,
           currentUrl,
           page: latestContext.page,
           form: latestContext.form,
           policyDecision,
+          permissionRequest,
+          permissionDecision,
+          approval: resolvedApproval,
+          approvalResolution: resolvedApproval.resolution,
           gateKind: kind,
           gateDecision: decision,
-        }).state
-        await recordWorkflowSnapshot(workflowState, step, `Human gate ${kind} resolved ${decision}.`)
+        })
         emit('gate', `[${kind}] ${call.name}(${argBrief}) → ${decision}`, step)
         if (kind === 'final_submit') {
           const note = `BLOCKED by final-submit safety gate (${decision}). Do not retry this action; call agent_done and hand the final submission to the human.`
@@ -720,17 +923,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           blocked = true
           done = true
           summary = `Final submit requires manual takeover (gate: ${decision}).`
-          workflowState = transitionWorkflowState({
-            previous: workflowState,
+          await evaluateWorkflow(step, `Final-submit gate stopped ${call.name}.`, {
+            turnId,
+            toolCallId: call.id,
             currentUrl,
             page: latestContext.page,
             form: latestContext.form,
             policyDecision,
+            permissionRequest,
+            permissionDecision,
+            approval: resolvedApproval,
+            approvalResolution: resolvedApproval.resolution,
             gateKind: kind,
             gateDecision: decision,
             agentDoneBlocked: true,
-          }).state
-          await recordWorkflowSnapshot(workflowState, step, `Final-submit gate stopped ${call.name}.`)
+          })
           break
         }
         if (decision !== 'approve') {
@@ -750,17 +957,21 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             blocked = true
             done = true
             summary = `Human ${decision} the ${kind} step.`
-            workflowState = transitionWorkflowState({
-              previous: workflowState,
+            await evaluateWorkflow(step, `Human gate stopped ${call.name}.`, {
+              turnId,
+              toolCallId: call.id,
               currentUrl,
               page: latestContext.page,
               form: latestContext.form,
               policyDecision,
+              permissionRequest,
+              permissionDecision,
+              approval: resolvedApproval,
+              approvalResolution: resolvedApproval.resolution,
               gateKind: kind,
               gateDecision: decision,
               agentDoneBlocked: true,
-            }).state
-            await recordWorkflowSnapshot(workflowState, step, `Human gate stopped ${call.name}.`)
+            })
             break
           }
           continue
@@ -770,6 +981,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
       const abortedBeforeExecution = await checkAbort(turnId)
       if (abortedBeforeExecution) return abortedBeforeExecution
+
+      if (call.name === 'agent_done') {
+        await evaluateWorkflow(step, 'Before agent_done.', {
+          turnId,
+          toolCallId: call.id,
+          currentUrl,
+          page: latestContext.page,
+          form: latestContext.form,
+          toolName: call.name,
+          policyDecision,
+          permissionRequest,
+          permissionDecision,
+        })
+      }
 
       emit('act', `${call.name}(${argBrief})`, step)
       await sessionEvent({
@@ -901,17 +1126,19 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         blocked = Boolean((result.data as { blocked?: boolean } | undefined)?.blocked)
         summary = (call.arguments.summary as string) || result.observation
       }
-      workflowState = transitionWorkflowState({
-        previous: workflowState,
+      await evaluateWorkflow(step, `${call.name} updated workflow state.`, {
+        turnId,
+        toolCallId: call.id,
         currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
         page: latestContext.page,
         form: latestContext.form,
         toolName: call.name,
         toolResult: result,
         policyDecision,
+        permissionRequest,
+        permissionDecision,
         ...(result.done ? { agentDoneBlocked: blocked } : {}),
-      }).state
-      await recordWorkflowSnapshot(workflowState, step, `${call.name} updated workflow state.`)
+      })
       rememberRecentAction(recentActions, {
         step,
         toolName: call.name,
@@ -935,15 +1162,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
     if (!done) {
       latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
-      const contextWorkflow = transitionWorkflowState({
-        previous: workflowState,
+      const contextWorkflow = await evaluateWorkflow(step, 'Context refresh updated workflow state.', {
         currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
         page: latestContext.page,
         form: latestContext.form,
       })
-      workflowState = contextWorkflow.state
       if (contextWorkflow.changed) {
-        await recordWorkflowSnapshot(workflowState, step, 'Context refresh updated workflow state.')
         latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
       }
       const handoffSummary = workflowHandoffSummary(workflowState)
@@ -1348,4 +1572,119 @@ function rememberRecentAction(
 
 function toolMessage(toolCallId: string, content: string): ChatMessage {
   return { role: 'tool', tool_call_id: toolCallId, content }
+}
+
+function workflowRecentActions(
+  actions: ContextRecentAction[],
+  current: {
+    toolName?: string
+    toolResult?: NormalizedToolResult | LocalToolRunResult
+    policyDecision?: PolicyEngineDecision
+    gateKind?: GateKind
+    gateDecision?: GateDecision
+    agentDoneBlocked?: boolean
+  },
+): NonNullable<WorkflowEngineInput['recentActions']> {
+  const mapped = actions.map((action) => ({
+    toolName: action.toolName,
+    at: action.at,
+    summary: action.observation ?? action.argumentsSummary,
+  }))
+  const hasCurrent =
+    current.toolName ||
+    current.toolResult ||
+    current.policyDecision ||
+    current.gateKind ||
+    current.gateDecision ||
+    typeof current.agentDoneBlocked === 'boolean'
+  if (!hasCurrent) return mapped
+
+  return [
+    ...mapped,
+    {
+      ...(current.toolName ? { toolName: current.toolName } : {}),
+      ...(current.toolResult ? { toolResult: current.toolResult } : {}),
+      ...(current.policyDecision ? { policyDecision: current.policyDecision } : {}),
+      ...(current.gateKind ? { gateKind: current.gateKind } : {}),
+      ...(current.gateDecision ? { gateDecision: current.gateDecision } : {}),
+      ...(typeof current.agentDoneBlocked === 'boolean'
+        ? {
+            agentDoneBlocked: current.agentDoneBlocked,
+            blocked: current.agentDoneBlocked,
+            done: current.toolName === 'agent_done' || current.toolResult?.done === true,
+          }
+        : {}),
+      at: new Date().toISOString(),
+      summary: current.toolResult?.observation,
+    },
+  ]
+}
+
+function workflowPageEvidenceSummary(page: NonNullable<WorkflowEngineInput['page']>): string {
+  const title = page.title ? ` "${page.title}"` : ''
+  return `Page${title} is classified as ${page.pageType}.`
+}
+
+function workflowPageEvidenceData(page: NonNullable<WorkflowEngineInput['page']>): Record<string, unknown> {
+  return {
+    url: page.url,
+    title: page.title,
+    pageType: page.pageType,
+    interactiveCount: page.interactiveCount,
+    formCount: page.formCount,
+    linkCount: page.linkCount,
+    buttonCount: page.buttonCount,
+    inputCount: page.inputCount,
+    textSummary: truncateForWorkflowEvidence(page.textSummary),
+    updatedAt: page.updatedAt,
+  }
+}
+
+function workflowFormEvidenceSummary(form: NonNullable<WorkflowEngineInput['form']>): string {
+  return `Form has ${form.fields.length} field(s), ${form.filledFields.length} filled, ${form.missingRequired.length} missing required.`
+}
+
+function workflowFormEvidenceData(form: NonNullable<WorkflowEngineInput['form']>): Record<string, unknown> {
+  return {
+    url: form.url,
+    fieldCount: form.fields.length,
+    filledFieldCount: form.filledFields.length,
+    missingRequiredCount: form.missingRequired.length,
+    submitCandidateCount: form.submitCandidates.length,
+    uploadHintCount: form.uploadHints?.length ?? 0,
+    visibleErrorCount: form.visibleErrors?.length ?? 0,
+    updatedAt: form.updatedAt,
+  }
+}
+
+function workflowToolResultSummary(toolName: string, result: NormalizedToolResult | LocalToolRunResult): string {
+  return `${toolName}: ${truncateForWorkflowEvidence(result.observation, 240)}`
+}
+
+function workflowToolResultEvidenceData(result: NormalizedToolResult | LocalToolRunResult): Record<string, unknown> {
+  return {
+    observation: truncateForWorkflowEvidence(result.observation),
+    pageChanged: Boolean(result.pageChanged),
+    done: Boolean(result.done),
+    ...(result.risk ? { risk: result.risk } : {}),
+    ...(result.data !== undefined ? { data: compactWorkflowEvidenceData(result.data) } : {}),
+  }
+}
+
+function compactWorkflowEvidenceData(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value)) return { itemCount: value.length }
+  const record = value as Record<string, unknown>
+  return {
+    ...('url' in record ? { url: record.url } : {}),
+    ...('title' in record ? { title: record.title } : {}),
+    ...('ok' in record ? { ok: record.ok } : {}),
+    ...('error' in record ? { error: record.error } : {}),
+    keys: Object.keys(record).slice(0, 24),
+  }
+}
+
+function truncateForWorkflowEvidence(value: string, maxLength = 500): string {
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength - 1)}…`
 }
