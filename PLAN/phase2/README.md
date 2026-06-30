@@ -10,6 +10,7 @@
 > Plan 5 完成后的 Context Compaction / Run Summary 集成说明见 `PLAN/phase2/plan5-completion-explanation.md`。
 > Plan 6 完成后的 WorkflowEngine / Evidence System 集成说明见 `PLAN/phase2/plan6-completion-explanation.md`。
 > Plan 7 完成后的 CompletionGate / WorkflowGuard 集成说明见 `PLAN/phase2/plan7-completion-explanation.md`。
+> Plan 8 完成后的 UserConfirmEvidence / Resume Completion 集成说明见 `PLAN/phase2/plan8-completion-explanation.md`。
 > 第五份实施计划见 `PLAN/phase2/plan5.md`。第六份实施计划见 `PLAN/phase2/plan6.md`。第七份实施计划见 `PLAN/phase2/plan7.md`；多 Agent prompts 见 `PLAN/phase2/plan7-agent-prompts.md`。
 > 第八份实施计划见 `PLAN/phase2/plan8.md`；多 Agent prompts 见 `PLAN/phase2/plan8-agent-prompts.md`。
 
@@ -1521,7 +1522,7 @@ Phase 2 不优先做复杂多 Agent。原因：
 
 ## 5.8 Phase 2H: UserConfirmEvidence + Resume Completion v1
 
-当前状态：待实施。Plan 7 已经能把缺少 `user_confirm` 的 `agent_done` 拦成 blocked；Plan 8 要补“用户确认后恢复 session、补 evidence、重新裁决并完成”的安全闭环。
+当前状态：已完成。Plan 8 已把“缺少 `user_confirm` 被 blocked 的 session”接成安全闭环：从 session transcript 恢复事实、由显式用户确认入口生成 `user_confirm` evidence，再通过 WorkflowEngine + CompletionGate 重新裁决 completed / blocked。
 
 目标：
 
@@ -1538,6 +1539,8 @@ Phase 2 不优先做复杂多 Agent。原因：
 - 新增 `session/session-completion.ts`。
 - 新增 transcript entry：`user_confirmation`。
 - 新增 session events：`session_restored` / `user_confirmed` / `session_completion_rechecked`。
+- 新增测试入口：`test:session-restore` / `test:user-confirmation` / `test:completion-resume` / `test:session-completion`。
+- `test:workflow` 覆盖 user confirmation 和 completion resume；`test:session` 覆盖 restore 和 session completion；`test:mvp` 包含 Plan 8 回归链。
 
 验收：
 
@@ -1551,6 +1554,10 @@ Phase 2 不优先做复杂多 Agent。原因：
 
 - `PLAN/phase2/plan8.md`
 - `PLAN/phase2/plan8-agent-prompts.md`
+
+完成说明：
+
+- `PLAN/phase2/plan8-completion-explanation.md`
 
 ## 5.9 Phase 2I: SkillSystem v1
 

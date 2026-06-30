@@ -169,6 +169,39 @@ try {
   assert.equal((await readJsonLines(failedSession.transcriptPath)).length, failedTranscriptBefore.length)
   assert.equal((await readJsonLines(failedSession.eventsPath)).length, failedEventsBefore.length)
 
+  const abortedSession = await store.create({
+    sessionId: 'session-completion-aborted',
+    runId: 'session-completion-aborted-run',
+    source: 'test',
+    goal: 'Verify aborted sessions are not silently completed.',
+    now,
+  })
+  const abortedRecorder = new FileSessionRecorder(store, abortedSession)
+  await abortedRecorder.updateStatus('aborted', {
+    error: 'Synthetic abort.',
+    updatedAt: now,
+    completedAt: now,
+  })
+  const abortedTranscriptBefore = await readJsonLines(abortedSession.transcriptPath)
+  const abortedEventsBefore = await readJsonLines(abortedSession.eventsPath)
+
+  await assert.rejects(
+    () =>
+      confirmSessionCompletion({
+        store,
+        sessionId: abortedSession.sessionId,
+        message: 'I confirm this should not be silently completed.',
+        confirmedBy: 'user',
+        now,
+      }),
+    /aborted session/i,
+  )
+
+  const savedAborted = JSON.parse(readFileSync(join(abortedSession.outputDir, 'session.json'), 'utf8'))
+  assert.equal(savedAborted.status, 'aborted')
+  assert.equal((await readJsonLines(abortedSession.transcriptPath)).length, abortedTranscriptBefore.length)
+  assert.equal((await readJsonLines(abortedSession.eventsPath)).length, abortedEventsBefore.length)
+
   console.log('session-completion-test: PASS')
 } finally {
   rmSync(root, { recursive: true, force: true })
