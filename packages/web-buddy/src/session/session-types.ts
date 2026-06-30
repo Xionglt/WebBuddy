@@ -103,6 +103,16 @@ export interface WorkflowSnapshotEntry extends TranscriptEntryBase {
   workflowState: unknown
 }
 
+export interface WorkflowEvidenceEntry extends TranscriptEntryBase {
+  type: 'workflow_evidence'
+  evidence: unknown
+}
+
+export interface WorkflowEvaluationEntry extends TranscriptEntryBase {
+  type: 'workflow_evaluation'
+  evaluation: unknown
+}
+
 export interface ContextCompactionEntry extends TranscriptEntryBase {
   type: 'context_compaction'
   summaryId: string
@@ -134,6 +144,8 @@ export type TranscriptEntry =
   | ApprovalRequestEntry
   | ApprovalDecisionEntry
   | WorkflowSnapshotEntry
+  | WorkflowEvidenceEntry
+  | WorkflowEvaluationEntry
   | ContextCompactionEntry
   | FinalResultEntry
   | ErrorEntry

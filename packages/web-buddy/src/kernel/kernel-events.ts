@@ -15,6 +15,8 @@ export type KernelEventType =
   | 'token_budget_updated'
   | 'context_compacted'
   | 'workflow_updated'
+  | 'workflow_evidence_recorded'
+  | 'workflow_evaluated'
   | 'human_gate_requested'
   | 'human_gate_resolved'
   | 'session_blocked'

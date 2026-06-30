@@ -18,6 +18,8 @@ export type {
   TranscriptEntry,
   TranscriptEntryBase,
   UserMessageEntry,
+  WorkflowEvaluationEntry,
+  WorkflowEvidenceEntry,
   WorkflowSnapshotEntry,
 } from './session-types.js'
 export { FileSessionStore } from './session-store.js'
