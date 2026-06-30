@@ -89,7 +89,7 @@ console.log('events:')
 for (const e of events) console.log(`  [${e.level}] ${e.phase}: ${e.message}`)
 console.log('result:', result.finalState, '—', result.message.slice(0, 80))
 
-assert.strictEqual(result.finalState, 'filled', `expected filled, got ${result.finalState}`)
+assert.strictEqual(result.finalState, 'stopped_at_submit', `expected stopped_at_submit, got ${result.finalState}`)
 assert(/did not submit|not submitted/i.test(result.message), 'must state it did not submit')
 
 const traceDir = join(config.trace.outDir, 'traces', `run_${result.summary.runId}`)
@@ -222,7 +222,7 @@ async function runPermissionScenarios() {
       workflowEngine: agentDoneWorkflow,
     })
     assert.equal(agentDone.result.done, true, 'agent_done scenario should finish')
-    assert.equal(agentDone.result.blocked, false, 'agent_done scenario should preserve unblocked completion')
+    assert.equal(agentDone.result.blocked, true, 'agent_done missing required evidence should block completion')
     assert(agentDoneWorkflow.calls.length >= 3, 'workflow engine should evaluate initial, before agent_done, and after agent_done')
     assert(
       agentDoneWorkflow.calls.some((call) => {
@@ -238,7 +238,7 @@ async function runPermissionScenarios() {
       }),
       'workflow engine should be called after agent_done execution',
     )
-    assertTranscriptIncludes(agentDone.transcript, ['workflow_evidence', 'workflow_evaluation', 'workflow_snapshot'])
+    assertTranscriptIncludes(agentDone.transcript, ['workflow_evidence', 'workflow_evaluation', 'workflow_snapshot', 'completion_gate'])
     const agentDoneEvidence = workflowEvidenceEntries(agentDone.transcript)
     assert(
       agentDoneEvidence.some(
@@ -261,6 +261,42 @@ async function runPermissionScenarios() {
       ),
       'agent_done should surface missing explicit user confirmation evidence',
     )
+    const agentDoneCompletionGate = completionGateEntries(agentDone.transcript).at(-1)
+    assert(agentDoneCompletionGate, 'agent_done should record completion_gate transcript entry')
+    assert.equal(agentDoneCompletionGate.action, 'block')
+    assert.equal(agentDoneCompletionGate.recommendedStatus, 'blocked')
+    assert(
+      agentDoneCompletionGate.missingCriteria.some(
+        (criterion) =>
+          criterion.id === 'done-requires-explicit-completion-evidence' &&
+          criterion.missingEvidenceKinds?.includes('user_confirm'),
+      ),
+      'completion gate should retain missing user_confirm evidence details',
+    )
+    const agentDoneCompletionGateEvent = agentDone.events.find((event) => event.type === 'completion_gate_evaluated')
+    assert(agentDoneCompletionGateEvent, 'events should include completion_gate_evaluated')
+    assert.equal(agentDoneCompletionGateEvent.data.action, 'block')
+
+    const injectedAllowGate = new RecordingCompletionGate('allow')
+    const agentDoneAllow = await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'workflow-agent-done-allow',
+      call: { id: 'agent-done-allow-call', name: 'agent_done', arguments: { summary: 'Workflow complete.', blocked: false } },
+      risk: 'L1',
+      gateDecisions: [],
+      seedFresh: true,
+      withSession: true,
+      workflowEngine: new RecordingWorkflowEngine(),
+      completionGate: injectedAllowGate,
+    })
+    assert.equal(agentDoneAllow.result.done, true, 'injected allow gate scenario should finish')
+    assert.equal(agentDoneAllow.result.blocked, false, 'injected allow gate should preserve unblocked completion')
+    assert.equal(injectedAllowGate.inputs.length, 1, 'injected completion gate should receive the agent_done evaluation')
+    assert(injectedAllowGate.inputs[0].workflowEvaluation, 'injected completion gate should receive workflowEvaluation')
+    const allowGateDecision = completionGateEntries(agentDoneAllow.transcript).at(-1)
+    assert.equal(allowGateDecision?.action, 'allow')
+    assert.equal(allowGateDecision?.recommendedStatus, 'completed')
 
     const policyDeny = await runLoopScenario({
       trace,
@@ -355,6 +391,7 @@ async function runLoopScenario({
   seedFresh,
   withSession = false,
   workflowEngine,
+  completionGate,
 }) {
   if (seedFresh) seedFreshObservation(sessionId)
   const toolCalls = []
@@ -397,6 +434,7 @@ async function runLoopScenario({
     approvalQueue: queue,
     session,
     workflowEngine,
+    completionGate,
   })
 
   const transcript = session ? await readJsonLines(session.session.transcriptPath) : []
@@ -605,6 +643,27 @@ class RecordingWorkflowEngine {
   }
 }
 
+class RecordingCompletionGate {
+  constructor(action) {
+    this.action = action
+    this.inputs = []
+  }
+
+  evaluate(input) {
+    this.inputs.push(input)
+    return {
+      schemaVersion: 'completion-gate-decision/v1',
+      action: this.action,
+      recommendedStatus: this.action === 'allow' ? 'completed' : this.action === 'block' ? 'blocked' : 'unchanged',
+      reason: `Injected completion gate returned ${this.action}.`,
+      missingCriteria: input.workflowEvaluation?.missingCriteria ?? [],
+      blockers: input.workflowEvaluation?.blockers ?? [],
+      workflowPhase: input.workflowEvaluation?.state?.phase,
+      evidenceIds: input.workflowEvaluation?.evidenceIds ?? [],
+    }
+  }
+}
+
 function seedFreshObservation(sessionId) {
   observationManager.refreshPageState({
     sessionId,
@@ -660,6 +719,12 @@ function workflowEvaluationEntries(transcript) {
   return transcript
     .filter((entry) => entry.type === 'workflow_evaluation')
     .map((entry) => entry.evaluation)
+}
+
+function completionGateEntries(transcript) {
+  return transcript
+    .filter((entry) => entry.type === 'completion_gate')
+    .map((entry) => entry.decision)
 }
 
 function testProfile() {

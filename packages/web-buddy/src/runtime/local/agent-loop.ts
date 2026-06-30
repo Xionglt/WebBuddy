@@ -45,6 +45,11 @@ import type { RiskLevel } from '../../sdk/trace.js'
 import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
 import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/tool-result.js'
+import {
+  completionGate as defaultCompletionGate,
+  type CompletionGateDecision,
+  type CompletionGateInput,
+} from '../../workflow/completion-gate.js'
 import { workflowEngine as defaultWorkflowEngine, type WorkflowEngineEvaluation, type WorkflowEngineInput } from '../../workflow/workflow-engine.js'
 import { EvidenceStore, type AddWorkflowEvidenceInput, type WorkflowEvidence } from '../../workflow/workflow-evidence.js'
 import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
@@ -87,6 +92,8 @@ export interface AgentLoopInput {
   contextCompactor?: AgentLoopContextCompactor
   /** Optional workflow evaluator for tests or alternate local runtimes. */
   workflowEngine?: AgentLoopWorkflowEngine
+  /** Optional completion gate for tests or alternate local runtimes. */
+  completionGate?: AgentLoopCompletionGate
 }
 
 export interface AgentLoopResult {
@@ -123,6 +130,10 @@ export interface AgentLoopWorkflowEngine {
   evaluate(input: WorkflowEngineInput): WorkflowEngineEvaluation
 }
 
+export interface AgentLoopCompletionGate {
+  evaluate(input: CompletionGateInput): CompletionGateDecision
+}
+
 const DEFAULT_MAX_STEPS = 16
 const DEFAULT_KEEP_RECENT_MESSAGES = 6
 
@@ -144,6 +155,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const permissionEngine = input.permissionEngine ?? new PermissionEngine()
   const approvalQueue = input.approvalQueue ?? new ApprovalQueue()
   const workflowEngine = input.workflowEngine ?? defaultWorkflowEngine
+  const completionGate = input.completionGate ?? defaultCompletionGate
   const workflowEvidenceStore = new EvidenceStore()
   const session = input.session
 
@@ -252,6 +264,26 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         evidenceIds: evaluation.evidenceIds,
         reason: evaluation.reason,
       },
+    })
+  }
+  const recordCompletionGateDecision = async (
+    decision: CompletionGateDecision,
+    currentStep: number,
+    options: { toolCallId?: string } = {},
+  ) => {
+    const turnId = turnIdForStep(currentStep)
+    const data = completionGateDecisionMetadata(decision)
+    await sessionTranscript({
+      type: 'completion_gate',
+      turnId,
+      decision,
+    })
+    await sessionEvent({
+      type: 'completion_gate_evaluated',
+      turnId,
+      ...(options.toolCallId ? { toolCallId: options.toolCallId } : {}),
+      message: `Completion gate ${decision.action}: ${decision.recommendedStatus}.`,
+      data,
     })
   }
   const recordWorkflowSnapshot = async (state: WorkflowState, currentStep: number, reason: string) => {
@@ -1131,7 +1163,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         blocked = Boolean((result.data as { blocked?: boolean } | undefined)?.blocked)
         summary = (call.arguments.summary as string) || result.observation
       }
-      await evaluateWorkflow(step, `${call.name} updated workflow state.`, {
+      let completionGateDecision: CompletionGateDecision | undefined
+      let completionGateBlockSummary: string | undefined
+      const workflowEvaluation = await evaluateWorkflow(step, `${call.name} updated workflow state.`, {
         turnId,
         toolCallId: call.id,
         currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
@@ -1144,6 +1178,36 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         permissionDecision,
         ...(result.done ? { agentDoneBlocked: blocked } : {}),
       })
+      if (call.name === 'agent_done' && result.done) {
+        completionGateDecision = completionGate.evaluate({
+          done,
+          blocked,
+          summary,
+          workflowState,
+          workflowEvaluation,
+          source: 'agent_done',
+        })
+        await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
+
+        if (completionGateDecision.action === 'block') {
+          done = true
+          blocked = true
+          summary = completionGateDecision.reason
+          completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+          rememberUniqueBlocker(blockers, completionGateBlockSummary)
+          emit('gate', completionGateBlockSummary, step)
+          ctx.trace.record({
+            phase: 'agent_loop',
+            action: completionGateBlockSummary,
+            url: sessionManager.get(ctx.sessionId)?.page.url(),
+            status: 'blocked',
+            observation: completionGateDecision.reason.slice(0, 300),
+          })
+        } else if (completionGateDecision.action === 'allow') {
+          done = true
+          blocked = false
+        }
+      }
       rememberRecentAction(recentActions, {
         step,
         toolName: call.name,
@@ -1152,6 +1216,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         risk,
         observation: result.observation,
       })
+      if (completionGateDecision?.action === 'block') {
+        rememberRecentAction(recentActions, {
+          step,
+          toolName: 'completion_gate',
+          argumentsSummary: completionGateDecision.action,
+          status: 'blocked',
+          observation: completionGateBlockSummary ?? completionGateDecision.reason,
+        })
+      }
 
       // After a page-changing action, refresh the snapshot view so refs stay fresh.
       let observation = result.observation
@@ -1464,6 +1537,36 @@ function permissionMetadata(decision: PermissionDecision): Record<string, unknow
   }
 }
 
+function completionGateDecisionMetadata(decision: CompletionGateDecision): Record<string, unknown> {
+  return {
+    schemaVersion: decision.schemaVersion,
+    action: decision.action,
+    recommendedStatus: decision.recommendedStatus,
+    reason: decision.reason,
+    missingCriteria: decision.missingCriteria,
+    blockers: decision.blockers,
+    workflowPhase: decision.workflowPhase,
+    evidenceIds: decision.evidenceIds,
+  }
+}
+
+function completionGateBlockerSummary(decision: CompletionGateDecision): string {
+  const firstMissing = decision.missingCriteria[0]
+  if (firstMissing) {
+    const missingKinds = firstMissing.missingEvidenceKinds.length > 0
+      ? ` missing ${firstMissing.missingEvidenceKinds.join(', ')}`
+      : ''
+    return `completion_gate blocked: ${firstMissing.id}${missingKinds}`
+  }
+
+  const firstBlocker = decision.blockers[0]
+  if (firstBlocker) {
+    return `completion_gate blocked: ${truncateForWorkflowEvidence(firstBlocker.message, 180)}`
+  }
+
+  return `completion_gate blocked: ${truncateForWorkflowEvidence(decision.reason, 180)}`
+}
+
 function approvalInputFor(request: PermissionRequest, decision: PermissionDecision): ApprovalEnqueueInput {
   const gateKind = decision.gateKind ?? request.gateKind ?? fallbackGateKind(request)
   const toolCallId = permissionToolCallId(request)
@@ -1597,6 +1700,11 @@ function rememberRecentAction(
 ): void {
   actions.push({ ...action, at: new Date().toISOString() })
   if (actions.length > maxActions) actions.splice(0, actions.length - maxActions)
+}
+
+function rememberUniqueBlocker(blockers: string[], blocker: string, maxBlockers = 12): void {
+  if (!blockers.includes(blocker)) blockers.push(blocker)
+  if (blockers.length > maxBlockers) blockers.splice(0, blockers.length - maxBlockers)
 }
 
 function toolMessage(toolCallId: string, content: string): ChatMessage {

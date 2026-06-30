@@ -80,16 +80,6 @@ try {
     traceRunId: trace.runId,
   })
   const recorder = new FileSessionRecorder(store, session)
-  const completionGateDecision = {
-    schemaVersion: 'completion-gate-decision/v1',
-    action: 'allow',
-    recommendedStatus: 'completed',
-    reason: 'Workflow evidence is sufficient for the smoke assertion.',
-    missingCriteria: [],
-    blockers: [],
-    workflowPhase: 'observing',
-    evidenceIds: ['smoke-workflow-evidence'],
-  }
 
   const result = await runAgentLoop({
     goal: 'Inspect the current page and finish.',
@@ -103,7 +93,8 @@ try {
   })
 
   assert.equal(result.done, true)
-  assert.equal(result.blocked, false)
+  assert.equal(result.blocked, true)
+  assert.match(result.summary, /required workflow evidence is missing/i)
 
   await recorder.transcript({
     type: 'context_compaction',
@@ -142,11 +133,6 @@ try {
       evidenceIds: ['smoke-workflow-evidence'],
       summary: 'Workflow evidence is sufficient for the smoke assertion.',
     },
-  })
-  await recorder.transcript({
-    type: 'completion_gate',
-    turnId: 'turn-smoke-workflow',
-    decision: completionGateDecision,
   })
   await recorder.event({
     type: 'token_budget_updated',
@@ -189,15 +175,8 @@ try {
       evidenceIds: ['smoke-workflow-evidence'],
     },
   })
-  await recorder.event({
-    type: 'completion_gate_evaluated',
-    turnId: 'turn-smoke-workflow',
-    message: 'Completion gate evaluated.',
-    data: completionGateDecision,
-  })
-
   const updated = await store.get(session.sessionId)
-  assert.equal(updated?.status, 'completed')
+  assert.equal(updated?.status, 'blocked')
   assert(existsSync(session.workflowPath), 'workflow.json should exist after runtime run')
 
   const transcript = await readJsonLines(session.transcriptPath)
@@ -209,15 +188,21 @@ try {
   assert(types.includes('workflow_evidence'), 'transcript should accept additive workflow_evidence entries')
   assert(types.includes('workflow_evaluation'), 'transcript should accept additive workflow_evaluation entries')
   const completionGate = transcript.find((entry) => entry.type === 'completion_gate')
-  assert(completionGate, 'transcript should accept additive completion_gate entries')
-  assert.equal(completionGate.decision.action, 'allow')
-  assert.equal(completionGate.decision.recommendedStatus, 'completed')
-  assert.deepEqual(completionGate.decision.evidenceIds, ['smoke-workflow-evidence'])
+  assert(completionGate, 'transcript should include runtime completion_gate entries')
+  assert.equal(completionGate.decision.action, 'block')
+  assert.equal(completionGate.decision.recommendedStatus, 'blocked')
+  assert(
+    completionGate.decision.missingCriteria.some((criterion) =>
+      criterion.id === 'done-requires-explicit-completion-evidence' &&
+      criterion.missingEvidenceKinds?.includes('user_confirm')
+    ),
+    'runtime completion gate should retain missing user_confirm evidence details',
+  )
 
   const events = await readJsonLines(session.eventsPath)
   assert(events.some((event) => event.type === 'session_started'), 'events should include session_started')
   assert(events.some((event) => event.type === 'tool_completed'), 'events should include tool_completed')
-  assert(events.some((event) => event.type === 'session_completed'), 'events should include session_completed')
+  assert(events.some((event) => event.type === 'session_blocked'), 'events should include session_blocked')
   assert(events.some((event) => event.type === 'token_budget_updated'), 'events should accept additive token_budget_updated')
   assert(events.some((event) => event.type === 'context_compacted'), 'events should accept additive context_compacted')
   assert(
@@ -226,10 +211,9 @@ try {
   )
   assert(events.some((event) => event.type === 'workflow_evaluated'), 'events should accept additive workflow_evaluated')
   const completionGateEvent = events.find((event) => event.type === 'completion_gate_evaluated')
-  assert(completionGateEvent, 'events should accept additive completion_gate_evaluated')
-  assert.equal(completionGateEvent.data.action, 'allow')
-  assert.equal(completionGateEvent.data.recommendedStatus, 'completed')
-  assert.deepEqual(completionGateEvent.data.evidenceIds, ['smoke-workflow-evidence'])
+  assert(completionGateEvent, 'events should include completion_gate_evaluated')
+  assert.equal(completionGateEvent.data.action, 'block')
+  assert.equal(completionGateEvent.data.recommendedStatus, 'blocked')
 
   const workflow = JSON.parse(readFileSync(session.workflowPath, 'utf8'))
   assert.equal(workflow.workflowState.schemaVersion, 'workflow-state/v1')
