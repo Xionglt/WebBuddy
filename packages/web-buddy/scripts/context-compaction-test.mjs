@@ -28,6 +28,7 @@ try {
     maxRecentActions: 3,
     maxPermissions: 4,
     maxApprovals: 4,
+    maxEvidenceItems: 3,
   })
 
   const workflowState = {
@@ -196,6 +197,109 @@ try {
       decidedAt: '2026-06-29T07:59:40.000Z',
     },
   }
+  const workflowEvidence = [
+    {
+      schemaVersion: 'workflow-evidence/v1',
+      id: 'evidence-page-old',
+      kind: 'page',
+      summary: 'Job detail page was inspected before entering the application.',
+      source: 'browser_snapshot',
+      confidence: 'medium',
+      phase: 'job_detail',
+      sessionId: 'compact-session',
+      runId: 'compact-run',
+      turnId: 'turn-5',
+      ts: '2026-06-29T07:57:00.000Z',
+      data: { rawText: 'THIS_RAW_EVIDENCE_DATA_SHOULD_NOT_SURVIVE' },
+    },
+    {
+      schemaVersion: 'workflow-evidence/v1',
+      id: 'evidence-form',
+      kind: 'form',
+      summary: 'Form evidence: Full name is filled and Email is still missing.',
+      source: 'browser_form_snapshot',
+      confidence: 'high',
+      phase: 'reviewing',
+      sessionId: 'compact-session',
+      runId: 'compact-run',
+      turnId: 'turn-6',
+      ts: '2026-06-29T07:58:46.000Z',
+      metadata: { missingRequiredCount: 1 },
+    },
+    {
+      schemaVersion: 'workflow-evidence/v1',
+      id: 'evidence-policy-final-submit',
+      kind: 'policy',
+      summary: 'Final submit gate evaluated browser_click on Submit application and required approval.',
+      source: 'policy_engine',
+      confidence: 'high',
+      phase: 'ready_for_final_submit',
+      sessionId: 'compact-session',
+      runId: 'compact-run',
+      turnId: 'turn-7',
+      toolCallId: 'call-submit',
+      ts: '2026-06-29T07:59:31.000Z',
+    },
+    {
+      schemaVersion: 'workflow-evidence/v1',
+      id: 'evidence-approval-denied',
+      kind: 'approval',
+      summary: 'User declined final submission approval; manual handoff remains required.',
+      source: 'approval_queue',
+      confidence: 'high',
+      phase: 'ready_for_final_submit',
+      sessionId: 'compact-session',
+      runId: 'compact-run',
+      turnId: 'turn-7',
+      toolCallId: 'call-submit',
+      ts: '2026-06-29T07:59:40.000Z',
+    },
+  ]
+  const evidenceSnapshot = {
+    schemaVersion: 'evidence-store-snapshot/v1',
+    version: 1,
+    generatedAt: '2026-06-29T07:59:50.000Z',
+    total: workflowEvidence.length,
+    kinds: ['page', 'form', 'policy', 'approval'],
+    countsByKind: { page: 1, form: 1, policy: 1, approval: 1 },
+    evidence: workflowEvidence,
+    byKind: {
+      page: [workflowEvidence[0]],
+      form: [workflowEvidence[1]],
+      policy: [workflowEvidence[2]],
+      approval: [workflowEvidence[3]],
+    },
+    all: workflowEvidence,
+  }
+  const workflowEvaluation = {
+    finalSubmitBlocker: 'Final submit is blocked until the human explicitly takes over.',
+    missingCriteria: [
+      {
+        id: 'ready-for-final-submit-requires-user-confirm',
+        description: 'Human confirmation for final submission is missing.',
+        reason: 'The user declined the approval request.',
+        evidenceKinds: ['user_confirm'],
+        required: true,
+      },
+      'Completion evidence must show that the final submit button was not clicked.',
+    ],
+    humanHandoffReason: 'Human must review and submit manually because this is a final application submission.',
+    completionCriteria: [
+      'Required fields reviewed',
+      'Final submit is not clicked',
+    ],
+    satisfiedCriteria: [
+      {
+        id: 'form-reviewed',
+        description: 'Application form was reviewed before the final submit gate.',
+        evidenceKinds: ['form', 'policy'],
+      },
+    ],
+    blocked: true,
+    done: false,
+    reason: 'Ready for manual final submit but not permitted to click the final submission control.',
+    evaluatedAt: '2026-06-29T07:59:50.000Z',
+  }
 
   const input = {
     sessionId: 'compact-session',
@@ -211,6 +315,8 @@ try {
     permissionRequests: [permissionRequest],
     permissionDecisions: [permissionDecision],
     approvals: [approval],
+    evidence: evidenceSnapshot,
+    workflowEvaluation,
     safetyNotes: ['NEVER submit a final application.'],
     nextActionHints: ['Ask the user before final submission.'],
   }
@@ -239,8 +345,24 @@ try {
   assert.equal(result.summary.permissions[0].gateKind, 'final_submit')
   assert.equal(result.summary.approvals[0].status, 'denied')
   assert.equal(result.summary.approvals[0].decision, 'decline')
+  assert.equal(result.summary.evidence.total, 4)
+  assert.deepEqual(result.summary.evidence.countsByKind, { page: 1, form: 1, policy: 1, approval: 1 })
+  assert.deepEqual(result.summary.evidence.recentKeyEvidence.map((item) => item.id), [
+    'evidence-form',
+    'evidence-policy-final-submit',
+    'evidence-approval-denied',
+  ])
+  assert.equal(result.summary.evidence.recentKeyEvidence[1].toolCallId, 'call-submit')
+  assert(!JSON.stringify(result.summary.evidence).includes('THIS_RAW_EVIDENCE_DATA_SHOULD_NOT_SURVIVE'), 'evidence summary should not retain raw data payloads')
+  assert.equal(result.summary.completion.finalSubmitBlocker, 'Final submit is blocked until the human explicitly takes over.')
+  assert.equal(result.summary.completion.missingCriteria.length, 2)
+  assert(result.summary.completion.missingCriteria.some((criterion) => criterion.description.includes('Human confirmation')), 'missing completion criteria should be retained')
+  assert.equal(result.summary.completion.humanHandoffReason, 'Human must review and submit manually because this is a final application submission.')
+  assert.equal(result.summary.completion.blocked, true)
+  assert.equal(result.summary.completion.done, false)
   assert(result.summary.safetyNotes.includes('NEVER submit a final application.'))
   assert(result.summary.nextActionHints.some((hint) => hint.includes('Ask the user')), 'provided next hint should be retained')
+  assert(result.summary.nextActionHints.some((hint) => hint.includes('missing criteria')), 'completion hint should preserve missing criteria')
   assert(result.summary.nextActionHints.some((hint) => hint.includes('Refresh page state')), 'stale page hint should be generated')
   assert.equal(result.summary.source.inputMessageCount, messages.length)
 
@@ -253,11 +375,20 @@ try {
   assert(!result.compactedMessage.content.includes('POISON TRACE PAGE'), 'compactor must not read trace page artifacts')
   assert(!result.compactedMessage.content.includes('POISON ROOT PAGE'), 'compactor must not read page-state-latest.json')
   assert(!result.compactedMessage.content.includes('POISON FORM FIELD'), 'compactor must not read form-state-latest.json')
+  assert(result.compactedMessage.content.includes('Final submit is blocked until the human explicitly takes over.'), 'compacted message must preserve final submit blocker')
+  assert(result.compactedMessage.content.includes('Human confirmation for final submission is missing.'), 'compacted message must preserve missing criteria')
+  assert(result.compactedMessage.content.includes('Human must review and submit manually'), 'compacted message must preserve human handoff reason')
+  assert(result.compactedMessage.content.includes('Final submit gate evaluated browser_click'), 'compacted message must preserve recent key evidence')
   assert.deepEqual(workflowState, workflowBefore, 'compactor must not mutate workflow state')
   assert(result.stats.estimatedInputTokensBefore > result.stats.estimatedInputTokensAfter, 'large old history should compact smaller than input messages')
   assert.equal(result.stats.retainedRecentActionCount, 3)
   assert.equal(result.stats.retainedPermissionCount, 1)
   assert.equal(result.stats.retainedApprovalCount, 1)
+
+  const { evidence, workflowEvaluation: _workflowEvaluation, ...legacyInput } = input
+  const legacyResult = compactor.compact(legacyInput)
+  assert.equal(legacyResult.summary.evidence, undefined, 'legacy compaction should omit evidence summary without evidence input')
+  assert.equal(legacyResult.summary.completion, undefined, 'legacy compaction should omit completion summary without workflowEvaluation input')
 
   console.log('context-compaction-test: PASS')
 } finally {

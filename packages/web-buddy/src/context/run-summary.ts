@@ -8,6 +8,7 @@ import type {
 import type { ChatMessage } from '../sdk/llm.js'
 import type { GateDecision, GateKind } from '../sdk/human.js'
 import type { RiskLevel } from '../sdk/trace.js'
+import type { EvidenceKind } from '../workflow/workflow-evidence.js'
 import type { WorkflowConfidence, WorkflowPhase } from '../workflow/workflow-state.js'
 import type { PageType } from '../observation/page-state.js'
 import type { RecentActionStatus } from './types.js'
@@ -27,6 +28,8 @@ export interface CompactRunSummary {
   workflow?: CompactWorkflowSummary
   page?: CompactPageSummary
   form?: CompactFormSummary
+  evidence?: CompactEvidenceSummary
+  completion?: CompactCompletionSummary
   recentActions: CompactRecentActionSummary[]
   blockers: string[]
   permissions: CompactPermissionSummary[]
@@ -43,6 +46,46 @@ export interface CompactWorkflowSummary {
   blocker?: string
   humanHandoffRequired?: boolean
   updatedAt?: string
+}
+
+export interface CompactEvidenceSummary {
+  total: number
+  countsByKind: Record<string, number>
+  recentKeyEvidence: CompactWorkflowEvidenceSummary[]
+}
+
+export interface CompactWorkflowEvidenceSummary {
+  id: string
+  kind: EvidenceKind | string
+  summary: string
+  source: string
+  confidence: WorkflowConfidence | string
+  phase?: WorkflowPhase | string
+  ts: string
+  runId?: string
+  turnId?: string
+  toolCallId?: string
+}
+
+export interface CompactCompletionSummary {
+  finalSubmitBlocker?: string
+  missingCriteria: CompactCompletionCriterionSummary[]
+  humanHandoffReason?: string
+  completionCriteria?: CompactCompletionCriterionSummary[]
+  satisfiedCriteria?: CompactCompletionCriterionSummary[]
+  blocked?: boolean
+  done?: boolean
+  reason?: string
+  evaluatedAt?: string
+}
+
+export interface CompactCompletionCriterionSummary {
+  id?: string
+  description: string
+  reason?: string
+  status?: string
+  required?: boolean
+  evidenceKinds?: string[]
 }
 
 export interface CompactPageSummary {

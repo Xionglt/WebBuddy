@@ -5,12 +5,16 @@ import type {
 } from '../permission/permission-types.js'
 import type { FormFieldState } from '../observation/form-state.js'
 import type { ChatMessage } from '../sdk/llm.js'
+import type { EvidenceStoreSnapshot, WorkflowEvidence } from '../workflow/workflow-evidence.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import { oneLine, truncateText } from './budget.js'
 import type { ContextRecentAction, ContextSnapshot } from './types.js'
 import {
   COMPACTED_RUN_CONTEXT_PREFIX,
   type CompactApprovalSummary,
+  type CompactCompletionCriterionSummary,
+  type CompactCompletionSummary,
+  type CompactEvidenceSummary,
   type CompactFormSummary,
   type CompactPageSummary,
   type CompactPermissionSummary,
@@ -21,6 +25,33 @@ import {
   type CompactWorkflowSummary,
   type ContextCompactionResult,
 } from './run-summary.js'
+
+export type ContextCompactionEvidenceInput = WorkflowEvidence[] | EvidenceStoreSnapshot
+
+export type ContextCompactionCriterionInput = string | {
+  id?: string
+  description?: string
+  criterion?: string
+  reason?: string
+  status?: string
+  required?: boolean
+  evidenceKinds?: string[]
+}
+
+export interface ContextCompactionWorkflowEvaluation {
+  finalSubmitBlocker?: string
+  blocker?: string
+  missingCriteria?: ContextCompactionCriterionInput[]
+  missingCompletionCriteria?: ContextCompactionCriterionInput[]
+  humanHandoffReason?: string
+  handoffReason?: string
+  completionCriteria?: ContextCompactionCriterionInput[]
+  satisfiedCriteria?: ContextCompactionCriterionInput[]
+  blocked?: boolean
+  done?: boolean
+  reason?: string
+  evaluatedAt?: string
+}
 
 export interface ContextCompactionInput {
   sessionId: string
@@ -37,6 +68,8 @@ export interface ContextCompactionInput {
   permissionDecisions?: PermissionDecision[]
   permissions?: PermissionDecision[]
   approvals?: ApprovalRequest[]
+  evidence?: ContextCompactionEvidenceInput
+  workflowEvaluation?: ContextCompactionWorkflowEvaluation
   safetyNotes?: string[]
   nextActionHints?: string[]
   summaryId?: string
@@ -47,6 +80,8 @@ export interface ContextCompactorOptions {
   maxRecentActions?: number
   maxPermissions?: number
   maxApprovals?: number
+  maxEvidenceItems?: number
+  maxCompletionCriteria?: number
   maxBlockers?: number
   maxSafetyNotes?: number
   maxNextActionHints?: number
@@ -59,6 +94,8 @@ export interface ContextCompactorOptions {
 const DEFAULT_MAX_RECENT_ACTIONS = 12
 const DEFAULT_MAX_PERMISSIONS = 12
 const DEFAULT_MAX_APPROVALS = 12
+const DEFAULT_MAX_EVIDENCE_ITEMS = 8
+const DEFAULT_MAX_COMPLETION_CRITERIA = 12
 const DEFAULT_MAX_BLOCKERS = 12
 const DEFAULT_MAX_SAFETY_NOTES = 12
 const DEFAULT_MAX_NEXT_ACTION_HINTS = 8
@@ -76,8 +113,12 @@ export class ContextCompactor {
     const workflow = summarizeWorkflow(workflowState, this.reasonMaxChars)
     const page = summarizePage(latestContext, this.options.maxPageTextSummaryChars ?? DEFAULT_MAX_PAGE_TEXT_SUMMARY_CHARS)
     const form = summarizeForm(latestContext)
+    const evidence = summarizeEvidence(input.evidence, this.maxEvidenceItems, this.reasonMaxChars)
+    const completion = summarizeCompletion(input.workflowEvaluation, this.maxCompletionCriteria, this.reasonMaxChars)
     const blockers = trimStringList(uniqueStrings([
       ...(input.blockers ?? []),
+      completion?.finalSubmitBlocker,
+      completion?.humanHandoffReason,
       workflow?.blocker,
       ...(latestContext?.blockers ?? []),
       ...(latestContext?.taskState?.knownBlockers ?? []),
@@ -99,8 +140,9 @@ export class ContextCompactor {
     )
     const approvals = summarizeApprovals(input.approvals ?? [], this.maxApprovals, this.reasonMaxChars)
     const nextActionHints = trimStringList(uniqueStrings([
-      ...(input.nextActionHints ?? []),
       ...buildDefaultNextActionHints({ workflow, page, form, blockers, latestContext }),
+      ...buildCompletionNextActionHints(completion),
+      ...(input.nextActionHints ?? []),
     ]), this.maxNextActionHints, this.reasonMaxChars)
 
     const summary: CompactRunSummary = {
@@ -121,6 +163,8 @@ export class ContextCompactor {
       ...(workflow ? { workflow } : {}),
       ...(page ? { page } : {}),
       ...(form ? { form } : {}),
+      ...(evidence ? { evidence } : {}),
+      ...(completion ? { completion } : {}),
       recentActions,
       blockers,
       permissions,
@@ -168,6 +212,14 @@ export class ContextCompactor {
 
   private get maxApprovals(): number {
     return normalizeMax(this.options.maxApprovals, DEFAULT_MAX_APPROVALS)
+  }
+
+  private get maxEvidenceItems(): number {
+    return normalizeMax(this.options.maxEvidenceItems, DEFAULT_MAX_EVIDENCE_ITEMS)
+  }
+
+  private get maxCompletionCriteria(): number {
+    return normalizeMax(this.options.maxCompletionCriteria, DEFAULT_MAX_COMPLETION_CRITERIA)
   }
 
   private get maxBlockers(): number {
@@ -273,6 +325,80 @@ function summarizeForm(latestContext: ContextSnapshot | undefined): CompactFormS
     })),
     visibleErrors: trimStringList(form.visibleErrors ?? [], 12, 180),
     updatedAt: form.updatedAt,
+  }
+}
+
+function summarizeEvidence(
+  input: ContextCompactionEvidenceInput | undefined,
+  maxEvidenceItems: number,
+  maxReasonChars: number,
+): CompactEvidenceSummary | undefined {
+  const evidence = normalizeEvidenceInput(input)
+  if (evidence.length === 0) return undefined
+
+  const countsByKind: Record<string, number> = {}
+  for (const item of evidence) {
+    countsByKind[item.kind] = (countsByKind[item.kind] ?? 0) + 1
+  }
+
+  return {
+    total: evidence.length,
+    countsByKind,
+    recentKeyEvidence: selectRecentKeyEvidence(evidence, maxEvidenceItems).map((item) => ({
+      id: oneLine(item.id, 160),
+      kind: item.kind,
+      summary: oneLine(item.summary, maxReasonChars),
+      source: oneLine(item.source, 160),
+      confidence: item.confidence,
+      ...(item.phase ? { phase: item.phase } : {}),
+      ts: item.ts,
+      ...(item.runId ? { runId: item.runId } : {}),
+      ...(item.turnId ? { turnId: item.turnId } : {}),
+      ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
+    })),
+  }
+}
+
+function summarizeCompletion(
+  evaluation: ContextCompactionWorkflowEvaluation | undefined,
+  maxCriteria: number,
+  maxReasonChars: number,
+): CompactCompletionSummary | undefined {
+  if (!evaluation) return undefined
+
+  const finalSubmitBlocker = oneLine(evaluation.finalSubmitBlocker ?? evaluation.blocker, maxReasonChars)
+  const humanHandoffReason = oneLine(evaluation.humanHandoffReason ?? evaluation.handoffReason, maxReasonChars)
+  const missingCriteria = summarizeCompletionCriteria([
+    ...(evaluation.missingCriteria ?? []),
+    ...(evaluation.missingCompletionCriteria ?? []),
+  ], maxCriteria, maxReasonChars)
+  const completionCriteria = summarizeCompletionCriteria(evaluation.completionCriteria ?? [], maxCriteria, maxReasonChars)
+  const satisfiedCriteria = summarizeCompletionCriteria(evaluation.satisfiedCriteria ?? [], maxCriteria, maxReasonChars)
+  const reason = oneLine(evaluation.reason, maxReasonChars)
+
+  const hasCompletionSummary = Boolean(
+    finalSubmitBlocker ||
+    humanHandoffReason ||
+    missingCriteria.length ||
+    completionCriteria.length ||
+    satisfiedCriteria.length ||
+    reason ||
+    evaluation.blocked !== undefined ||
+    evaluation.done !== undefined ||
+    evaluation.evaluatedAt,
+  )
+  if (!hasCompletionSummary) return undefined
+
+  return {
+    ...(finalSubmitBlocker ? { finalSubmitBlocker } : {}),
+    missingCriteria,
+    ...(humanHandoffReason ? { humanHandoffReason } : {}),
+    ...(completionCriteria.length ? { completionCriteria } : {}),
+    ...(satisfiedCriteria.length ? { satisfiedCriteria } : {}),
+    ...(evaluation.blocked !== undefined ? { blocked: evaluation.blocked } : {}),
+    ...(evaluation.done !== undefined ? { done: evaluation.done } : {}),
+    ...(reason ? { reason } : {}),
+    ...(evaluation.evaluatedAt ? { evaluatedAt: evaluation.evaluatedAt } : {}),
   }
 }
 
@@ -413,6 +539,123 @@ function buildDefaultNextActionHints(input: {
     hints.push('Choose one next tool call from the latest context, or call agent_done if the task is complete or blocked.')
   }
   return hints
+}
+
+function buildCompletionNextActionHints(completion: CompactCompletionSummary | undefined): string[] {
+  if (!completion) return []
+  const hints: string[] = []
+  if (completion.finalSubmitBlocker) {
+    hints.push(`Do not perform final submission until this blocker is resolved: ${completion.finalSubmitBlocker}`)
+  }
+  if (completion.humanHandoffReason) {
+    hints.push(`Preserve human handoff requirement: ${completion.humanHandoffReason}`)
+  }
+  if (completion.missingCriteria.length > 0) {
+    hints.push(`Do not mark completion until missing criteria are resolved: ${completion.missingCriteria.map((criterion) => criterion.description).join('; ')}`)
+  }
+  return hints
+}
+
+function normalizeEvidenceInput(input: ContextCompactionEvidenceInput | undefined): WorkflowEvidence[] {
+  if (!input) return []
+  if (Array.isArray(input)) return input.slice()
+  if (Array.isArray(input.evidence) && input.evidence.length > 0) return input.evidence.slice()
+  if (Array.isArray(input.all) && input.all.length > 0) return input.all.slice()
+  return Object.values(input.byKind ?? {}).flat()
+}
+
+function selectRecentKeyEvidence(evidence: WorkflowEvidence[], maxItems: number): WorkflowEvidence[] {
+  const indexed = evidence.map((item, index) => ({ item, index }))
+  const keyEvidence = indexed.filter(({ item }) => isKeyEvidence(item))
+  const candidates = keyEvidence.length > 0 ? keyEvidence : indexed
+  return candidates
+    .sort(compareEvidenceByTime)
+    .slice(Math.max(0, candidates.length - maxItems))
+    .map(({ item }) => item)
+}
+
+function isKeyEvidence(evidence: WorkflowEvidence): boolean {
+  const keyKinds = new Set([
+    'form',
+    'tool_result',
+    'policy',
+    'permission',
+    'approval',
+    'user_confirm',
+    'workflow_state',
+    'context_summary',
+  ])
+  if (keyKinds.has(evidence.kind)) return true
+  if (evidence.phase === 'ready_for_final_submit' || evidence.phase === 'done' || evidence.phase === 'blocked') {
+    return true
+  }
+  return /approval|blocked|criteria|final[-\s]?submit|gate|handoff|human|missing|permission/i.test(
+    `${evidence.summary} ${evidence.source}`,
+  )
+}
+
+function compareEvidenceByTime(
+  left: { item: WorkflowEvidence; index: number },
+  right: { item: WorkflowEvidence; index: number },
+): number {
+  const leftTime = Date.parse(left.item.ts)
+  const rightTime = Date.parse(right.item.ts)
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime
+  }
+  if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) return 1
+  if (!Number.isFinite(leftTime) && Number.isFinite(rightTime)) return -1
+  return left.index - right.index
+}
+
+function summarizeCompletionCriteria(
+  criteria: ContextCompactionCriterionInput[],
+  maxItems: number,
+  maxReasonChars: number,
+): CompactCompletionCriterionSummary[] {
+  if (maxItems <= 0) return []
+  const result: CompactCompletionCriterionSummary[] = []
+  const seen = new Set<string>()
+  for (const criterion of criteria) {
+    const summary = summarizeCompletionCriterion(criterion, maxReasonChars)
+    if (!summary) continue
+    const key = [summary.id, summary.description, summary.reason].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(summary)
+    if (result.length >= maxItems) break
+  }
+  return result
+}
+
+function summarizeCompletionCriterion(
+  criterion: ContextCompactionCriterionInput,
+  maxReasonChars: number,
+): CompactCompletionCriterionSummary | undefined {
+  if (typeof criterion === 'string') {
+    const description = oneLine(criterion, maxReasonChars)
+    return description ? { description } : undefined
+  }
+
+  const id = oneLine(criterion.id, 160)
+  const description = oneLine(
+    criterion.description ?? criterion.criterion ?? criterion.reason ?? criterion.id,
+    maxReasonChars,
+  )
+  if (!description) return undefined
+
+  const reason = oneLine(criterion.reason, maxReasonChars)
+  const status = oneLine(criterion.status, 80)
+  const evidenceKinds = trimStringList(criterion.evidenceKinds ?? [], 8, 80)
+
+  return {
+    ...(id ? { id } : {}),
+    description,
+    ...(reason && reason !== description ? { reason } : {}),
+    ...(status ? { status } : {}),
+    ...(criterion.required !== undefined ? { required: criterion.required } : {}),
+    ...(evidenceKinds.length ? { evidenceKinds } : {}),
+  }
 }
 
 function summarizeFieldLabels(fields: FormFieldState[], maxFields: number): string[] {
