@@ -132,11 +132,16 @@ try {
   assert(result.steps > 0, 'AgentRuntime result should include steps > 0')
   assert(result.toolCalls > 0, 'AgentRuntime result should include toolCalls > 0')
   assert.equal(result.done, true)
-  assert.equal(result.blocked, false)
-  assert.equal(result.stopReason, 'agent_done')
+  assert.equal(result.blocked, true)
+  assert.equal(result.stopReason, 'blocked')
+  assert.match(result.summary, /completion gate blocked/i)
   assert(runtimeMock.sawPoisonFreePrompt, 'mock should have inspected runtime prompts')
   assert(runtimeMock.sawTaskStatePrompt, 'PromptAssembler should add default observing TaskState to runtime prompts')
   assert(events.some((event) => event.schemaVersion === 'agent-runtime-event/v1'), 'runtime events should be wrapped')
+  assert(
+    events.some((event) => event.level === 'gate' && /completion_gate blocked/i.test(event.message)),
+    'runtime events should surface completion gate blocks',
+  )
 
   const directLoopResult = await runAgentLoop({
     goal: 'Prove old runAgentLoop entry still works.',
@@ -148,7 +153,8 @@ try {
     maxSteps: 2,
   })
   assert.equal(directLoopResult.done, true, 'runAgentLoop old entry should still return done=true')
-  assert.equal(directLoopResult.blocked, false, 'runAgentLoop old entry should still return blocked=false')
+  assert.equal(directLoopResult.blocked, true, 'runAgentLoop should block agent_done when completion evidence is missing')
+  assert.match(directLoopResult.summary, /completion gate blocked/i)
   assert(directLoopResult.toolCalls > 0, 'runAgentLoop old entry should still dispatch tools')
 
   trace.finish()

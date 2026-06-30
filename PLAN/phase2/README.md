@@ -9,7 +9,9 @@
 > Plan 4 完成后的 PermissionEngine / ApprovalQueue 集成说明见 `PLAN/phase2/plan4-completion-explanation.md`。
 > Plan 5 完成后的 Context Compaction / Run Summary 集成说明见 `PLAN/phase2/plan5-completion-explanation.md`。
 > Plan 6 完成后的 WorkflowEngine / Evidence System 集成说明见 `PLAN/phase2/plan6-completion-explanation.md`。
+> Plan 7 完成后的 CompletionGate / WorkflowGuard 集成说明见 `PLAN/phase2/plan7-completion-explanation.md`。
 > 第五份实施计划见 `PLAN/phase2/plan5.md`。第六份实施计划见 `PLAN/phase2/plan6.md`。第七份实施计划见 `PLAN/phase2/plan7.md`；多 Agent prompts 见 `PLAN/phase2/plan7-agent-prompts.md`。
+> 第八份实施计划见 `PLAN/phase2/plan8.md`；多 Agent prompts 见 `PLAN/phase2/plan8-agent-prompts.md`。
 
 ## 1. 阶段定位
 
@@ -1485,6 +1487,8 @@ Phase 2 不优先做复杂多 Agent。原因：
 
 ## 5.7 Phase 2G: CompletionGate / WorkflowGuard v1
 
+当前状态：已完成。Plan 7 已新增 `CompletionGate v1`，并把 WorkflowEngine 的 `missingCriteria` 接入 `agent_done` 后的 runtime 完成裁决。本次审查补齐了 `AgentRuntime` / `AgentKernel` 层对 Plan 7 blocked 语义的测试契约。
+
 目标：
 
 - 让 WorkflowEngine 的 `missingCriteria` 真正影响 runtime 最终完成状态。
@@ -1511,7 +1515,44 @@ Phase 2 不优先做复杂多 Agent。原因：
 - `PLAN/phase2/plan7.md`
 - `PLAN/phase2/plan7-agent-prompts.md`
 
-## 5.8 Phase 2H: SkillSystem v1
+完成说明：
+
+- `PLAN/phase2/plan7-completion-explanation.md`
+
+## 5.8 Phase 2H: UserConfirmEvidence + Resume Completion v1
+
+当前状态：待实施。Plan 7 已经能把缺少 `user_confirm` 的 `agent_done` 拦成 blocked；Plan 8 要补“用户确认后恢复 session、补 evidence、重新裁决并完成”的安全闭环。
+
+目标：
+
+- 从 session transcript 恢复 workflow evidence / evaluation / completion gate / final result。
+- 提供显式用户确认入口，生成可信 `user_confirm` evidence。
+- 对 blocked session 重新跑 WorkflowEngine + CompletionGate。
+- 满足 criteria 时推进到 completed，不满足时保持 blocked。
+
+改动：
+
+- 新增 `session/session-restore.ts`。
+- 新增 `workflow/user-confirmation.ts`。
+- 新增 `workflow/completion-resume.ts`。
+- 新增 `session/session-completion.ts`。
+- 新增 transcript entry：`user_confirmation`。
+- 新增 session events：`session_restored` / `user_confirmed` / `session_completion_rechecked`。
+
+验收：
+
+- `user_confirm` 只能来自显式用户确认入口，不能由 LLM/tool 伪造。
+- blocked session 缺 `user_confirm` 时 recheck 仍 blocked。
+- blocked session 补 `user_confirm` 后，criteria 满足才 completed。
+- final submit blocker 不会被 user confirmation 绕过。
+- runtime/session/restore 不读取 trace artifacts。
+
+计划：
+
+- `PLAN/phase2/plan8.md`
+- `PLAN/phase2/plan8-agent-prompts.md`
+
+## 5.9 Phase 2I: SkillSystem v1
 
 目标：
 
@@ -1530,7 +1571,7 @@ Phase 2 不优先做复杂多 Agent。原因：
 - 任务启动时能推荐技能。
 - 技能注入写入 session 和 trace。
 
-## 5.9 Phase 2I: Task Cockpit
+## 5.10 Phase 2J: Task Cockpit
 
 目标：
 
@@ -1548,7 +1589,7 @@ Phase 2 不优先做复杂多 Agent。原因：
 - 能继续 blocked session。
 - final submit 前 UI 展示证据和风险。
 
-## 5.10 Phase 2J: Doctor + Eval
+## 5.11 Phase 2K: Doctor + Eval
 
 目标：
 
