@@ -43,15 +43,44 @@ const reviewing = {
   confidence: 'medium',
   reason: 'Application form appears mostly filled and has submit candidates.',
 }
+const readyForm = form({
+  fields: [field(0, 'Name', 'Zhang San', true), field(1, 'Email', 'zhangsan@example.com', true)],
+  filledFields: [field(0, 'Name', 'Zhang San', true), field(1, 'Email', 'zhangsan@example.com', true)],
+  missingRequired: [],
+  submitCandidates: [{ tag: 'button', type: 'submit', text: 'Submit application', risk: 'L3', visible: true }],
+})
+const finalSubmitPolicyFact = { action: 'gate', riskLevel: 'high', reason: 'final submit', gateKind: 'final_submit' }
+const readyMissingPolicyEvidence = engine.evaluate({
+  previous: reviewing,
+  form: readyForm,
+  policyFacts: [finalSubmitPolicyFact],
+  evidenceSnapshot: snapshot([
+    evidence('ev-form-ready-without-policy', 'form', 'Application form is filled.', 'ready_for_final_submit'),
+  ]),
+  now,
+})
+assert.equal(readyMissingPolicyEvidence.state.phase, 'ready_for_final_submit')
+assert(
+  readyMissingPolicyEvidence.missingCriteria.some(
+    (criterion) =>
+      criterion.id === 'ready-for-final-submit-requires-form-and-policy-evidence' &&
+      criterion.missingEvidenceKinds.includes('policy'),
+  ),
+  'policy facts alone should not satisfy persisted policy evidence',
+)
+assert(
+  readyMissingPolicyEvidence.blockers.some(
+    (blocker) =>
+      blocker.kind === 'missing_evidence' &&
+      blocker.criterionId === 'ready-for-final-submit-requires-form-and-policy-evidence',
+  ),
+  'ready_for_final_submit should report missing policy evidence as a blocker',
+)
+
 const ready = engine.evaluate({
   previous: reviewing,
-  form: form({
-    fields: [field(0, 'Name', 'Zhang San', true), field(1, 'Email', 'zhangsan@example.com', true)],
-    filledFields: [field(0, 'Name', 'Zhang San', true), field(1, 'Email', 'zhangsan@example.com', true)],
-    missingRequired: [],
-    submitCandidates: [{ tag: 'button', type: 'submit', text: 'Submit application', risk: 'L3', visible: true }],
-  }),
-  policyFacts: [{ action: 'gate', riskLevel: 'high', reason: 'final submit', gateKind: 'final_submit' }],
+  form: readyForm,
+  policyFacts: [finalSubmitPolicyFact],
   evidenceSnapshot: snapshot([
     evidence('ev-form-ready', 'form', 'Application form is filled.', 'ready_for_final_submit'),
     evidence('ev-policy-final', 'policy', 'Policy identified final submit gate.', 'ready_for_final_submit'),

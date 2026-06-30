@@ -52,6 +52,7 @@ const times = [
   '2026-06-29T00:00:01.000Z',
   '2026-06-29T00:00:02.000Z',
   '2026-06-29T00:00:03.000Z',
+  '2026-06-29T00:00:04.000Z',
 ]
 let cursor = 0
 const store = new EvidenceStore({
@@ -106,20 +107,63 @@ assert.equal(store.byKind('page').length, 1)
 assert.equal(store.byKind('form').length, 1)
 assert.equal(store.byKind('policy').length, 0)
 
+const workflowStateData = {
+  state: {
+    phase: 'done',
+    blocker: undefined,
+    criteria: [{ id: 'done-requires-explicit-completion-evidence', status: 'matched' }],
+  },
+  nested: {
+    evidenceIds: ['ev-tool-done', 'ev-user-confirm'],
+  },
+}
+const workflowStateMetadata = {
+  completion: {
+    missingEvidenceKinds: [],
+  },
+}
+const workflowStateEvidence = store.add({
+  kind: 'workflow_state',
+  summary: 'Workflow reached done with explicit evidence.',
+  source: 'workflow_engine',
+  confidence: 'high',
+  phase: 'done',
+  data: workflowStateData,
+  metadata: workflowStateMetadata,
+})
+workflowStateData.state.phase = 'mutated input'
+workflowStateData.nested.evidenceIds.push('mutated-input')
+workflowStateMetadata.completion.missingEvidenceKinds.push('mutated-input')
+workflowStateEvidence.data.state.phase = 'mutated returned evidence'
+workflowStateEvidence.data.nested.evidenceIds.push('mutated-return')
+workflowStateEvidence.metadata.completion.missingEvidenceKinds.push('mutated-return')
+
+const storedWorkflowEvidence = store.byKind('workflow_state')[0]
+assert.equal(storedWorkflowEvidence.id, 'evid_workflow_state_0002')
+assert.equal(storedWorkflowEvidence.ts, '2026-06-29T00:00:02.000Z')
+assert.equal(storedWorkflowEvidence.data.state.phase, 'done')
+assert.deepEqual(storedWorkflowEvidence.data.nested.evidenceIds, ['ev-tool-done', 'ev-user-confirm'])
+assert.deepEqual(storedWorkflowEvidence.metadata.completion.missingEvidenceKinds, [])
+
 const snapshot = store.snapshot()
 assert.equal(snapshot.schemaVersion, 'evidence-store-snapshot/v1')
 assert.equal(snapshot.version, 1)
-assert.equal(snapshot.generatedAt, '2026-06-29T00:00:02.000Z')
-assert.equal(snapshot.total, 2)
-assert.deepEqual(snapshot.kinds, ['page', 'form'])
-assert.deepEqual(snapshot.countsByKind, { page: 1, form: 1 })
-assert.equal(snapshot.evidence.length, 2)
-assert.equal(snapshot.all.length, 2)
+assert.equal(snapshot.generatedAt, '2026-06-29T00:00:03.000Z')
+assert.equal(snapshot.total, 3)
+assert.deepEqual(snapshot.kinds, ['page', 'form', 'workflow_state'])
+assert.deepEqual(snapshot.countsByKind, { page: 1, form: 1, workflow_state: 1 })
+assert.equal(snapshot.evidence.length, 3)
+assert.equal(snapshot.all.length, 3)
 assert.equal(snapshot.byKind.page.length, 1)
 assert.equal(snapshot.byKind.form.length, 1)
+assert.equal(snapshot.byKind.workflow_state.length, 1)
 
 snapshot.evidence[0].summary = 'mutated snapshot'
 snapshot.byKind.page[0].summary = 'mutated snapshot group'
+snapshot.byKind.workflow_state[0].data.state.phase = 'mutated snapshot nested data'
+snapshot.byKind.workflow_state[0].metadata.completion.missingEvidenceKinds.push('mutated-snapshot')
 assert.equal(store.list()[0].summary, 'Application form page is visible.')
+assert.equal(store.byKind('workflow_state')[0].data.state.phase, 'done')
+assert.deepEqual(store.byKind('workflow_state')[0].metadata.completion.missingEvidenceKinds, [])
 
 console.log('workflow-evidence-test: PASS')

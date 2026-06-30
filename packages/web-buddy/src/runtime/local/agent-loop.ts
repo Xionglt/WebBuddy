@@ -8,6 +8,7 @@ import {
 import {
   contextCompactor as defaultContextCompactor,
   type ContextCompactionInput,
+  type ContextCompactionWorkflowEvaluation,
   type ContextCompactionResult,
 } from '../../context/compaction.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
@@ -158,6 +159,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const permissionRequests: PermissionRequest[] = []
   const permissionDecisions: PermissionDecision[] = []
   const approvals: ApprovalRequest[] = []
+  let lastWorkflowEvaluation: WorkflowEngineEvaluation | undefined
 
   const sessionAction = async (label: string, action: () => Promise<void>) => {
     if (!session) return
@@ -345,6 +347,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       evidenceSnapshot: workflowEvidenceStore.snapshot(),
     })
     workflowState = evaluation.state
+    lastWorkflowEvaluation = evaluation
     await recordWorkflowEvaluation(evaluation, currentStep, reason)
     await recordWorkflowSnapshot(workflowState, currentStep, reason)
     await addWorkflowEvidence({
@@ -632,6 +635,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       permissionRequests,
       permissionDecisions,
       approvals,
+      evidence: workflowEvidenceStore.snapshot(),
+      workflowEvaluation: workflowEvaluationForCompaction(lastWorkflowEvaluation, done, blocked),
     })
     const reason = compactReason(tokenBudget)
     const compactedMessages = compactedMessageSet(messages, {
@@ -1288,6 +1293,30 @@ function sessionEventTypeForStatus(status: Extract<AgentSessionStatus, 'complete
   if (status === 'failed') return 'session_failed'
   if (status === 'aborted') return 'session_aborted'
   return 'session_blocked'
+}
+
+function workflowEvaluationForCompaction(
+  evaluation: WorkflowEngineEvaluation | undefined,
+  done: boolean,
+  blocked: boolean,
+): ContextCompactionWorkflowEvaluation | undefined {
+  if (!evaluation) return undefined
+
+  const firstBlocker = evaluation.blockers[0]
+  const finalSubmitBlocker = evaluation.blockers.find((blocker) => blocker.gateKind === 'final_submit')?.message
+  const humanHandoffReason = evaluation.blockers.find((blocker) => blocker.kind === 'human_handoff')?.message
+
+  return {
+    ...(finalSubmitBlocker ? { finalSubmitBlocker } : {}),
+    ...(firstBlocker ? { blocker: firstBlocker.message } : {}),
+    missingCriteria: evaluation.missingCriteria,
+    satisfiedCriteria: evaluation.matchedCriteria,
+    ...(humanHandoffReason ? { humanHandoffReason } : {}),
+    blocked: blocked || evaluation.state.phase === 'blocked',
+    done,
+    reason: evaluation.reason,
+    evaluatedAt: evaluation.state.updatedAt,
+  }
 }
 
 function buildLoopContextWithWorkflow(

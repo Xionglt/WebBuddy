@@ -353,6 +353,9 @@ try {
     'evidence-approval-denied',
   ])
   assert.equal(result.summary.evidence.recentKeyEvidence[1].toolCallId, 'call-submit')
+  assert.equal(result.summary.evidence.recentKeyEvidence[1].source, 'policy_engine')
+  assert.equal(result.summary.evidence.recentKeyEvidence[2].phase, 'ready_for_final_submit')
+  assert(result.summary.evidence.recentKeyEvidence.every((item) => item.data === undefined), 'evidence retention should keep summaries, not raw payloads')
   assert(!JSON.stringify(result.summary.evidence).includes('THIS_RAW_EVIDENCE_DATA_SHOULD_NOT_SURVIVE'), 'evidence summary should not retain raw data payloads')
   assert.equal(result.summary.completion.finalSubmitBlocker, 'Final submit is blocked until the human explicitly takes over.')
   assert.equal(result.summary.completion.missingCriteria.length, 2)

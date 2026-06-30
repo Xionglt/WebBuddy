@@ -139,5 +139,20 @@ function cloneEvidence(evidence: WorkflowEvidence): WorkflowEvidence {
 }
 
 function cloneRecord(record: Record<string, unknown>): Record<string, unknown> {
-  return { ...record }
+  const clone: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(record)) {
+    clone[key] = cloneValue(value)
+  }
+  return clone
+}
+
+function cloneValue(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(cloneValue)
+
+  const clone: Record<string, unknown> = {}
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = cloneValue(nested)
+  }
+  return clone
 }

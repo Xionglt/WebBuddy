@@ -175,6 +175,39 @@ async function runPermissionScenarios() {
       'workflow engine should receive final-submit policy facts',
     )
     assertTranscriptIncludes(finalSubmit.transcript, ['workflow_evidence', 'workflow_evaluation', 'workflow_snapshot'])
+    const finalSubmitEvidence = workflowEvidenceEntries(finalSubmit.transcript)
+    assert(
+      finalSubmitEvidence.some(
+        (evidence) =>
+          evidence.kind === 'policy' &&
+          evidence.toolCallId === 'final-submit-click' &&
+          evidence.data?.gateKind === 'final_submit',
+      ),
+      'final submit should record policy evidence with the final_submit gate',
+    )
+    assert(
+      finalSubmitEvidence.some(
+        (evidence) =>
+          evidence.kind === 'permission' &&
+          evidence.toolCallId === 'final-submit-click' &&
+          evidence.data?.decision?.gateKind === 'final_submit',
+      ),
+      'final submit should record permission evidence',
+    )
+    assert(
+      finalSubmitEvidence.some(
+        (evidence) =>
+          evidence.kind === 'approval' &&
+          evidence.toolCallId === 'final-submit-click' &&
+          evidence.data?.approval?.status === 'approved' &&
+          evidence.data?.resolution?.decision === 'approve',
+      ),
+      'final submit should retain the human approval evidence even though runtime still blocks execution',
+    )
+    assert(
+      finalSubmitEvidence.some((evidence) => evidence.kind === 'workflow_state' && evidence.phase === 'blocked'),
+      'final submit should record blocked workflow_state evidence',
+    )
 
     const agentDoneWorkflow = new RecordingWorkflowEngine()
     const agentDone = await runLoopScenario({
@@ -206,6 +239,28 @@ async function runPermissionScenarios() {
       'workflow engine should be called after agent_done execution',
     )
     assertTranscriptIncludes(agentDone.transcript, ['workflow_evidence', 'workflow_evaluation', 'workflow_snapshot'])
+    const agentDoneEvidence = workflowEvidenceEntries(agentDone.transcript)
+    assert(
+      agentDoneEvidence.some(
+        (evidence) =>
+          evidence.kind === 'tool_result' &&
+          evidence.toolCallId === 'agent-done-call' &&
+          evidence.source === 'agent_done' &&
+          evidence.data?.done === true,
+      ),
+      'agent_done should record tool_result workflow evidence',
+    )
+    assert(
+      workflowEvaluationEntries(agentDone.transcript).some((evaluation) =>
+        evaluation.state?.phase === 'done' &&
+        evaluation.missingCriteria?.some(
+          (criterion) =>
+            criterion.id === 'done-requires-explicit-completion-evidence' &&
+            criterion.missingEvidenceKinds?.includes('user_confirm'),
+        )
+      ),
+      'agent_done should surface missing explicit user confirmation evidence',
+    )
 
     const policyDeny = await runLoopScenario({
       trace,
@@ -426,6 +481,23 @@ async function runCompactionScenario() {
     assert(compactionEntry, 'transcript should include context_compaction')
     assert.equal(compactionEntry.summary.goal, 'Exercise context compaction integration.')
     assert(compactionEntry.summary.source.inputMessageCount > 0, 'summary should record source message count')
+    assert(compactionEntry.summary.evidence, 'context compaction should retain workflow evidence summary')
+    assert(compactionEntry.summary.evidence.total > 0, 'workflow evidence summary should count recorded evidence')
+    assert(
+      compactionEntry.summary.evidence.recentKeyEvidence.some(
+        (evidence) => evidence.kind === 'tool_result' && evidence.source === 'make_large_context',
+      ),
+      'compaction summary should retain recent tool_result workflow evidence',
+    )
+    assert(
+      compactionEntry.summary.evidence.recentKeyEvidence.some((evidence) => evidence.kind === 'workflow_state'),
+      'compaction summary should retain workflow_state evidence',
+    )
+    assert(
+      compactionEntry.summary.evidence.recentKeyEvidence.every((evidence) => evidence.data === undefined),
+      'compaction evidence summary should not retain raw evidence data payloads',
+    )
+    assert(compactionEntry.summary.completion?.reason, 'context compaction should retain workflow evaluation reason')
     assert(events.some((event) => event.type === 'token_budget_updated'), 'events should include token_budget_updated')
     assert(events.some((event) => event.type === 'context_compacted'), 'events should include context_compacted')
     assert.equal(llm.compactedMessages[0]?.role, 'system', 'compacted message set should keep the system message first')
@@ -576,6 +648,18 @@ function assertTranscriptIncludes(transcript, expectedTypes) {
   for (const expected of expectedTypes) {
     assert(types.includes(expected), `transcript should include ${expected}`)
   }
+}
+
+function workflowEvidenceEntries(transcript) {
+  return transcript
+    .filter((entry) => entry.type === 'workflow_evidence')
+    .map((entry) => entry.evidence)
+}
+
+function workflowEvaluationEntries(transcript) {
+  return transcript
+    .filter((entry) => entry.type === 'workflow_evaluation')
+    .map((entry) => entry.evaluation)
 }
 
 function testProfile() {
