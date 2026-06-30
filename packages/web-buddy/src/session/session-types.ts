@@ -113,6 +113,11 @@ export interface WorkflowEvaluationEntry extends TranscriptEntryBase {
   evaluation: unknown
 }
 
+export interface CompletionGateEntry extends TranscriptEntryBase {
+  type: 'completion_gate'
+  decision: unknown
+}
+
 export interface ContextCompactionEntry extends TranscriptEntryBase {
   type: 'context_compaction'
   summaryId: string
@@ -146,6 +151,7 @@ export type TranscriptEntry =
   | WorkflowSnapshotEntry
   | WorkflowEvidenceEntry
   | WorkflowEvaluationEntry
+  | CompletionGateEntry
   | ContextCompactionEntry
   | FinalResultEntry
   | ErrorEntry
