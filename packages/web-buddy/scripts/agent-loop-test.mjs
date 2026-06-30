@@ -223,6 +223,9 @@ async function runPermissionScenarios() {
     })
     assert.equal(agentDone.result.done, true, 'agent_done scenario should finish')
     assert.equal(agentDone.result.blocked, true, 'agent_done missing required evidence should block completion')
+    assert.match(agentDone.result.summary, /Completion gate blocked completion/i)
+    assert.match(agentDone.result.summary, /required workflow evidence is missing/i)
+    assert.match(agentDone.result.summary, /done-requires-explicit-completion-evidence.*user_confirm/i)
     assert(agentDoneWorkflow.calls.length >= 3, 'workflow engine should evaluate initial, before agent_done, and after agent_done')
     assert(
       agentDoneWorkflow.calls.some((call) => {
@@ -276,6 +279,16 @@ async function runPermissionScenarios() {
     const agentDoneCompletionGateEvent = agentDone.events.find((event) => event.type === 'completion_gate_evaluated')
     assert(agentDoneCompletionGateEvent, 'events should include completion_gate_evaluated')
     assert.equal(agentDoneCompletionGateEvent.data.action, 'block')
+    assert.equal(agentDoneCompletionGateEvent.data.recommendedStatus, 'blocked')
+    assert.match(String(agentDoneCompletionGateEvent.data.reason), /required workflow evidence is missing/i)
+    assert(
+      agentDoneCompletionGateEvent.data.missingCriteria.some(
+        (criterion) =>
+          criterion.id === 'done-requires-explicit-completion-evidence' &&
+          criterion.missingEvidenceKinds?.includes('user_confirm'),
+      ),
+      'completion gate event should retain missing user_confirm evidence details',
+    )
 
     const injectedAllowGate = new RecordingCompletionGate('allow')
     const agentDoneAllow = await runLoopScenario({
