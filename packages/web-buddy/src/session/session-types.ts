@@ -108,6 +108,11 @@ export interface WorkflowEvidenceEntry extends TranscriptEntryBase {
   evidence: unknown
 }
 
+export interface UserConfirmationEntry extends TranscriptEntryBase {
+  type: 'user_confirmation'
+  confirmation: unknown
+}
+
 export interface WorkflowEvaluationEntry extends TranscriptEntryBase {
   type: 'workflow_evaluation'
   evaluation: unknown
@@ -150,6 +155,7 @@ export type TranscriptEntry =
   | ApprovalDecisionEntry
   | WorkflowSnapshotEntry
   | WorkflowEvidenceEntry
+  | UserConfirmationEntry
   | WorkflowEvaluationEntry
   | CompletionGateEntry
   | ContextCompactionEntry

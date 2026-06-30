@@ -18,6 +18,7 @@ export type {
   ToolResultEntry,
   TranscriptEntry,
   TranscriptEntryBase,
+  UserConfirmationEntry,
   UserMessageEntry,
   WorkflowEvaluationEntry,
   WorkflowEvidenceEntry,
@@ -30,3 +31,5 @@ export type { FileSessionRecorderOptions, SessionRecorder } from './session-reco
 export { restoreSessionState } from './session-restore.js'
 export type { RestoreSessionStateInput, RestoredSessionState } from './session-restore.js'
 export { appendJsonLine, compactAssistantContent, compactToolResult, createTranscriptEntryId, readJsonLines } from './transcript.js'
+export { createUserConfirmation } from '../workflow/user-confirmation.js'
+export type { UserConfirmation, UserConfirmationInput } from '../workflow/user-confirmation.js'
