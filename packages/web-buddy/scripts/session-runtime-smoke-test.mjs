@@ -108,6 +108,31 @@ try {
       goal: 'Verify runtime session recording.',
     },
   })
+  await recorder.transcript({
+    type: 'workflow_evidence',
+    turnId: 'turn-smoke-workflow',
+    evidence: {
+      schemaVersion: 'workflow-evidence/v1',
+      id: 'smoke-workflow-evidence',
+      kind: 'page',
+      summary: 'Session smoke page was observed.',
+      source: 'session-runtime-smoke-test',
+      confidence: 'high',
+      ts: '2026-06-29T00:00:00.000Z',
+      phase: 'observing',
+    },
+  })
+  await recorder.transcript({
+    type: 'workflow_evaluation',
+    turnId: 'turn-smoke-workflow',
+    evaluation: {
+      schemaVersion: 'workflow-evaluation/v1',
+      phase: 'observing',
+      passed: true,
+      evidenceIds: ['smoke-workflow-evidence'],
+      summary: 'Workflow evidence is sufficient for the smoke assertion.',
+    },
+  })
   await recorder.event({
     type: 'token_budget_updated',
     message: 'Token budget updated.',
@@ -129,6 +154,26 @@ try {
       },
     },
   })
+  await recorder.event({
+    type: 'workflow_evidence_recorded',
+    turnId: 'turn-smoke-workflow',
+    message: 'Workflow evidence recorded.',
+    data: {
+      evidenceId: 'smoke-workflow-evidence',
+      kind: 'page',
+      phase: 'observing',
+    },
+  })
+  await recorder.event({
+    type: 'workflow_evaluated',
+    turnId: 'turn-smoke-workflow',
+    message: 'Workflow evaluated.',
+    data: {
+      phase: 'observing',
+      passed: true,
+      evidenceIds: ['smoke-workflow-evidence'],
+    },
+  })
 
   const updated = await store.get(session.sessionId)
   assert.equal(updated?.status, 'completed')
@@ -140,6 +185,8 @@ try {
     assert(types.includes(expected), `transcript should include ${expected}`)
   }
   assert(types.includes('context_compaction'), 'transcript should accept additive context_compaction entries')
+  assert(types.includes('workflow_evidence'), 'transcript should accept additive workflow_evidence entries')
+  assert(types.includes('workflow_evaluation'), 'transcript should accept additive workflow_evaluation entries')
 
   const events = await readJsonLines(session.eventsPath)
   assert(events.some((event) => event.type === 'session_started'), 'events should include session_started')
@@ -147,6 +194,11 @@ try {
   assert(events.some((event) => event.type === 'session_completed'), 'events should include session_completed')
   assert(events.some((event) => event.type === 'token_budget_updated'), 'events should accept additive token_budget_updated')
   assert(events.some((event) => event.type === 'context_compacted'), 'events should accept additive context_compacted')
+  assert(
+    events.some((event) => event.type === 'workflow_evidence_recorded'),
+    'events should accept additive workflow_evidence_recorded',
+  )
+  assert(events.some((event) => event.type === 'workflow_evaluated'), 'events should accept additive workflow_evaluated')
 
   const workflow = JSON.parse(readFileSync(session.workflowPath, 'utf8'))
   assert.equal(workflow.workflowState.schemaVersion, 'workflow-state/v1')
