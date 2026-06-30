@@ -100,23 +100,29 @@ try {
 
   assert.equal(kernelResult.schemaVersion, 'agent-kernel-result/v1')
   assert.equal(kernelResult.runtime, 'agent-kernel')
-  assert.equal(kernelResult.status, 'completed')
-  assert.equal(kernelResult.stopReason, 'agent_done')
+  assert.equal(kernelResult.status, 'blocked')
+  assert.equal(kernelResult.stopReason, 'blocked')
   assert.equal(kernelResult.done, true)
-  assert.equal(kernelResult.blocked, false)
+  assert.equal(kernelResult.blocked, true)
+  assert.match(kernelResult.summary, /completion gate blocked/i)
   assert(kernelResult.turnState, 'kernel result should include a turn snapshot')
   assert(kernelEvents.some((event) => event.type === 'session_started'), 'kernel events should include session_started')
-  assert(kernelEvents.some((event) => event.type === 'session_completed'), 'kernel events should include session_completed')
+  assert(kernelEvents.some((event) => event.type === 'session_blocked'), 'kernel events should include session_blocked')
   assert(runtimeEvents.some((event) => event.schemaVersion === 'agent-runtime-event/v1'), 'runtime events should still flow')
+  assert(
+    runtimeEvents.some((event) => event.level === 'gate' && /completion_gate blocked/i.test(event.message)),
+    'runtime events should surface completion gate blocks',
+  )
 
   const transcript = await readJsonLines(kernelSession.transcriptPath)
   const transcriptTypes = transcript.map((entry) => entry.type)
-  for (const expected of ['user_message', 'assistant_message', 'tool_call', 'tool_result', 'workflow_snapshot', 'final_result']) {
+  for (const expected of ['user_message', 'assistant_message', 'tool_call', 'tool_result', 'workflow_snapshot', 'completion_gate', 'final_result']) {
     assert(transcriptTypes.includes(expected), `transcript should include ${expected}`)
   }
   const sessionEvents = await readJsonLines(kernelSession.eventsPath)
   assert(sessionEvents.some((event) => event.type === 'session_started'), 'session events should include session_started')
-  assert(sessionEvents.some((event) => event.type === 'session_completed'), 'session events should include session_completed')
+  assert(sessionEvents.some((event) => event.type === 'completion_gate_evaluated'), 'session events should include completion_gate_evaluated')
+  assert(sessionEvents.some((event) => event.type === 'session_blocked'), 'session events should include session_blocked')
 
   const runtimeKernelEvents = []
   const runtime = new AgentRuntime()
@@ -133,8 +139,10 @@ try {
 
   assert.equal(runtimeResult.schemaVersion, 'agent-runtime-result/v1')
   assert.equal(runtimeResult.runtime, 'local-agent-loop')
-  assert.equal(runtimeResult.stopReason, 'agent_done')
+  assert.equal(runtimeResult.stopReason, 'blocked')
   assert.equal(runtimeResult.done, true)
+  assert.equal(runtimeResult.blocked, true)
+  assert.match(runtimeResult.summary, /completion gate blocked/i)
   assert(runtimeKernelEvents.some((event) => event.type === 'session_started'), 'AgentRuntime should delegate through AgentKernel')
 
   const abortController = new DefaultAgentRunController()
