@@ -7,7 +7,9 @@
 > Plan 2 完成后的通俗解释和架构变化图见 `PLAN/phase2/plan2-completion-explanation.md`。
 > Plan 3 完成后的功能、意义和第一性原理沉淀见 `PLAN/phase2/plan3-completion-explanation.md`。
 > Plan 4 完成后的 PermissionEngine / ApprovalQueue 集成说明见 `PLAN/phase2/plan4-completion-explanation.md`。
-> 第五份实施计划见 `PLAN/phase2/plan5.md`。
+> Plan 5 完成后的 Context Compaction / Run Summary 集成说明见 `PLAN/phase2/plan5-completion-explanation.md`。
+> Plan 6 完成后的 WorkflowEngine / Evidence System 集成说明见 `PLAN/phase2/plan6-completion-explanation.md`。
+> 第五份实施计划见 `PLAN/phase2/plan5.md`。第六份实施计划见 `PLAN/phase2/plan6.md`。第七份实施计划见 `PLAN/phase2/plan7.md`；多 Agent prompts 见 `PLAN/phase2/plan7-agent-prompts.md`。
 
 ## 1. 阶段定位
 
@@ -1412,42 +1414,104 @@ Phase 2 不优先做复杂多 Agent。原因：
 
 ## 5.5 Phase 2E: Context Compaction
 
+当前状态：已完成。Plan 5 已把 deterministic Context Compaction v1 接入 `runAgentLoop`，并完成 package scripts、session/event additive 兼容、agent-loop 集成测试和 MVP 回归入口更新。
+
 目标：
 
 - 长任务可以压缩上下文。
-- compact summary 可恢复。
+- compact summary 可审计、可恢复，且不依赖 trace artifacts。
 
 改动：
 
 - 新增 `context/compaction.ts`。
+- 新增 `context/run-summary.ts`。
 - 新增 `kernel/token-budget.ts`。
-- session transcript 支持 compact entry。
+- `runAgentLoop` 支持可选 `contextBudget` / `contextCompactor`，未设置 `maxInputTokens` 时只估算、不自动 compact。
+- session transcript 支持 `context_compaction` entry。
+- session events 支持 `token_budget_updated` / `context_compacted`。
+- `test:mvp` 已包含 `test:token-budget` 和 `test:context-compaction`。
 
 验收：
 
 - 构造长 transcript 后能 compact。
-- compact 后保留 goal、phase、evidence、blockers。
+- compact 后保留 goal、workflow phase/blocker、latest page/form、permission/approval、安全 notes 和下一步 hints。
+- compact 后 loop 仍能继续执行工具。
+- direct `runAgentLoop` 不传 `contextBudget` 时保持兼容。
+- `AgentRuntimeResult` schema、tool schema、`ToolExecutionService`、`PermissionEngine` 职责不变。
+- runtime/session/context 不读取 `output/traces`、`page-state-latest.json`、`form-state-latest.json`。
+
+完成说明：
+
+- `PLAN/phase2/plan5-completion-explanation.md`
 
 ## 5.6 Phase 2F: WorkflowEngine + Evidence
+
+当前状态：已完成。Plan 6 已新增 `WorkflowDefinition`、`EvidenceStore v1`、`WorkflowEngine v1`，并接入 session audit、context compaction 和 `runAgentLoop`。
 
 目标：
 
 - 从轻量 WorkflowState 升级到 WorkflowEngine v1。
+- 用 evidence 解释任务阶段、阻塞原因和 completion criteria。
 
 改动：
 
 - 新增 `workflow/workflow-definition.ts`。
 - 新增 `workflow/workflow-engine.ts`。
 - 新增 `workflow/workflow-evidence.ts`。
-- `transitionWorkflowState` 逐步变成 compatibility helper。
+- 新增 transcript entry：`workflow_evidence` / `workflow_evaluation`。
+- 新增 session events：`workflow_evidence_recorded` / `workflow_evaluated`。
+- `ContextCompactor` 保留 evidence / completion summary。
+- `runAgentLoop` 在初始 context、permission/gate、工具执行、agent_done 和 context refresh 后调用 WorkflowEngine。
+- `transitionWorkflowState` 继续作为 compatibility helper。
 
 验收：
 
 - job application workflow 有定义。
-- final submit success 必须由 evidence 支撑。
-- optimistic complete 被禁止。
+- `EvidenceStore` 支持 add/list/byKind/snapshot，且避免外部 mutation。
+- `WorkflowEngine` 输出 matched/missing criteria、blockers、evidence ids。
+- final submit approve 后仍不执行 submit tool。
+- agent_done 的 missing completion evidence 会进入 `workflow_evaluation`。
+- compaction 保留 evidence summary，但不保留 raw evidence data payload。
+- runtime workflow/context/session 不读取 `output/traces`、`page-state-latest.json`、`form-state-latest.json`。
 
-## 5.7 Phase 2G: SkillSystem v1
+已知边界：
+
+- Plan 6 v1 让 optimistic complete 的 missing criteria 可见、可审计，但为了兼容还没有把所有 missing criteria 强制变成 runtime blocked。后续可用 CompletionGate / WorkflowGuard 收紧。
+
+完成说明：
+
+- `PLAN/phase2/plan6.md`
+- `PLAN/phase2/plan6-completion-explanation.md`
+
+## 5.7 Phase 2G: CompletionGate / WorkflowGuard v1
+
+目标：
+
+- 让 WorkflowEngine 的 `missingCriteria` 真正影响 runtime 最终完成状态。
+- 把 `agent_done blocked=false` 从“模型提议完成”升级为“Runtime 根据 evidence 裁决完成”。
+
+改动：
+
+- 新增 `workflow/completion-gate.ts`。
+- 新增 transcript entry：`completion_gate`。
+- 新增 session event：`completion_gate_evaluated`。
+- `runAgentLoop` 在 `agent_done` 后调用 CompletionGate。
+- 缺 required evidence 时，runtime final status 应为 blocked。
+
+验收：
+
+- `agent_done blocked=false` 但缺 required evidence 时不再 completed。
+- final submit approve 后仍不执行 submit tool。
+- no-tool-call 结束分支保持兼容。
+- `AgentRuntimeResult` / `AgentLoopResult` schema 不变。
+- CompletionGate 不执行工具、不调用 HumanGate、不读取 trace artifacts。
+
+计划：
+
+- `PLAN/phase2/plan7.md`
+- `PLAN/phase2/plan7-agent-prompts.md`
+
+## 5.8 Phase 2H: SkillSystem v1
 
 目标：
 
@@ -1466,7 +1530,7 @@ Phase 2 不优先做复杂多 Agent。原因：
 - 任务启动时能推荐技能。
 - 技能注入写入 session 和 trace。
 
-## 5.8 Phase 2H: Task Cockpit
+## 5.9 Phase 2I: Task Cockpit
 
 目标：
 
@@ -1484,7 +1548,7 @@ Phase 2 不优先做复杂多 Agent。原因：
 - 能继续 blocked session。
 - final submit 前 UI 展示证据和风险。
 
-## 5.9 Phase 2I: Doctor + Eval
+## 5.10 Phase 2J: Doctor + Eval
 
 目标：
 
