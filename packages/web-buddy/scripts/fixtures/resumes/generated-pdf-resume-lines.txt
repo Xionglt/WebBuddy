@@ -1,0 +1,15 @@
+Priya PDF Fixture
+Email: priya.pdf.fixture@example.test  Phone: +1 555 010 9944
+Location: Denver, CO
+Summary: Platform engineer building TypeScript automation and reliable browser workflows.
+
+Skills: TypeScript React Node.js Playwright Docker Kubernetes Postgres
+
+Experience
+PDF Fixture Works
+2020.03-Present
+Platform Engineer
+Built workflow automation and resume ingestion quality gates.
+
+Education
+Example Technical University, Bachelor, Computer Science, 2016-2020

@@ -65,6 +65,77 @@ try {
     traceEvent(policyEvent({
       step: 3,
       toolName: 'browser_click_text',
+      risk: 'L3',
+      action: 'gate',
+      riskLevel: 'high',
+      gateKind: 'high_risk_action',
+      policyCode: 'policy.workflow.apply_entry',
+      ruleId: 'policy.workflow.apply_entry.v1',
+      reason: 'Apply-entry action requires a high-risk gate but is not a final-submit action.',
+      workflowPhase: 'entering_application',
+      requiresFreshContext: true,
+    })),
+    traceEvent({
+      schemaVersion: 'permission-decision/v1-wrapper',
+      event: 'permission_decision',
+      value: {
+        step: 3,
+        request: {
+          requestId: 'perm-trusted-apply',
+          step: 3,
+          subject: { kind: 'tool_call', toolName: 'browser_click_text', argBrief: 'text=Apply now' },
+          risk: 'L3',
+          riskLevel: 'high',
+          currentUrl: 'https://example.test/jobs/1',
+          gateKind: 'high_risk_action',
+          policy: { policyCode: 'policy.workflow.apply_entry', reason: 'Apply-entry action requires a high-risk gate.' },
+        },
+        decision: permissionDecision({
+          requestId: 'perm-trusted-apply',
+          action: 'allow',
+          ruleId: 'permission.mode.trusted.auto_allow.v1',
+          policyCode: 'policy.workflow.apply_entry',
+          risk: 'L3',
+          riskLevel: 'high',
+          permissionMode: 'trusted',
+          gateKind: 'high_risk_action',
+          reason: 'Trusted permission mode auto-allows non-final L3 application-flow actions.',
+          auditTags: ['permission:allow', 'permission:auto_allow', 'permission_mode:trusted'],
+        }),
+      },
+    }),
+    traceEvent({
+      schemaVersion: 'permission-decision/v1-wrapper',
+      event: 'permission_decision',
+      value: {
+        step: 4,
+        request: {
+          requestId: 'perm-policy-deny',
+          step: 4,
+          subject: { kind: 'tool_call', toolName: 'browser_upload_file', argBrief: 'ref=e9' },
+          risk: 'L4',
+          riskLevel: 'critical',
+          currentUrl: 'https://example.test/apply',
+          gateKind: 'upload_resume',
+          policy: { policyCode: 'policy.workflow.upload_resume', reason: 'Resume upload requires permission.' },
+        },
+        decision: permissionDecision({
+          requestId: 'perm-policy-deny',
+          action: 'deny',
+          ruleId: 'permission.policy_block.deny.v1',
+          policyCode: 'policy.workflow.upload_resume',
+          risk: 'L4',
+          riskLevel: 'critical',
+          permissionMode: 'safe',
+          gateKind: 'upload_resume',
+          reason: 'Resume upload was denied by policy.',
+          auditTags: ['permission:deny', 'permission_mode:safe'],
+        }),
+      },
+    }),
+    traceEvent(policyEvent({
+      step: 5,
+      toolName: 'browser_click_text',
       action: 'gate',
       riskLevel: 'critical',
       gateKind: 'final_submit',
@@ -113,26 +184,34 @@ try {
   assert.equal(result.report.finalSubmitBlocked, true)
   assert.equal(result.report.loginHandoffRequired, true)
   assert.equal(result.report.captchaHandoffRequired, true)
-  assert.equal(result.report.highRiskActionCount, 3)
-  assert.equal(result.report.gateCount, 3)
+  assert.equal(result.report.highRiskActionCount, 4)
+  assert.equal(result.report.gateCount, 4)
+  assert.equal(result.report.riskDecisionCount, 6)
+  assert.equal(result.report.autoAllowedCount, 1)
+  assert.equal(result.report.gatedCount, 3)
+  assert.equal(result.report.deniedCount, 1)
   assert.deepEqual(result.report.policyCodes, [
     'policy.workflow.login_required',
     'policy.workflow.captcha_required',
+    'policy.workflow.apply_entry',
     'policy.workflow.final_submit',
   ])
   assert.match(result.report.summary, /Final submit was attempted and blocked/i)
+  assert.match(result.report.summary, /1 auto-allowed, 3 gated, and 1 denied/i)
 
   console.log('safety-report-test: PASS')
 } finally {
   rmSync(root, { recursive: true, force: true })
 }
 
-function traceEvent(value) {
+function traceEvent(input) {
+  const event = input.event || 'policy_decision'
+  const value = Object.prototype.hasOwnProperty.call(input, 'value') ? input.value : input
   return JSON.stringify({
     schemaVersion: 'agent-trace/v1',
     sessionId: 'test',
     ts: '2026-06-26T00:00:00.000Z',
-    event: 'policy_decision',
+    event,
     data: {
       kind: 'json',
       value,
@@ -145,6 +224,20 @@ function policyEvent(input) {
     schemaVersion: 'policy-audit/v1',
     at: '2026-06-26T00:00:00.000Z',
     sessionId: 'test',
+    ...input,
+  }
+}
+
+function permissionDecision(input) {
+  return {
+    schemaVersion: 'permission-decision/v1',
+    source: 'config_rule',
+    decidedAt: '2026-06-26T00:00:00.000Z',
+    rememberable: false,
+    remember: {
+      supportedScopes: ['once'],
+      defaultScope: 'once',
+    },
     ...input,
   }
 }

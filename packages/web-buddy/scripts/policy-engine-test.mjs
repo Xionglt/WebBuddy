@@ -73,6 +73,17 @@ const finalSubmit = engine.evaluate({
 assert.equal(finalSubmit.gateKind, 'final_submit')
 assert.equal(finalSubmit.policyCode, 'policy.workflow.final_submit')
 
+const directSubmitFinal = engine.evaluate({
+  toolName: 'browser_click_text',
+  args: { text: '投递简历' },
+  risk: 'L3',
+  workflowPhase: 'direct_submit_review',
+})
+assert.equal(directSubmitFinal.action, 'gate')
+assert.equal(directSubmitFinal.gateKind, 'final_submit')
+assert.equal(directSubmitFinal.policyCode, 'policy.workflow.final_submit')
+assert.match(directSubmitFinal.reason, /direct-submit review/i)
+
 const login = engine.evaluate({
   toolName: 'browser_click_text',
   args: { text: 'Sign in' },

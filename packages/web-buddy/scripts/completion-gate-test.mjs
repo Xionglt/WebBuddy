@@ -40,6 +40,17 @@ assert.equal(blockedReadyForFinalSubmit.recommendedStatus, 'blocked')
 assert.equal(blockedReadyForFinalSubmit.workflowPhase, 'ready_for_final_submit')
 assert.match(blockedReadyForFinalSubmit.reason, /final submit/i)
 
+const blockedDirectSubmitReview = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'direct_submit_review' }),
+  source: 'agent_done',
+})
+assert.equal(blockedDirectSubmitReview.action, 'block')
+assert.equal(blockedDirectSubmitReview.recommendedStatus, 'blocked')
+assert.equal(blockedDirectSubmitReview.workflowPhase, 'direct_submit_review')
+assert.match(blockedDirectSubmitReview.reason, /direct-submit review/i)
+
 const blockedByFinalSubmitBlocker = CompletionGate.evaluate({
   done: true,
   blocked: false,

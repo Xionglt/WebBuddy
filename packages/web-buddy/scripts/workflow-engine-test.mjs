@@ -96,6 +96,39 @@ assert(ready.matchedCriteria.some((criterion) => criterion.id === 'ready-for-fin
 assert(ready.evidenceIds.includes('ev-form-ready'))
 assert(ready.evidenceIds.includes('ev-policy-final'))
 
+const directSubmitForm = form({
+  url: 'https://example.test/apply/direct',
+  fields: [field(0, '我已阅读并同意申请工作需知', '', false, 'checkbox')],
+  missingRequired: [],
+  filledFields: [],
+  submitCandidates: [{ tag: 'button', type: 'submit', text: '投递简历', risk: 'L3', visible: true }],
+})
+const directSubmitReview = engine.evaluate({
+  previous: enteringState(),
+  currentUrl: 'https://example.test/apply/direct',
+  page: page({
+    url: 'https://example.test/apply/direct',
+    title: 'Direct apply',
+    textSummary: '我已阅读并同意申请工作需知。投递简历',
+    inputCount: 1,
+    buttonCount: 1,
+  }),
+  form: directSubmitForm,
+  policyFacts: [{ action: 'gate', riskLevel: 'critical', reason: 'final submit', gateKind: 'final_submit' }],
+  evidenceSnapshot: snapshot([
+    evidence('ev-page-direct-submit', 'page', 'Direct submit page is visible.', 'direct_submit_review'),
+    evidence('ev-form-direct-submit', 'form', 'Only agreement checkbox and apply button are visible.', 'direct_submit_review'),
+    evidence('ev-policy-direct-submit', 'policy', 'Policy identified final submit gate.', 'direct_submit_review'),
+  ]),
+  now,
+})
+assert.equal(directSubmitReview.state.phase, 'direct_submit_review')
+assert.notEqual(directSubmitReview.state.phase, 'blocked')
+assert.equal(directSubmitReview.state.humanHandoffRequired, true)
+assert(directSubmitReview.blockers.some((blocker) => blocker.kind === 'human_handoff' && blocker.gateKind === 'final_submit'))
+assert(directSubmitReview.matchedCriteria.some((criterion) => criterion.id === 'direct-submit-review-requires-page-form-and-policy-evidence'))
+assert(directSubmitReview.evidenceIds.includes('ev-form-direct-submit'))
+
 const finalDeclined = engine.evaluate({
   previous: ready.state,
   approvalFacts: [{ gateKind: 'final_submit', status: 'denied', decision: 'decline' }],
@@ -199,17 +232,26 @@ function form(overrides = {}) {
   }
 }
 
-function field(index, label, value, required) {
+function field(index, label, value, required, type = 'text') {
   return {
     index,
     label,
     tag: 'input',
-    type: 'text',
+    type,
     value,
     required,
     filled: Boolean(value),
     disabled: false,
     readonly: false,
     invalid: required && !value,
+  }
+}
+
+function enteringState() {
+  return {
+    ...initial,
+    phase: 'entering_application',
+    confidence: 'medium',
+    reason: 'Apply entry action appears to open the application flow.',
   }
 }

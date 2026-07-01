@@ -33,6 +33,19 @@ export interface MatchScore {
   missingSkills: string[]
 }
 
+export const DEFAULT_MATCH_THRESHOLD = 0.45
+
+export interface MatchThresholdDecision {
+  threshold: number
+  shouldApply: boolean
+  best?: MatchScore
+  reason: string
+}
+
+interface ResumeProfileWithTargets extends ResumeProfile {
+  targetRoles?: string[] | { value?: string[] }
+}
+
 const STOPWORDS = new Set([
   '的', '与', '和', '及', '或', '并', '在', '为', '是', '等', '岗位', '职位', '要求',
   '描述', '职责', '任职', '资格', '优先', '具备', '熟悉', '了解', '掌握', '使用',
@@ -66,6 +79,163 @@ function normalizeSkill(skill: string): string {
   if (s === 'golang') return 'go'
   if (s === 'k8s') return 'kubernetes'
   return s
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(1, value))
+}
+
+function uniqueNormalized(values: string[]): string[] {
+  return [...new Set(values.map((value) => normalizeSkill(value.trim().toLowerCase())).filter(Boolean))]
+}
+
+const ROLE_TERMS = [
+  'frontend', 'front-end', '前端', 'backend', 'back-end', '后端', 'fullstack', 'full-stack', '全栈',
+  'engineer', '工程师', 'developer', '研发', '开发', '算法', 'algorithm', 'ai', 'ml',
+  'machine', 'learning', 'data', '数据', 'infra', 'infrastructure', '平台', '测试', 'qa',
+  'product', '产品', 'design', '设计', 'security', '安全',
+]
+
+function extractTargetRoles(profile: ResumeProfile): string[] {
+  const withTargets = profile as ResumeProfileWithTargets
+  const explicit = Array.isArray(withTargets.targetRoles)
+    ? withTargets.targetRoles
+    : Array.isArray(withTargets.targetRoles?.value)
+      ? withTargets.targetRoles.value
+      : []
+  const inferredSource = [
+    ...explicit,
+    ...profile.keywords,
+    profile.summary || '',
+    ...profile.experience.map((experience) => experience.title || ''),
+  ].join(' ')
+  const tokens = tokenize(inferredSource)
+  const roleTokens = tokens.filter((token) =>
+    ROLE_TERMS.some((role) => token.includes(role) || role.includes(token)),
+  )
+  return uniqueNormalized([...explicit, ...roleTokens])
+}
+
+function textContainsToken(text: string, token: string): boolean {
+  if (!token) return false
+  const normalized = normalizeText(text)
+  const needle = normalizeText(token)
+  return normalized.includes(` ${needle} `) || normalized.includes(needle)
+}
+
+function matchTokens(tokens: string[], text: string, tagSet: Set<string>): string[] {
+  return tokens.filter((token) => tagSet.has(token) || textContainsToken(text, token))
+}
+
+function locationFit(profile: ResumeProfile, job: JobPosting): number {
+  if (!profile.location || !job.location) return 0
+  const candidate = normalizeText(profile.location)
+  const location = normalizeText(job.location)
+  if (!candidate || !location) return 0
+  if (location.includes(candidate) || candidate.includes(location)) return 1
+  const candidateTokens = tokenize(candidate)
+  const locationTokens = tokenize(location)
+  return candidateTokens.some((token) => locationTokens.includes(token)) ? 0.8 : 0
+}
+
+/**
+ * Fast list-stage ranking. It intentionally uses only title/category/location/
+ * tags plus resume skills and target-role signals, so it can rank many jobs
+ * before any detail page is opened or any LLM is called.
+ */
+export function matchJobsCoarse(profile: ResumeProfile, jobs: JobPosting[]): MatchScore[] {
+  const resumeSkills = uniqueNormalized(profile.skills)
+  const targetRoles = extractTargetRoles(profile)
+
+  const results = jobs.map((job) => {
+    const listText = [job.title, job.category, job.location, job.updated, job.searchText, job.tags.join(' ')]
+      .filter(Boolean)
+      .join(' ')
+    const titleText = job.title || ''
+    const categoryText = job.category || ''
+    const jobTags = new Set(job.tags.map(normalizeSkill))
+
+    const matchedSkills = matchTokens(resumeSkills, listText, jobTags)
+    const titleMatches = matchTokens([...targetRoles, ...resumeSkills], titleText, jobTags)
+    const roleMatches = matchTokens(targetRoles, listText, jobTags)
+    const categoryMatches = matchTokens(targetRoles, categoryText, jobTags)
+
+    const skillScore = resumeSkills.length === 0
+      ? 0
+      : Math.min(1, matchedSkills.length / Math.min(5, resumeSkills.length))
+    const roleScore = targetRoles.length === 0
+      ? 0
+      : Math.min(1, roleMatches.length / Math.min(3, Math.max(1, targetRoles.length)))
+    const titleScore = titleMatches.length > 0 ? Math.min(1, titleMatches.length / 2) : 0
+    const categoryScore = categoryMatches.length > 0 ? 1 : 0
+    const locScore = locationFit(profile, job)
+
+    const negative =
+      /实习|intern/i.test(job.title) && !/(实习|intern|campus|校招)/i.test([...profile.keywords, profile.summary || ''].join(' '))
+        ? 0.12
+        : 0
+
+    const score = clamp01(
+      skillScore * 0.48 +
+        roleScore * 0.25 +
+        titleScore * 0.12 +
+        categoryScore * 0.08 +
+        locScore * 0.07 -
+        negative,
+    )
+
+    const missingSkills = [...jobTags]
+      .filter((tag) => !resumeSkills.includes(tag))
+      .filter((tag) => /[a-z]/.test(tag) || /[一-鿿]/.test(tag))
+      .slice(0, 8)
+    const reasons = [
+      matchedSkills.length ? `skills ${matchedSkills.slice(0, 5).join(', ')}` : 'no skill overlap',
+      roleMatches.length ? `role ${roleMatches.slice(0, 4).join(', ')}` : '',
+      locScore > 0 ? `location ${job.location}` : '',
+      negative > 0 ? 'internship signal penalized' : '',
+    ].filter(Boolean)
+
+    return {
+      job,
+      score,
+      reason: `Coarse: ${reasons.join('; ')}.`,
+      matchedSkills,
+      missingSkills,
+    }
+  })
+
+  results.sort((a, b) => b.score - a.score || b.matchedSkills.length - a.matchedSkills.length)
+  return results
+}
+
+export function decideMatchThreshold(
+  matches: MatchScore[],
+  threshold = DEFAULT_MATCH_THRESHOLD,
+): MatchThresholdDecision {
+  const safeThreshold = clamp01(threshold)
+  const best = matches[0]
+  if (!best) {
+    return {
+      threshold: safeThreshold,
+      shouldApply: false,
+      reason: `No candidates available; threshold is ${safeThreshold.toFixed(2)}.`,
+    }
+  }
+  if (best.score < safeThreshold) {
+    return {
+      threshold: safeThreshold,
+      shouldApply: false,
+      best,
+      reason: `Best score ${best.score.toFixed(2)} is below threshold ${safeThreshold.toFixed(2)}.`,
+    }
+  }
+  return {
+    threshold: safeThreshold,
+    shouldApply: true,
+    best,
+    reason: `Best score ${best.score.toFixed(2)} meets threshold ${safeThreshold.toFixed(2)}.`,
+  }
 }
 
 /**

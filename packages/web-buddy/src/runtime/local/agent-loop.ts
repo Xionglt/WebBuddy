@@ -26,10 +26,23 @@ import {
   type ApprovalResolvePatch,
   type ApprovalResolveResult,
   type PermissionDecision,
+  type PermissionMode,
   type PermissionRequest,
 } from '../../permission/permission-types.js'
 import { decideToolPolicy, shouldStopAfterGateDecision, type PolicyEngineDecision } from '../../policy/agent-policy.js'
 import { createPolicyAuditEvent } from '../../policy/policy-audit.js'
+import {
+  RISK_DECISIONS_ARTIFACT,
+  appendRiskDecision,
+  createPermissionRiskDecision,
+  createPolicyRiskDecision,
+  createRiskDecisionsArtifact,
+  formatCompactRiskDecision,
+  formatRiskLine,
+  serializeRiskDecisionsArtifact,
+  shouldShowCompactRiskDecision,
+  type RiskDecisionRecord,
+} from '../../policy/risk-decisions.js'
 import { sessionManager } from '../../session/manager.js'
 import {
   compactAssistantContent,
@@ -58,7 +71,7 @@ import { ToolRegistry, type ToolContext } from './tool-registry.js'
 
 export interface AgentEvent {
   step: number
-  level: 'think' | 'act' | 'observe' | 'gate' | 'warn' | 'error' | 'done'
+  level: 'think' | 'risk' | 'decision' | 'act' | 'observe' | 'gate' | 'warn' | 'error' | 'done'
   message: string
 }
 
@@ -76,6 +89,10 @@ export interface AgentLoopInput {
   extraContext?: string
   /** `raw` removes job-application workflow guardrails so the model drives the browser directly. */
   safetyMode?: 'guarded' | 'raw'
+  /** User-facing permission profile for deciding which gated actions can auto-allow. */
+  permissionMode?: PermissionMode
+  /** Explicit future switch for final-submit automation. Defaults false. */
+  allowFinalSubmit?: boolean
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
   /** Optional kernel/run-controller abort signal. Checked before model/tool work. */
@@ -152,7 +169,11 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
   const tools = registry.toOpenAITools()
   const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
-  const permissionEngine = input.permissionEngine ?? new PermissionEngine()
+  const permissionMode = input.permissionMode ?? 'safe'
+  const permissionEngine = input.permissionEngine ?? new PermissionEngine({
+    permissionMode,
+    allowFinalSubmit: input.allowFinalSubmit ?? false,
+  })
   const approvalQueue = input.approvalQueue ?? new ApprovalQueue()
   const workflowEngine = input.workflowEngine ?? defaultWorkflowEngine
   const completionGate = input.completionGate ?? defaultCompletionGate
@@ -171,8 +192,22 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const permissionRequests: PermissionRequest[] = []
   const permissionDecisions: PermissionDecision[] = []
   const approvals: ApprovalRequest[] = []
+  const riskDecisions = createRiskDecisionsArtifact({
+    runId: ctx.trace.runId,
+    sessionId: ctx.trace.agentTrace?.sessionId ?? ctx.sessionId,
+  })
   let lastWorkflowEvaluation: WorkflowEngineEvaluation | undefined
 
+  const persistRiskDecisions = () => {
+    ctx.trace.agentTrace?.writeArtifact(
+      RISK_DECISIONS_ARTIFACT,
+      serializeRiskDecisionsArtifact(riskDecisions),
+    )
+  }
+  const recordRiskDecision = (decision: RiskDecisionRecord) => {
+    appendRiskDecision(riskDecisions, decision)
+    persistRiskDecisions()
+  }
   const sessionAction = async (label: string, action: () => Promise<void>) => {
     if (!session) return
     try {
@@ -414,6 +449,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       request: requestMetadata,
       decision: decisionMetadata,
     })
+    const riskDecision = createPermissionRiskDecision({
+      step: currentStep,
+      request,
+      decision,
+    })
+    recordRiskDecision(riskDecision)
+    if (shouldShowCompactRiskDecision(riskDecision)) {
+      emit('decision', formatCompactRiskDecision(riskDecision), currentStep)
+    }
     await sessionTranscript({
       type: 'permission_decision',
       ...(request.turnId ? { turnId: request.turnId } : {}),
@@ -556,6 +600,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     result: Record<string, unknown>,
     reason?: string,
   ) => {
+    persistRiskDecisions()
     if (!session || sessionFinalized) return
     sessionFinalized = true
     await sessionTranscript({
@@ -601,7 +646,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   await sessionEvent({
     type: 'session_started',
     message: 'Agent loop started.',
-    data: { goal, safetyMode, maxSteps },
+    data: { goal, safetyMode, permissionMode, maxSteps },
   })
   await sessionTranscript({ type: 'user_message', content: goal })
   const abortedAfterStart = await checkAbort()
@@ -816,9 +861,24 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         sessionId: ctx.sessionId,
         step,
         toolName: call.name,
+        risk,
         decision: policyDecision,
       })
       ctx.trace.agentTrace?.recordEvent('policy_decision', policyAudit)
+      const policyRiskDecision = createPolicyRiskDecision({
+        step,
+        toolName: call.name,
+        action: `${call.name}(${argBrief})`,
+        risk,
+        url: currentUrl,
+        permissionMode,
+        decision: policyDecision,
+        timestamp: policyAudit.at,
+      })
+      recordRiskDecision(policyRiskDecision)
+      if (shouldShowCompactRiskDecision(policyRiskDecision)) {
+        emit('risk', formatRiskLine(policyRiskDecision), step)
+      }
       await sessionTranscript({
         type: 'policy_decision',
         turnId,
@@ -1423,6 +1483,9 @@ function blockersWithWorkflow(blockers: string[], workflowState: WorkflowState):
 function workflowHandoffSummary(workflowState: WorkflowState): string | undefined {
   if (workflowState.phase === 'login_required') return 'Human login required before continuing.'
   if (workflowState.phase === 'captcha_required') return 'Human verification required before continuing.'
+  if (workflowState.phase === 'direct_submit_review') {
+    return 'Direct-submit review: this site uses an online resume/direct-submit mode, no fillable fields were found, and the next step is final submit. Stopping before final_submit for human review.'
+  }
   return undefined
 }
 
@@ -1524,6 +1587,7 @@ function permissionMetadata(decision: PermissionDecision): Record<string, unknow
     policyRuleId: decision.policyRuleId,
     risk: decision.risk,
     riskLevel: decision.riskLevel,
+    permissionMode: decision.permissionMode,
     reason: decision.reason,
     decidedAt: decision.decidedAt,
     gateKind: decision.gateKind,

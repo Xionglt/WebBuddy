@@ -1,6 +1,7 @@
 import type { AgentRuntimeEvent, AgentRuntimeLlm, AgentSafetyMode, AgentStopReason } from '../agent/types.js'
 import type { HumanGate } from '../sdk/human.js'
 import type { LlmGateway } from '../sdk/llm.js'
+import type { PermissionMode } from '../permission/index.js'
 import type { ResumeProfile } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
 import { runAgentLoop, type AgentEvent, type AgentLoopResult } from '../runtime/local/agent-loop.js'
@@ -32,6 +33,8 @@ export interface QueryLoopInput {
   onRuntimeEvent?: (event: AgentRuntimeEvent) => void
   extraContext?: string
   safetyMode?: AgentSafetyMode
+  permissionMode?: PermissionMode
+  allowFinalSubmit?: boolean
   session?: SessionRecorder
   controller?: AgentRunController
 }
@@ -81,6 +84,8 @@ export class QueryLoop {
         },
         extraContext: input.extraContext,
         safetyMode: input.safetyMode,
+        permissionMode: input.permissionMode,
+        allowFinalSubmit: input.allowFinalSubmit,
         session: input.session,
         abortSignal: controller.signal,
       })
@@ -157,7 +162,7 @@ function updateTurnStateFromRuntimeEvent(
 
 function statusForRuntimeEvent(level: AgentEvent['level']) {
   if (level === 'think') return 'model_running'
-  if (level === 'act' || level === 'observe' || level === 'gate') return 'tools_running'
+  if (level === 'risk' || level === 'decision' || level === 'act' || level === 'observe' || level === 'gate') return 'tools_running'
   if (level === 'done') return 'completed'
   if (level === 'error') return 'failed'
   return 'created'

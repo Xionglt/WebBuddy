@@ -43,6 +43,8 @@ export interface ChatOptions {
   /** Request JSON output (response_format=json_object). */
   jsonMode?: boolean
   temperature?: number
+  /** Redact messages and model text in trace spans for sensitive inputs. */
+  redactTrace?: boolean
   /** Hard timeout for the HTTP call. */
   timeoutMs?: number
   /** Tools available for the model to call. */
@@ -89,7 +91,7 @@ export class LlmGateway {
       spanType: 'llm_call',
       name: 'llm.chat',
       input: {
-        messages,
+        messages: options.redactTrace ? redactChatMessages(messages) : messages,
         options: traceChatOptions(options),
       },
       metadata: {
@@ -106,8 +108,8 @@ export class LlmGateway {
       span?.end({
         status: 'success',
         output: {
-          content: result.content,
-          toolCalls: result.toolCalls,
+          content: options.redactTrace ? '[redacted sensitive model output]' : result.content,
+          toolCalls: options.redactTrace ? redactToolCalls(result.toolCalls) : result.toolCalls,
         },
       })
       return result
@@ -134,6 +136,7 @@ export class LlmGateway {
       model: this.model.name,
       messages,
       temperature: options.temperature ?? 0.2,
+      ...(this.model.extraBody ?? {}),
     }
     if (options.jsonMode) body.response_format = { type: 'json_object' }
     if (options.tools?.length) {
@@ -373,10 +376,35 @@ function traceChatOptions(options: ChatOptions): Record<string, unknown> {
     timeoutMs: options.timeoutMs,
     toolChoice: options.toolChoice,
     maxTokens: options.maxTokens,
+    redactTrace: options.redactTrace,
     tools: options.tools?.map((tool) => ({
       name: tool.function.name,
       description: tool.function.description,
       parameters: tool.function.parameters,
     })),
   }
+}
+
+function redactChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    content: message.content ? '[redacted sensitive message]' : message.content,
+    tool_calls: message.tool_calls?.map((call) => ({
+      ...call,
+      function: {
+        ...call.function,
+        arguments: call.function.arguments ? '[redacted sensitive tool arguments]' : call.function.arguments,
+      },
+    })),
+  }))
+}
+
+function redactToolCalls(toolCalls: ToolCall[]): ToolCall[] {
+  return toolCalls.map((call) => ({
+    id: call.id,
+    name: call.name,
+    arguments: call.arguments && Object.keys(call.arguments).length
+      ? { _redacted: true }
+      : {},
+  }))
 }

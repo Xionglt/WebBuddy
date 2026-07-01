@@ -112,6 +112,35 @@ try {
         },
       }),
       JSON.stringify({
+        event: 'permission_decision',
+        data: {
+          kind: 'json',
+          value: {
+            step: 4,
+            request: { requestId: 'perm-trusted-apply' },
+            decision: permissionDecision({
+              requestId: 'perm-trusted-apply',
+              action: 'allow',
+              source: 'config_rule',
+              ruleId: 'permission.mode.trusted.auto_allow.v1',
+              policyCode: 'policy.workflow.apply_entry',
+              risk: 'L3',
+              riskLevel: 'high',
+              permissionMode: 'trusted',
+              gateKind: 'high_risk_action',
+              auditTags: [
+                'permission:allow',
+                'source:config_rule',
+                'risk:high',
+                'permission_mode:trusted',
+                'gate:high_risk_action',
+                'permission:auto_allow',
+              ],
+            }),
+          },
+        },
+      }),
+      JSON.stringify({
         event: 'policy_decision',
         data: {
           kind: 'json',
@@ -233,6 +262,16 @@ try {
     assert.deepEqual(result.metrics.policy.blockedReasonCounts, {
       'Captcha step requires the captcha human gate.': 1,
     })
+    assert.equal(result.metrics.permission.decisions, 1)
+    assert.equal(result.metrics.permission.allows, 1)
+    assert.equal(result.metrics.permission.asks, 0)
+    assert.equal(result.metrics.permission.denies, 0)
+    assert.equal(result.metrics.permission.autoAllows, 1)
+    assert.deepEqual(result.metrics.permission.modeCounts, { trusted: 1 })
+    assert.deepEqual(result.metrics.permission.gateKindCounts, { high_risk_action: 1 })
+    assert.deepEqual(result.metrics.permission.ruleIdCounts, {
+      'permission.mode.trusted.auto_allow.v1': 1,
+    })
     assert.equal(result.metrics.stdoutBytes, Buffer.byteLength('hello stdout'))
     assert.equal(JSON.parse(readFileSync(result.path, 'utf8')).schemaVersion, 'run-metrics/v1')
   }
@@ -315,6 +354,16 @@ try {
       policyCodeCounts: {},
       blockedReasonCounts: {},
     })
+    assert.deepEqual(metrics.permission, {
+      decisions: 0,
+      allows: 0,
+      asks: 0,
+      denies: 0,
+      autoAllows: 0,
+      modeCounts: {},
+      gateKindCounts: {},
+      ruleIdCounts: {},
+    })
     assert.deepEqual(metrics.warnings, ['missing fixture'])
   }
 
@@ -343,6 +392,20 @@ function policyEvent(input) {
     sessionId: 'test',
     step: 1,
     toolName: 'browser_click_text',
+    ...input,
+  }
+}
+
+function permissionDecision(input) {
+  return {
+    schemaVersion: 'permission-decision/v1',
+    reason: 'Trusted permission mode auto-allows non-final L3 application-flow actions.',
+    decidedAt: '2026-06-23T00:00:00.000Z',
+    rememberable: false,
+    remember: {
+      supportedScopes: ['once'],
+      defaultScope: 'once',
+    },
     ...input,
   }
 }

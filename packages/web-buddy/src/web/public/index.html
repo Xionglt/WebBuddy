@@ -81,6 +81,8 @@
   .event .time, .event .phase { font-family: var(--mono); color: var(--muted); font-size: 11px; }
   .event .msg { white-space: pre-wrap; overflow-wrap: anywhere; }
   .event.think { border-left-color: var(--purple); }
+  .event.risk { border-left-color: var(--amber); background: #fffaf0; }
+  .event.decision { border-left-color: var(--blue); background: #f3f7ff; }
   .event.act { border-left-color: var(--blue); }
   .event.observe { border-left-color: var(--green); }
   .event.gate { border-left-color: var(--amber); background: #fff8eb; }
@@ -115,6 +117,16 @@
   .metric .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0; }
   .metric .v { font-family: var(--mono); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
   .metric-empty { color: var(--muted); font-family: var(--mono); padding: 8px 0; }
+  .risk-list { border-top: 1px solid var(--soft); }
+  .risk-row { border-bottom: 1px solid var(--soft); padding: 8px 0; }
+  .risk-title { display: flex; gap: 6px; align-items: center; min-width: 0; }
+  .risk-title .tool { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .risk-meta { color: var(--muted); font-family: var(--mono); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+  .chip.risk-high { color: var(--amber); background: #fff3d9; }
+  .chip.risk-critical { color: var(--red); background: #fff0ef; }
+  .chip.decision-auto_allow { color: var(--green); background: #e8f7ef; }
+  .chip.decision-ask { color: var(--amber); background: #fff3d9; }
+  .chip.decision-deny { color: var(--red); background: #fff0ef; }
   @media (max-width: 1050px) {
     .app { grid-template-columns: 320px 1fr; }
     .inspect { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); max-height: 360px; }
@@ -236,6 +248,17 @@
       </div>
     </div>
     <div class="panel">
+      <h2>Risk Decisions</h2>
+      <div id="riskEmpty" class="metric-empty">No risk decisions yet.</div>
+      <div class="metric-grid" id="riskGrid" style="display:none">
+        <div class="metric"><div class="k">Auto allowed</div><div class="v" id="riskAutoAllowed">0</div></div>
+        <div class="metric"><div class="k">Gated</div><div class="v" id="riskGated">0</div></div>
+        <div class="metric"><div class="k">Denied</div><div class="v" id="riskDenied">0</div></div>
+        <div class="metric"><div class="k">Total</div><div class="v" id="riskTotal">0</div></div>
+      </div>
+      <div id="riskList" class="risk-list" style="display:none"></div>
+    </div>
+    <div class="panel">
       <h2>Trace Spans</h2>
       <div id="spans"><div class="empty" style="padding:8px 0">No spans yet.</div></div>
     </div>
@@ -251,6 +274,7 @@ let preset = 'generic';
 let runId = null;
 let events = null;
 let traceTimer = null;
+let riskTimelineKeys = new Set();
 
 function setPreset(next) {
   preset = next;
@@ -311,7 +335,7 @@ function addEvent(event) {
   row.className = `event ${level}`;
   const time = event.ts ? new Date(event.ts).toLocaleTimeString() : new Date().toLocaleTimeString();
   row.innerHTML = `<div class="time">${time}</div><div class="phase"></div><div class="msg"></div>`;
-  row.querySelector('.phase').textContent = event.phase || level;
+  row.querySelector('.phase').textContent = timelinePhase(event);
   row.querySelector('.msg').textContent = event.message || '';
   timeline.appendChild(row);
   timeline.scrollTop = timeline.scrollHeight;
@@ -328,11 +352,22 @@ async function refreshTrace() {
   $('traceDir').textContent = trace.traceDir || '-';
   $('spanCount').textContent = String(trace.spans?.length || 0);
   renderMetrics(trace.metrics || null);
+  renderRiskDecisions(trace.riskDecisions || null);
+  appendRiskTimeline(trace.riskDecisions?.decisions || []);
   if (trace.handoffWaiting) {
     $('continueBtn').style.display = 'block';
     setStatus('blocked');
   }
   renderSpans(trace.spans || []);
+}
+
+function timelinePhase(event) {
+  if (event.level === 'think') return 'Think';
+  if (event.level === 'risk') return 'Risk';
+  if (event.level === 'decision') return 'Decision';
+  if (event.level === 'act') return 'Tool';
+  if (event.level === 'observe') return 'Observation';
+  return event.phase || event.level || 'info';
 }
 
 function renderMetrics(metrics) {
@@ -355,6 +390,108 @@ function renderMetrics(metrics) {
   $('metricScreenshots').textContent = String(metrics.screenshots ?? 0);
   $('metricHandoffs').textContent = String(metrics.manualHandoffs ?? 0);
   $('metricFailure').textContent = metrics.failureCategory || '-';
+}
+
+function renderRiskDecisions(artifact) {
+  const decisions = Array.isArray(artifact?.decisions) ? artifact.decisions : [];
+  if (!decisions.length) {
+    $('riskEmpty').style.display = 'block';
+    $('riskGrid').style.display = 'none';
+    $('riskList').style.display = 'none';
+    $('riskList').innerHTML = '';
+    return;
+  }
+  const summary = artifact.summary || {};
+  $('riskEmpty').style.display = 'none';
+  $('riskGrid').style.display = 'grid';
+  $('riskList').style.display = 'block';
+  $('riskAutoAllowed').textContent = String(summary.autoAllowed ?? countDecision(decisions, 'auto_allow'));
+  $('riskGated').textContent = String(summary.gated ?? countDecision(decisions, 'ask'));
+  $('riskDenied').textContent = String(summary.denied ?? countDecision(decisions, 'deny'));
+  $('riskTotal').textContent = String(summary.total ?? decisions.length);
+
+  const root = $('riskList');
+  root.innerHTML = '';
+  for (const decision of decisions.slice(-6).reverse()) {
+    const row = document.createElement('div');
+    row.className = 'risk-row';
+    row.innerHTML = '<div class="risk-title"><span class="chip"></span><span class="chip"></span><span class="tool"></span></div><div class="risk-meta"></div>';
+    const chips = row.querySelectorAll('.chip');
+    chips[0].className = `chip risk-${decision.riskLevel || 'low'}`;
+    chips[0].textContent = decision.risk || decision.riskLevel || 'risk';
+    chips[1].className = `chip decision-${decision.decision || 'allow'}`;
+    chips[1].textContent = decision.decision || 'allow';
+    row.querySelector('.tool').textContent = decision.action || decision.tool || '';
+    row.querySelector('.risk-meta').textContent = [decision.gateKind, decision.permissionMode, decision.reason].filter(Boolean).join(' · ');
+    root.appendChild(row);
+  }
+}
+
+function appendRiskTimeline(decisions) {
+  for (const decision of decisions) {
+    if (!shouldShowRiskTimeline(decision)) continue;
+    const key = riskDecisionKey(decision);
+    if (riskTimelineKeys.has(key)) continue;
+    riskTimelineKeys.add(key);
+    if (decision.source === 'policy') {
+      addEvent({
+        ts: decision.timestamp,
+        level: 'risk',
+        phase: 'Risk',
+        message: riskLine(decision),
+      });
+    } else {
+      addEvent({
+        ts: decision.timestamp,
+        level: 'decision',
+        phase: 'Decision',
+        message: decisionLine(decision),
+      });
+    }
+  }
+}
+
+function shouldShowRiskTimeline(decision) {
+  return decision.riskLevel === 'high' ||
+    decision.riskLevel === 'critical' ||
+    decision.decision === 'ask' ||
+    decision.decision === 'deny' ||
+    decision.decision === 'auto_allow';
+}
+
+function riskDecisionKey(decision) {
+  return [decision.source, decision.step, decision.tool, decision.decision, decision.timestamp, decision.ruleId].join('|');
+}
+
+function riskLine(decision) {
+  const gate = decision.gateKind ? ` gate=${decision.gateKind}` : '';
+  return `${decision.tool || 'tool'}: risk ${decision.risk || '-'} / ${decision.riskLevel || '-'}${gate} | ${decision.reason || ''}`;
+}
+
+function decisionLine(decision) {
+  const subject = gateLabel(decision.gateKind);
+  const action = decision.action || decision.tool || '';
+  const reason = decision.reason || '';
+  if (decision.decision === 'auto_allow') {
+    const mode = decision.permissionMode ? ` by ${decision.permissionMode} mode` : '';
+    return `${subject} auto-allowed${mode}: ${action} | ${reason}`;
+  }
+  if (decision.decision === 'ask') return `${subject} gated: ${action} | ${reason}`;
+  if (decision.decision === 'deny') return `${subject} denied: ${action} | ${reason}`;
+  return `${subject} allowed: ${action} | ${reason}`;
+}
+
+function gateLabel(gateKind) {
+  if (gateKind === 'final_submit') return 'final-submit';
+  if (gateKind === 'upload_resume') return 'resume upload';
+  if (gateKind === 'save_resume') return 'save-resume';
+  if (gateKind === 'login') return 'login';
+  if (gateKind === 'captcha') return 'captcha';
+  return 'high-risk action';
+}
+
+function countDecision(decisions, value) {
+  return decisions.filter((decision) => decision.decision === value).length;
 }
 
 function formatDuration(value) {
@@ -414,7 +551,9 @@ $('runBtn').addEventListener('click', async () => {
   closeStream();
   $('timeline').innerHTML = '<div class="empty">Starting runtime...</div>';
   $('spans').innerHTML = '<div class="empty" style="padding:8px 0">No spans yet.</div>';
+  riskTimelineKeys = new Set();
   renderMetrics(null);
+  renderRiskDecisions(null);
   $('continueBtn').style.display = 'none';
   setStatus('running');
   $('runBtn').disabled = true;

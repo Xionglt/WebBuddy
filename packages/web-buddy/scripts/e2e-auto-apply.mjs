@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert'
 import { createServer } from 'node:http'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runJobApplicationAgent } from '../dist/sdk/orchestrator.js'
@@ -13,6 +13,7 @@ import { loadConfig } from '../dist/sdk/config.js'
 import { sessionManager } from '../dist/session/manager.js'
 
 const tmp = mkdtempSync(join(tmpdir(), 'mfa-auto-apply-'))
+const runId = 'e2e-auto-apply'
 const resumePath = join(tmp, 'resume.json')
 writeFileSync(resumePath, JSON.stringify({
   name: 'Zhang San',
@@ -109,6 +110,8 @@ config.browser.slowMoMs = 0
 config.browser.blockLocalhost = false
 config.browser.allowedDomains = []
 config.human.mode = 'auto'
+const traceArtifactPath = join(config.trace.outDir, 'traces', `run_${runId}`, 'artifacts', 'resume-profile-v2.json')
+const legacyArtifactPath = join(config.trace.outDir, runId, 'resume-profile-v2.json')
 
 const events = []
 
@@ -118,7 +121,7 @@ try {
     mode: 'auto-apply',
     startUrl: jobsUrl,
     onEvent: (e) => events.push(e),
-    runId: 'e2e-auto-apply',
+    runId,
   })
 
   console.log('events:')
@@ -137,6 +140,15 @@ try {
   assert.strictEqual(submissions[0].fields.phone, '13800001234')
   assert.strictEqual(submissions[0].fields.city, 'Hangzhou')
   assert.match(submissions[0].fields.summary, /TypeScript|React|Playwright/i)
+
+  assert.strictEqual(existsSync(traceArtifactPath), true, 'resume-profile-v2 artifact should be written to trace artifacts.')
+  assert.strictEqual(existsSync(legacyArtifactPath), true, 'resume-profile-v2 artifact should be mirrored to run trace root.')
+  const artifact = JSON.parse(readFileSync(traceArtifactPath, 'utf8'))
+  assert.equal(artifact.schemaVersion, 'resume-profile/v2')
+  assert.equal(artifact.source?.parser, 'json')
+  assert.ok(Array.isArray(artifact.skills?.value), 'resume-profile-v2.json should keep array skills with confidence metadata')
+  const artifactText = readFileSync(traceArtifactPath, 'utf8')
+  assert(!/storageState|cookie|api[_-]?key|authorization/i.test(artifactText), 'artifact should not include storage/cookie/api-key tokens')
 
   console.log('\ne2e-auto-apply: PASS')
 } finally {

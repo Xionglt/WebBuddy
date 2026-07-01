@@ -3,6 +3,7 @@ import type { PageState } from '../observation/page-state.js'
 import type { PolicyDecision } from '../policy/agent-policy.js'
 import type { GateDecision, GateKind } from '../sdk/human.js'
 import type { LocalToolRunResult } from '../tools/local-adapter.js'
+import { inspectDirectSubmitWorkflowState } from './direct-submit.js'
 import type { WorkflowConfidence, WorkflowPhase, WorkflowState } from './workflow-state.js'
 
 export interface WorkflowTransitionInput {
@@ -97,14 +98,6 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule | undef
     }
   }
 
-  if (input.gateKind === 'final_submit' || input.policyDecision?.gateKind === 'final_submit') {
-    return {
-      phase: 'ready_for_final_submit',
-      confidence: 'high',
-      reason: 'Policy identified a final-submit gate.',
-    }
-  }
-
   const pageText = workflowText(input.currentUrl, input.page)
   if (input.page?.pageType === 'captcha' || CAPTCHA_TEXT.test(pageText)) {
     return {
@@ -123,6 +116,29 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule | undef
       reason: 'Current page appears to be a login or SSO page.',
       humanHandoffRequired: true,
       blocker: 'Human login required before continuing.',
+    }
+  }
+
+  const directSubmit = inspectDirectSubmitWorkflowState({
+    form: input.form,
+    page: input.page,
+    currentUrl: input.currentUrl,
+  })
+  if (directSubmit?.detected) {
+    return {
+      phase: 'direct_submit_review',
+      confidence: 'high',
+      reason: 'Site appears to use an online-resume/direct-submit flow with no fillable fields.',
+      humanHandoffRequired: true,
+      blocker: 'Direct-submit review: next step is final submit and requires manual confirmation.',
+    }
+  }
+
+  if (input.gateKind === 'final_submit' || input.policyDecision?.gateKind === 'final_submit') {
+    return {
+      phase: 'ready_for_final_submit',
+      confidence: 'high',
+      reason: 'Policy identified a final-submit gate.',
     }
   }
 

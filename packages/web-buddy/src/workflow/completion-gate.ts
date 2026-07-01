@@ -86,6 +86,21 @@ export class CompletionGate {
       })
     }
 
+    if (workflowPhase === 'direct_submit_review') {
+      return decision({
+        action: 'block',
+        recommendedStatus: 'blocked',
+        reason: completionReason(
+          'Completion gate blocked completion because the workflow is in direct-submit review: the site uses an online resume/direct-submit mode, no fillable fields are available, and the next step is final submit.',
+          input,
+        ),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
     if (workflowPhase === 'ready_for_final_submit') {
       return decision({
         action: 'block',

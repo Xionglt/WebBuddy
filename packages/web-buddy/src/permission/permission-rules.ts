@@ -1,8 +1,10 @@
 import type { GateKind } from '../sdk/human.js'
-import type { PermissionDecision, PermissionRequest, PermissionRememberScope } from './permission-types.js'
+import type { PermissionDecision, PermissionMode, PermissionRequest, PermissionRememberScope } from './permission-types.js'
 
 export interface PermissionRuleContext {
   now: () => Date
+  permissionMode: PermissionMode
+  allowFinalSubmit: boolean
 }
 
 export interface PermissionRule {
@@ -17,6 +19,7 @@ export function defaultPermissionRules(): PermissionRule[] {
     finalSubmitRule(),
     uploadRule(),
     loginCaptchaRule(),
+    permissionModeAutoAllowRule(),
     policyGateRule(),
     highRiskRule(),
     policyAllowRule(),
@@ -60,6 +63,20 @@ function finalSubmitRule(): PermissionRule {
     id: 'permission.final_submit.ask.v1',
     evaluate(request, context) {
       if (gateKindFor(request) !== 'final_submit') return undefined
+      if (context.permissionMode === 'autopilot' && context.allowFinalSubmit) {
+        return buildDecision(request, context, {
+          action: 'allow',
+          source: 'config_rule',
+          ruleId: 'permission.mode.autopilot.final_submit.allow.v1',
+          reason: 'Final-submit action was explicitly allowed by allowFinalSubmit in autopilot mode.',
+          gateKind: 'final_submit',
+          extraAuditTags: [
+            'permission:auto_allow',
+            'auto_allow:permission_mode',
+            'allow_final_submit:true',
+          ],
+        })
+      }
       return buildDecision(request, context, {
         action: 'ask',
         source: 'policy',
@@ -102,6 +119,27 @@ function loginCaptchaRule(): PermissionRule {
         ruleId: request.policy.ruleId,
         reason: request.policy.reason,
         gateKind,
+      })
+    },
+  }
+}
+
+function permissionModeAutoAllowRule(): PermissionRule {
+  return {
+    id: 'permission.mode.auto_allow.v1',
+    evaluate(request, context) {
+      if (!isPermissionModeAutoAllowable(request, context)) return undefined
+      return buildDecision(request, context, {
+        action: 'allow',
+        source: 'config_rule',
+        ruleId: `permission.mode.${context.permissionMode}.auto_allow.v1`,
+        reason: autoAllowReasonForMode(context.permissionMode),
+        gateKind: gateKindFor(request) ?? 'high_risk_action',
+        extraAuditTags: [
+          'permission:auto_allow',
+          'auto_allow:permission_mode',
+          `auto_allowed_by:${context.permissionMode}`,
+        ],
       })
     },
   }
@@ -191,6 +229,7 @@ function buildDecision(
     policyCode: request.policy.policyCode,
     risk: request.risk,
     riskLevel: request.riskLevel,
+    permissionMode: context.permissionMode,
     reason: input.reason,
     decidedAt: context.now().toISOString(),
     ...(gateKind ? { gateKind } : {}),
@@ -204,6 +243,7 @@ function buildDecision(
       `permission:${input.action}`,
       `source:${input.source}`,
       `risk:${request.riskLevel}`,
+      `permission_mode:${context.permissionMode}`,
       ...(gateKind ? [`gate:${gateKind}`] : []),
       ...request.policy.auditTags,
       ...(input.extraAuditTags ?? []),
@@ -229,8 +269,38 @@ function workflowHandoffKindFor(request: PermissionRequest): Extract<GateKind, '
   return undefined
 }
 
+function isPermissionModeAutoAllowable(request: PermissionRequest, context: PermissionRuleContext): boolean {
+  if (context.permissionMode === 'safe') return false
+  if (request.policy.action !== 'gate') return false
+  if (request.subject.kind === 'workflow_handoff') return false
+  if (!isHighRisk(request)) return false
+  if (request.risk === 'L4' || request.riskLevel === 'critical') return false
+
+  const gateKind = gateKindFor(request)
+  if (isSensitiveGate(gateKind)) return false
+  return gateKind === undefined || gateKind === 'high_risk_action'
+}
+
+function isSensitiveGate(gateKind: GateKind | undefined): boolean {
+  return gateKind === 'login' ||
+    gateKind === 'captcha' ||
+    gateKind === 'upload_resume' ||
+    gateKind === 'save_resume' ||
+    gateKind === 'final_submit'
+}
+
 function isHighRisk(request: PermissionRequest): boolean {
   return request.risk === 'L3' || request.risk === 'L4' || request.riskLevel === 'high' || request.riskLevel === 'critical'
+}
+
+function autoAllowReasonForMode(mode: PermissionMode): string {
+  if (mode === 'review') {
+    return 'Review permission mode auto-allows non-final L3 high-risk actions while keeping sensitive gates human-controlled.'
+  }
+  if (mode === 'trusted') {
+    return 'Trusted permission mode auto-allows non-final L3 application-flow actions while keeping sensitive gates human-controlled.'
+  }
+  return 'Autopilot permission mode auto-allows non-final high-risk actions while final submit remains gated by default.'
 }
 
 function unique(values: string[]): string[] {

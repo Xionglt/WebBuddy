@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { z } from 'zod'
+import type { LlmGateway } from './llm.js'
 
 /**
  * Structured resume profile — the canonical representation the matcher and the
@@ -34,6 +36,62 @@ export interface ResumeProfile {
   keywords: string[]
   /** Where the profile came from. */
   source: 'pdf' | 'json' | 'txt'
+}
+
+export type ResumeSourceType =
+  | 'pdf-text'
+  | 'pdf-image'
+  | 'docx'
+  | 'txt'
+  | 'json'
+  | 'html'
+
+export interface FieldValue<T> {
+  value: T
+  confidence: number
+  evidence?: string
+}
+
+export interface ResumeProjectExperience {
+  name?: string
+  role?: string
+  period?: string
+  summary?: string
+  technologies?: string[]
+}
+
+export interface ResumeProfileV2 {
+  schemaVersion: 'resume-profile/v2'
+  name?: FieldValue<string>
+  email?: FieldValue<string>
+  phone?: FieldValue<string>
+  location?: FieldValue<string>
+  summary?: FieldValue<string>
+  targetRoles: FieldValue<string[]>
+  skills: FieldValue<string[]>
+  projects: FieldValue<ResumeProjectExperience[]>
+  experience: FieldValue<ResumeExperience[]>
+  education: FieldValue<ResumeEducation[]>
+  keywords: FieldValue<string[]>
+  seniority?: FieldValue<string>
+  source: {
+    path?: string
+    type: ResumeSourceType
+    extractionWarnings: string[]
+    textLength?: number
+    parser: 'heuristic' | 'llm' | 'llm_with_heuristic_repair' | 'json'
+  }
+}
+
+export type ResumeIngestLlm = Pick<LlmGateway, 'hasKey' | 'generateJson'>
+
+export interface ResumeIngestOptions {
+  /** Optional LLM gateway. If absent or without a key, v2 falls back to heuristics. */
+  llm?: ResumeIngestLlm
+  /** Optional source path override for artifacts; defaults to the file path. */
+  sourcePath?: string
+  /** Minimum extracted text length before a PDF is treated as text-based. */
+  minPdfTextLength?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +168,60 @@ export async function extractTextFromPdf(filePath: string): Promise<string> {
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
 const PHONE_RE = /(\+?\d[\d\s\-()]{7,}\d)/
+const DEFAULT_MIN_PDF_TEXT_LENGTH = 80
+const RESUME_LLM_MAX_CHARS = 18000
+
+const confidenceSchema = z.number().finite().min(0).max(1)
+const fieldValueSchema = <T extends z.ZodTypeAny>(value: T) => z.object({
+  value,
+  confidence: confidenceSchema,
+  evidence: z.string().optional(),
+})
+const resumeExperienceSchema = z.object({
+  company: z.string().optional(),
+  title: z.string().optional(),
+  period: z.string().optional(),
+  summary: z.string().optional(),
+})
+const resumeEducationSchema = z.object({
+  school: z.string().optional(),
+  degree: z.string().optional(),
+  major: z.string().optional(),
+  period: z.string().optional(),
+})
+const resumeProjectSchema = z.object({
+  name: z.string().optional(),
+  role: z.string().optional(),
+  period: z.string().optional(),
+  summary: z.string().optional(),
+  technologies: z.array(z.string()).optional(),
+})
+const sourceSchema = z.object({
+  path: z.string().optional(),
+  type: z.enum(['pdf-text', 'pdf-image', 'docx', 'txt', 'json', 'html']),
+  extractionWarnings: z.array(z.string()),
+  textLength: z.number().int().nonnegative().optional(),
+  parser: z.enum(['heuristic', 'llm', 'llm_with_heuristic_repair', 'json']),
+})
+const resumeProfileV2Schema = z.object({
+  schemaVersion: z.literal('resume-profile/v2'),
+  name: fieldValueSchema(z.string()).optional(),
+  email: fieldValueSchema(z.string()).optional(),
+  phone: fieldValueSchema(z.string()).optional(),
+  location: fieldValueSchema(z.string()).optional(),
+  summary: fieldValueSchema(z.string()).optional(),
+  targetRoles: fieldValueSchema(z.array(z.string())),
+  skills: fieldValueSchema(z.array(z.string())),
+  projects: fieldValueSchema(z.array(resumeProjectSchema)),
+  experience: fieldValueSchema(z.array(resumeExperienceSchema)),
+  education: fieldValueSchema(z.array(resumeEducationSchema)),
+  keywords: fieldValueSchema(z.array(z.string())),
+  seniority: fieldValueSchema(z.string()).optional(),
+  source: sourceSchema,
+})
+const llmResumeSchema = resumeProfileV2Schema.omit({ source: true }).extend({
+  schemaVersion: z.literal('resume-profile/v2').optional(),
+})
 
 const SKILL_DICTIONARY = [
   'typescript', 'javascript', 'python', 'java', 'go', 'golang', 'rust', 'c++', 'c#',
@@ -213,6 +325,475 @@ export function parseResumeText(text: string, source: ResumeProfile['source']): 
     keywords: keywordSet,
     source,
   }
+}
+
+function clampConfidence(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(1, value))
+}
+
+function sanitizedEvidence(text: string | undefined): string | undefined {
+  if (!text) return undefined
+  const redacted = text
+    .replace(EMAIL_RE, '[email]')
+    .replace(PHONE_RE, '[phone]')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!redacted) return undefined
+  return redacted.length > 160 ? `${redacted.slice(0, 157)}...` : redacted
+}
+
+function stringField(value: string | undefined, confidence: number, evidence: string): FieldValue<string> | undefined {
+  const cleaned = value?.trim()
+  if (!cleaned) return undefined
+  return {
+    value: cleaned,
+    confidence: clampConfidence(confidence),
+    evidence: sanitizedEvidence(evidence),
+  }
+}
+
+function arrayField<T>(value: T[], confidence: number, evidence: string): FieldValue<T[]> {
+  return {
+    value,
+    confidence: clampConfidence(confidence),
+    evidence: sanitizedEvidence(evidence),
+  }
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const cleaned = value?.trim()
+    if (!cleaned) continue
+    const key = cleaned.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(cleaned)
+  }
+  return out
+}
+
+function normalizeStringArray(values: string[]): string[] {
+  return uniqueStrings(values.map((value) => value.replace(/\s+/g, ' ')))
+}
+
+function normalizeProjects(values: ResumeProjectExperience[]): ResumeProjectExperience[] {
+  return values
+    .map((project) => ({
+      name: project.name?.trim() || undefined,
+      role: project.role?.trim() || undefined,
+      period: project.period?.trim() || undefined,
+      summary: project.summary?.trim() || undefined,
+      technologies: project.technologies ? normalizeStringArray(project.technologies) : undefined,
+    }))
+    .filter((project) => Boolean(project.name || project.role || project.summary || project.technologies?.length))
+}
+
+function normalizeExperience(values: ResumeExperience[]): ResumeExperience[] {
+  return values
+    .map((item) => ({
+      company: item.company?.trim() || undefined,
+      title: item.title?.trim() || undefined,
+      period: item.period?.trim() || undefined,
+      summary: item.summary?.trim() || undefined,
+    }))
+    .filter((item) => Boolean(item.company || item.title || item.period || item.summary))
+}
+
+function normalizeEducation(values: ResumeEducation[]): ResumeEducation[] {
+  return values
+    .map((item) => ({
+      school: item.school?.trim() || undefined,
+      degree: item.degree?.trim() || undefined,
+      major: item.major?.trim() || undefined,
+      period: item.period?.trim() || undefined,
+    }))
+    .filter((item) => Boolean(item.school || item.degree || item.major || item.period))
+}
+
+function normalizeField<T>(
+  field: FieldValue<T>,
+  normalizeValue: (value: T) => T,
+): FieldValue<T> {
+  return {
+    value: normalizeValue(field.value),
+    confidence: clampConfidence(field.confidence),
+    evidence: sanitizedEvidence(field.evidence),
+  }
+}
+
+function inferTargetRoles(profile: ResumeProfile): string[] {
+  const fromExperience = uniqueStrings(profile.experience.map((item) => item.title)).slice(0, 3)
+  if (fromExperience.length) return fromExperience
+  const joined = `${profile.summary ?? ''} ${profile.keywords.join(' ')}`.toLowerCase()
+  const roles: string[] = []
+  if (/frontend|front-end|前端|react|vue/.test(joined)) roles.push('Frontend Engineer')
+  if (/backend|back-end|后端|java|go|golang|spring/.test(joined)) roles.push('Backend Engineer')
+  if (/fullstack|full-stack|全栈/.test(joined)) roles.push('Full-stack Engineer')
+  if (/算法|machine learning|deep learning|nlp|llm/.test(joined)) roles.push('Algorithm Engineer')
+  if (/产品经理|product manager/.test(joined)) roles.push('Product Manager')
+  return uniqueStrings(roles).slice(0, 3)
+}
+
+function inferSeniority(profile: ResumeProfile): string | undefined {
+  const joined = `${profile.summary ?? ''} ${profile.experience.map((item) => item.title ?? '').join(' ')}`.toLowerCase()
+  if (/principal|staff|architect|专家|架构/.test(joined)) return 'principal'
+  if (/senior|lead|高级|资深/.test(joined)) return 'senior'
+  if (/junior|intern|实习|初级/.test(joined)) return 'junior'
+  if (profile.experience.length) return 'mid'
+  return undefined
+}
+
+function sourceTypeFromLegacy(source: ResumeProfile['source']): ResumeSourceType {
+  if (source === 'pdf') return 'pdf-text'
+  return source
+}
+
+function legacyProfileToResumeV2(
+  profile: ResumeProfile,
+  metadata: {
+    path?: string
+    type?: ResumeSourceType
+    textLength?: number
+    extractionWarnings?: string[]
+    parser?: ResumeProfileV2['source']['parser']
+  } = {},
+): ResumeProfileV2 {
+  const targetRoles = inferTargetRoles(profile)
+  const seniority = inferSeniority(profile)
+  const v2: ResumeProfileV2 = {
+    schemaVersion: 'resume-profile/v2',
+    name: stringField(profile.name, 0.7, 'Heuristic name candidate from resume header.'),
+    email: stringField(profile.email, 0.98, 'Detected by deterministic email pattern.'),
+    phone: stringField(profile.phone, 0.95, 'Detected by deterministic phone pattern.'),
+    location: stringField(profile.location, 0.45, 'Heuristic location candidate.'),
+    summary: stringField(profile.summary, 0.55, 'Heuristic summary from leading resume text.'),
+    targetRoles: arrayField(targetRoles, targetRoles.length ? 0.55 : 0.2, 'Inferred from titles and resume keywords.'),
+    skills: arrayField(normalizeStringArray(profile.skills), profile.skills.length ? 0.75 : 0.2, 'Matched local skill dictionary.'),
+    projects: arrayField([], 0.15, 'No project-specific heuristic extraction available.'),
+    experience: arrayField(normalizeExperience(profile.experience), profile.experience.length ? 0.55 : 0.2, 'Detected date ranges and adjacent title/company lines.'),
+    education: arrayField(normalizeEducation(profile.education), profile.education.length ? 0.6 : 0.2, 'Matched education keywords in resume text.'),
+    keywords: arrayField(normalizeStringArray(profile.keywords), profile.keywords.length ? 0.55 : 0.2, 'Derived from skills and short keyword-like lines.'),
+    seniority: stringField(seniority, seniority ? 0.45 : 0.2, 'Inferred from title seniority words and experience presence.'),
+    source: {
+      path: metadata.path,
+      type: metadata.type ?? sourceTypeFromLegacy(profile.source),
+      extractionWarnings: metadata.extractionWarnings ?? [],
+      textLength: metadata.textLength,
+      parser: metadata.parser ?? 'heuristic',
+    },
+  }
+  return resumeProfileV2Schema.parse(v2)
+}
+
+export function resumeV2ToLegacyProfile(profile: ResumeProfileV2): ResumeProfile {
+  const source: ResumeProfile['source'] =
+    profile.source.type === 'json'
+      ? 'json'
+      : profile.source.type === 'txt' || profile.source.type === 'docx' || profile.source.type === 'html'
+        ? 'txt'
+        : 'pdf'
+  return {
+    name: profile.name?.value,
+    email: profile.email?.value,
+    phone: profile.phone?.value,
+    location: profile.location?.value,
+    summary: profile.summary?.value,
+    skills: profile.skills.value,
+    experience: profile.experience.value,
+    education: profile.education.value,
+    keywords: profile.keywords.value,
+    source,
+  }
+}
+
+function normalizeProfileV2(profile: ResumeProfileV2): ResumeProfileV2 {
+  const normalized: ResumeProfileV2 = {
+    ...profile,
+    name: profile.name ? normalizeField(profile.name, (value) => value.trim()) : undefined,
+    email: profile.email ? normalizeField(profile.email, (value) => value.trim()) : undefined,
+    phone: profile.phone ? normalizeField(profile.phone, (value) => value.trim()) : undefined,
+    location: profile.location ? normalizeField(profile.location, (value) => value.trim()) : undefined,
+    summary: profile.summary ? normalizeField(profile.summary, (value) => value.trim()) : undefined,
+    targetRoles: normalizeField(profile.targetRoles, normalizeStringArray),
+    skills: normalizeField(profile.skills, normalizeStringArray),
+    projects: normalizeField(profile.projects, normalizeProjects),
+    experience: normalizeField(profile.experience, normalizeExperience),
+    education: normalizeField(profile.education, normalizeEducation),
+    keywords: normalizeField(profile.keywords, normalizeStringArray),
+    seniority: profile.seniority ? normalizeField(profile.seniority, (value) => value.trim()) : undefined,
+    source: {
+      ...profile.source,
+      extractionWarnings: profile.source.extractionWarnings.map((warning) => sanitizedEvidence(warning) ?? warning),
+    },
+  }
+  return resumeProfileV2Schema.parse(normalized)
+}
+
+function contactsEquivalent(kind: 'email' | 'phone', left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false
+  if (kind === 'email') return left.trim().toLowerCase() === right.trim().toLowerCase()
+  const leftDigits = left.replace(/\D/g, '')
+  const rightDigits = right.replace(/\D/g, '')
+  return leftDigits.length > 0 && leftDigits === rightDigits
+}
+
+function repairDeterministicContacts(
+  profile: ResumeProfileV2,
+  text: string,
+): { profile: ResumeProfileV2; repaired: boolean; warnings: string[] } {
+  const warnings: string[] = []
+  let repaired = false
+  const next: ResumeProfileV2 = {
+    ...profile,
+    source: { ...profile.source, extractionWarnings: [...profile.source.extractionWarnings] },
+  }
+  const email = findFirst(text, EMAIL_RE)
+  const phone = findFirst(text, PHONE_RE)
+
+  if (email && !contactsEquivalent('email', next.email?.value, email)) {
+    next.email = {
+      value: email,
+      confidence: Math.max(next.email?.confidence ?? 0, 0.98),
+      evidence: 'Detected by deterministic email pattern.',
+    }
+    warnings.push('Email field repaired by deterministic extraction.')
+    repaired = true
+  } else if (next.email && !EMAIL_RE.test(next.email.value)) {
+    next.email = undefined
+    warnings.push('Invalid LLM email field was dropped.')
+    repaired = true
+  }
+
+  if (phone && !contactsEquivalent('phone', next.phone?.value, phone)) {
+    next.phone = {
+      value: phone,
+      confidence: Math.max(next.phone?.confidence ?? 0, 0.95),
+      evidence: 'Detected by deterministic phone pattern.',
+    }
+    warnings.push('Phone field repaired by deterministic extraction.')
+    repaired = true
+  } else if (next.phone && !PHONE_RE.test(next.phone.value)) {
+    next.phone = undefined
+    warnings.push('Invalid LLM phone field was dropped.')
+    repaired = true
+  }
+
+  if (repaired) {
+    next.source.parser = 'llm_with_heuristic_repair'
+    next.source.extractionWarnings.push(...warnings)
+  }
+
+  return { profile: normalizeProfileV2(next), repaired, warnings }
+}
+
+interface LlmResumePayload {
+  schemaVersion?: 'resume-profile/v2'
+  name?: FieldValue<string>
+  email?: FieldValue<string>
+  phone?: FieldValue<string>
+  location?: FieldValue<string>
+  summary?: FieldValue<string>
+  targetRoles: FieldValue<string[]>
+  skills: FieldValue<string[]>
+  projects: FieldValue<ResumeProjectExperience[]>
+  experience: FieldValue<ResumeExperience[]>
+  education: FieldValue<ResumeEducation[]>
+  keywords: FieldValue<string[]>
+  seniority?: FieldValue<string>
+}
+
+function resumeLlmSystemPrompt(): string {
+  return [
+    'You extract structured resume profiles.',
+    'Return only a single JSON object. No markdown, comments, or prose.',
+    'Every field you provide must follow { "value": ..., "confidence": number, "evidence": string }.',
+    'Confidence must be between 0 and 1.',
+    'Evidence must be short, sanitized, and should describe the cue or section; do not quote long resume text.',
+    'If a field is unknown, omit optional scalar fields and use an empty array for array fields.',
+  ].join(' ')
+}
+
+function resumeLlmUserPrompt(text: string): string {
+  const clipped = text.length > RESUME_LLM_MAX_CHARS ? text.slice(0, RESUME_LLM_MAX_CHARS) : text
+  return [
+    'Parse this resume into this JSON schema:',
+    JSON.stringify({
+      schemaVersion: 'resume-profile/v2',
+      name: { value: 'string', confidence: 0.0, evidence: 'short cue' },
+      email: { value: 'string', confidence: 0.0, evidence: 'short cue' },
+      phone: { value: 'string', confidence: 0.0, evidence: 'short cue' },
+      location: { value: 'string', confidence: 0.0, evidence: 'short cue' },
+      summary: { value: 'string', confidence: 0.0, evidence: 'short cue' },
+      targetRoles: { value: ['string'], confidence: 0.0, evidence: 'short cue' },
+      skills: { value: ['string'], confidence: 0.0, evidence: 'short cue' },
+      projects: {
+        value: [{ name: 'string', role: 'string', period: 'string', summary: 'string', technologies: ['string'] }],
+        confidence: 0.0,
+        evidence: 'short cue',
+      },
+      experience: {
+        value: [{ company: 'string', title: 'string', period: 'string', summary: 'string' }],
+        confidence: 0.0,
+        evidence: 'short cue',
+      },
+      education: {
+        value: [{ school: 'string', degree: 'string', major: 'string', period: 'string' }],
+        confidence: 0.0,
+        evidence: 'short cue',
+      },
+      keywords: { value: ['string'], confidence: 0.0, evidence: 'short cue' },
+      seniority: { value: 'junior|mid|senior|principal|unknown', confidence: 0.0, evidence: 'short cue' },
+    }),
+    'Resume text:',
+    clipped,
+  ].join('\n')
+}
+
+async function parseResumeTextWithLlm(
+  text: string,
+  metadata: {
+    llm: ResumeIngestLlm
+    path?: string
+    type: ResumeSourceType
+    extractionWarnings: string[]
+  },
+): Promise<ResumeProfileV2 | null> {
+  let payload: LlmResumePayload | null = null
+  try {
+    payload = await metadata.llm.generateJson<LlmResumePayload>(
+      resumeLlmSystemPrompt(),
+      resumeLlmUserPrompt(text),
+      { timeoutMs: 30000, maxTokens: 2400, redactTrace: true },
+    )
+  } catch {
+    return null
+  }
+  const parsed = llmResumeSchema.safeParse(payload)
+  if (!parsed.success) return null
+
+  const profile: ResumeProfileV2 = normalizeProfileV2({
+    schemaVersion: 'resume-profile/v2',
+    ...parsed.data,
+    source: {
+      path: metadata.path,
+      type: metadata.type,
+      extractionWarnings: [
+        ...metadata.extractionWarnings,
+        ...(text.length > RESUME_LLM_MAX_CHARS
+          ? ['Resume text was truncated before LLM parsing to stay within parser limits.']
+          : []),
+      ],
+      textLength: text.length,
+      parser: 'llm',
+    },
+  })
+
+  return repairDeterministicContacts(profile, text).profile
+}
+
+async function ingestResumeText(
+  text: string,
+  legacySource: ResumeProfile['source'],
+  sourceType: ResumeSourceType,
+  options: ResumeIngestOptions,
+  extractionWarnings: string[] = [],
+): Promise<ResumeProfileV2> {
+  const sourcePath = options.sourcePath
+  const warnings = [...extractionWarnings]
+  const llm = options.llm
+  if (llm?.hasKey) {
+    const parsed = await parseResumeTextWithLlm(text, {
+      llm,
+      path: sourcePath,
+      type: sourceType,
+      extractionWarnings: warnings,
+    })
+    if (parsed) return parsed
+    warnings.push('LLM resume JSON parse failed schema validation; used heuristic parser.')
+  } else {
+    warnings.push('No model key configured; used heuristic resume parser.')
+  }
+
+  const legacy = parseResumeText(text, legacySource)
+  return legacyProfileToResumeV2(legacy, {
+    path: sourcePath,
+    type: sourceType,
+    textLength: text.length,
+    extractionWarnings: warnings,
+    parser: 'heuristic',
+  })
+}
+
+function readJsonResumeV2(filePath: string, options: ResumeIngestOptions): ResumeProfileV2 {
+  const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown
+  const asV2 = resumeProfileV2Schema.safeParse(parsed)
+  if (asV2.success) {
+    return normalizeProfileV2({
+      ...asV2.data,
+      source: {
+        ...asV2.data.source,
+        path: asV2.data.source.path ?? options.sourcePath,
+        parser: 'json',
+      },
+    })
+  }
+
+  const legacy = parsed as Partial<ResumeProfile>
+  const legacySource =
+    legacy.source === 'pdf' || legacy.source === 'txt' || legacy.source === 'json'
+      ? legacy.source
+      : 'json'
+  return legacyProfileToResumeV2({
+    skills: [],
+    experience: [],
+    education: [],
+    keywords: [],
+    ...legacy,
+    source: legacySource,
+  }, {
+    path: options.sourcePath,
+    type: 'json',
+    extractionWarnings: [],
+    parser: 'json',
+  })
+}
+
+export async function readResumeV2(
+  filePath: string,
+  options: ResumeIngestOptions = {},
+): Promise<ResumeProfileV2 | null> {
+  if (!existsSync(filePath)) return null
+  const ingestOptions: ResumeIngestOptions = {
+    ...options,
+    sourcePath: options.sourcePath ?? filePath,
+  }
+  const lower = filePath.toLowerCase()
+  if (lower.endsWith('.json')) return readJsonResumeV2(filePath, ingestOptions)
+  if (lower.endsWith('.txt')) {
+    return ingestResumeText(readFileSync(filePath, 'utf8'), 'txt', 'txt', ingestOptions)
+  }
+  if (lower.endsWith('.pdf')) {
+    const text = await extractTextFromPdf(filePath)
+    const minTextLength = ingestOptions.minPdfTextLength ?? DEFAULT_MIN_PDF_TEXT_LENGTH
+    const isTextPdf = text.replace(/\s+/g, '').length >= minTextLength
+    if (!isTextPdf) {
+      return ingestResumeText(text, 'pdf', 'pdf-image', ingestOptions, [
+        'PDF text extraction produced little usable text; scanned/image PDF ingestion is reserved for a future multimodal adapter.',
+      ])
+    }
+    return ingestResumeText(text, 'pdf', 'pdf-text', ingestOptions)
+  }
+  return null
+}
+
+export async function ingestResume(
+  filePath: string,
+  options: ResumeIngestOptions = {},
+): Promise<ResumeProfileV2 | null> {
+  return readResumeV2(filePath, options)
 }
 
 /**

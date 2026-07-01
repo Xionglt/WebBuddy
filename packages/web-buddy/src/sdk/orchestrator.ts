@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { browserFormSnapshot } from '../browser/form-snapshot.js'
 import { browserOpen } from '../browser/open.js'
@@ -11,11 +11,29 @@ import { loadConfig, hasModelKey, type AgentConfig } from './config.js'
 import { fillResumeDraft } from './form-fill.js'
 import { AutoHumanGate, CliHumanGate, type HumanGate } from './human.js'
 import { LlmGateway } from './llm.js'
-import { refineMatchesWithLlm, matchJobs, tokenize, type JobPosting, type MatchScore } from './matcher.js'
-import { readResume, writeSampleResumePdf, type ResumeProfile } from './resume.js'
+import {
+  DEFAULT_MATCH_THRESHOLD,
+  decideMatchThreshold,
+  matchJobsCoarse,
+  refineMatchesWithLlm,
+  matchJobs,
+  tokenize,
+  type JobPosting,
+  type MatchScore,
+  type MatchThresholdDecision,
+} from './matcher.js'
+import {
+  ingestResume,
+  readResume,
+  resumeV2ToLegacyProfile,
+  writeSampleResumePdf,
+  type ResumeProfile,
+  type ResumeProfileV2,
+} from './resume.js'
 import { attemptApply, scrapeJobDetail, scrapeJobList, waitForAlibabaLoginClear, type ScrapedJob } from './alibaba.js'
 import { TraceRecorder, type TraceSummary } from './trace.js'
 import type { RunSource } from '../metrics/trace-inputs.js'
+import { detectDirectSubmitReview, type DirectSubmitReview } from '../workflow/direct-submit.js'
 import {
   FileSessionRecorder,
   FileSessionStore,
@@ -63,13 +81,14 @@ export type FinalState =
   | 'filled'
   | 'submitted'
   | 'stopped_at_submit'
+  | 'direct_submit_review'
   | 'blocked'
   | 'error'
 
 export interface AgentEvent {
   phase: string
   message: string
-  level: 'info' | 'warn' | 'gate' | 'think' | 'act' | 'observe' | 'error' | 'done'
+  level: 'info' | 'warn' | 'gate' | 'think' | 'risk' | 'decision' | 'act' | 'observe' | 'error' | 'done'
 }
 
 export interface AgentRunResult {
@@ -204,23 +223,128 @@ function applyBrowserEnv(config: AgentConfig): void {
   if (config.auth.storageStatePath) env.PLAYWRIGHT_STORAGE_STATE = config.auth.storageStatePath
 }
 
-async function ensureResume(config: AgentConfig, trace: TraceRecorder, emit: (e: AgentEvent) => void): Promise<ResumeProfile> {
+async function ensureResume(
+  config: AgentConfig,
+  trace: TraceRecorder,
+  emit: (e: AgentEvent) => void,
+  llm?: LlmGateway,
+): Promise<ResumeProfile> {
   const path = config.resumePath
   if (!existsSync(path)) {
     emit({ phase: 'parse_resume', message: `Resume not found at ${path}; generating sample resume PDF.`, level: 'warn' })
     writeSampleResumePdf(path)
     trace.record({ phase: 'parse_resume', action: 'Generated sample resume PDF (none provided).', status: 'warn' })
   }
-  const profile = await readResume(path)
-  if (!profile) throw new Error(`Could not read resume from ${path}`)
+
+  let profileV2: ResumeProfileV2 | null
+  let usedLegacyFallback = false
+  const legacyWarnings: string[] = []
+  try {
+    profileV2 = await ingestResume(path, { llm })
+  } catch (error) {
+    legacyWarnings.push(`Resume V2 ingestion failed: ${error instanceof Error ? error.message : String(error)}`)
+    profileV2 = null
+  }
+
+  if (!profileV2) {
+    usedLegacyFallback = true
+    emit({ phase: 'parse_resume', message: `V2 resume parse failed for ${path}; fallback to legacy parser.`, level: 'warn' })
+    const legacyProfile = await readResume(path)
+    if (!legacyProfile) throw new Error(`Could not read resume from ${path}`)
+    const legacySource = legacySourceToV2Type(legacyProfile.source)
+    profileV2 = legacyProfileToResumeV2Fallback(legacyProfile, {
+      path,
+      type: legacySource,
+      extractionWarnings: legacyWarnings,
+      parser: 'heuristic',
+    })
+  }
+
+  const legacyProfile = resumeV2ToLegacyProfile(profileV2)
+  const parseStatus: 'ok' | 'warn' = usedLegacyFallback || legacyWarnings.length > 0 ? 'warn' : 'ok'
+  writeResumeProfileV2Artifact(trace, profileV2)
+
   trace.record({
     phase: 'parse_resume',
-    action: `Parsed resume: ${profile.name || 'unknown'} — ${profile.skills.length} skills.`,
-    status: 'ok',
-    observation: `skills: ${profile.skills.slice(0, 10).join(', ')}`,
+    action:
+      `Parsed resume via ${profileV2?.source.parser ?? 'legacy-fallback'}: ${legacyProfile.name || 'unknown'} — ` +
+      `${legacyProfile.skills.length} skills.`,
+    status: parseStatus,
+    observation: `skills=${legacyProfile.skills.slice(0, 10).join(', ')}`,
   })
-  emit({ phase: 'parse_resume', message: `Resume → ${profile.name || 'unknown'} | ${profile.email || 'no email'} | ${profile.skills.length} skills`, level: 'info' })
-  return profile
+
+  emit({
+    phase: 'parse_resume',
+    message: `Resume → ${legacyProfile.name || 'unknown'} | ${legacyProfile.email || 'no email'} | ${legacyProfile.skills.length} skills`,
+    level: parseStatus === 'ok' ? 'info' : 'warn',
+  })
+
+  return legacyProfile
+}
+
+function legacySourceToV2Type(source: ResumeProfile['source']): ResumeProfileV2['source']['type'] {
+  if (source === 'json') return 'json'
+  if (source === 'txt') return 'txt'
+  return 'pdf-text'
+}
+
+function legacyProfileToResumeV2Fallback(
+  profile: ResumeProfile,
+  metadata: {
+    path: string
+    type: ResumeProfileV2['source']['type']
+    extractionWarnings: string[]
+    parser: ResumeProfileV2['source']['parser']
+  },
+): ResumeProfileV2 {
+  const targetRoles = [...new Set(profile.experience.map((experience) => experience.title).filter(Boolean))] as string[]
+  const seniority = profile.experience.some((experience) => /senior|lead|principal|architect/i.test(experience.title || ''))
+    ? 'senior'
+    : profile.experience.length
+      ? 'mid'
+      : undefined
+
+  return {
+    schemaVersion: 'resume-profile/v2',
+    name: profile.name ? { value: profile.name, confidence: 0.7, evidence: 'Legacy parser fallback: name field.' } : undefined,
+    email: profile.email ? { value: profile.email, confidence: 0.95, evidence: 'Legacy parser fallback: email field.' } : undefined,
+    phone: profile.phone ? { value: profile.phone, confidence: 0.95, evidence: 'Legacy parser fallback: phone field.' } : undefined,
+    location: profile.location ? { value: profile.location, confidence: 0.6, evidence: 'Legacy parser fallback: location field.' } : undefined,
+    summary: profile.summary ? { value: profile.summary, confidence: 0.5, evidence: 'Legacy parser fallback: summary field.' } : undefined,
+    targetRoles: {
+      value: targetRoles,
+      confidence: targetRoles.length ? 0.55 : 0.2,
+      evidence: 'Legacy parser fallback: inferred from legacy experience titles.',
+    },
+    skills: {
+      value: [...new Set(profile.skills.map((value) => value.toLowerCase()))],
+      confidence: profile.skills.length ? 0.75 : 0.2,
+      evidence: 'Legacy parser fallback: imported skill list.',
+    },
+    projects: { value: [], confidence: 0.15, evidence: 'No legacy project section available in fallback mode.' },
+    experience: {
+      value: profile.experience,
+      confidence: profile.experience.length ? 0.55 : 0.2,
+      evidence: 'Legacy parser fallback: imported experience list.',
+    },
+    education: {
+      value: profile.education,
+      confidence: profile.education.length ? 0.6 : 0.2,
+      evidence: 'Legacy parser fallback: imported education list.',
+    },
+    keywords: {
+      value: profile.keywords,
+      confidence: profile.keywords.length ? 0.55 : 0.2,
+      evidence: 'Legacy parser fallback: imported keywords.',
+    },
+    seniority: seniority ? { value: seniority, confidence: 0.4, evidence: 'Legacy parser fallback: inferred from role depth clues.' } : undefined,
+    source: {
+      path: metadata.path,
+      type: metadata.type,
+      extractionWarnings: metadata.extractionWarnings,
+      parser: metadata.parser,
+    },
+  }
 }
 
 export async function runJobApplicationAgent(options: RunOptions = {}): Promise<AgentRunResult> {
@@ -253,7 +377,11 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
   const finalizeRun = (args: Omit<FinalizeArgs, 'session'>) =>
     finalize({ ...args, session: sessionRecorder })
   const sessionId = 'default'
-  trace.record({ phase: 'boot', action: `Agent start (mode=${mode}, headless=${config.browser.headless}, llm=${hasModelKey(config)})`, status: 'ok' })
+  trace.record({
+    phase: 'boot',
+    action: `Agent start (mode=${mode}, permission=${config.human.permissionMode}, headless=${config.browser.headless}, llm=${hasModelKey(config)})`,
+    status: 'ok',
+  })
 
   try {
     if (mode === 'demo-research') {
@@ -269,7 +397,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       })
     }
 
-    const profile = await ensureResume(config, trace, emit)
+    const profile = await ensureResume(config, trace, emit, llm)
     if ((mode === 'alibaba-apply' || mode === 'raw') && !llm.hasKey) {
       return finalizeRun({
         mode,
@@ -317,14 +445,42 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       if (jobs.length === 0) {
         return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No structured job cards found on the target page.', trace, emit })
       }
+      const coarseMatches = matchJobsCoarse(profile, jobs)
+      writeJobCandidatesArtifact(trace, 'job-candidates-coarse.json', {
+        schemaVersion: 'job-candidates/coarse/v1',
+        scanned: jobs.length,
+        threshold: config.matchThreshold,
+        candidates: serializeMatches(coarseMatches),
+      })
+      trace.record({
+        phase: 'match',
+        action: `Coarse ranked ${jobs.length} structured job candidates.`,
+        status: coarseMatches.length ? 'ok' : 'warn',
+        observation: formatTopMatches(coarseMatches, 5),
+      })
+
       matches = matchJobs(profile, jobs)
-      const best = matches[0]
-      if (!best || best.score <= 0) {
-        return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found on the target page.', trace, emit })
+      const thresholdDecision = decideMatchThreshold(matches, config.matchThreshold)
+      writeJobCandidatesArtifact(trace, 'job-candidates-final.json', {
+        schemaVersion: 'job-candidates/final/v1',
+        scanned: jobs.length,
+        threshold: thresholdDecision.threshold,
+        decision: serializeDecision(thresholdDecision),
+        candidates: serializeMatches(matches),
+      })
+      const best = thresholdDecision.best
+      if (!thresholdDecision.shouldApply || !best) {
+        trace.record({
+          phase: 'match',
+          action: `Stopped before apply decision: ${thresholdDecision.reason}`,
+          status: 'blocked',
+          observation: formatTopMatches(matches, 5),
+        })
+        return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: `No suitable match found on the target page. ${thresholdDecision.reason}`, trace, emit })
       }
       chosenJob = best.job
       extraContext = `Matched job: ${best.job.title}. Match score: ${best.score.toFixed(2)}. ${best.reason}`
-      trace.record({ phase: 'match', action: `Best match: ${best.job.title} (score ${best.score.toFixed(2)}).`, status: 'ok', observation: best.reason })
+      trace.record({ phase: 'match', action: `Best match: ${best.job.title} (score ${best.score.toFixed(2)}; threshold ${thresholdDecision.threshold.toFixed(2)}).`, status: 'ok', observation: `${best.reason}\n${thresholdDecision.reason}` })
       emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: 'info' })
       matches.slice(0, 5).forEach((m, i) => emit({ phase: 'match', message: `  ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.matchedSkills.slice(0, 5).join(', ')}`, level: 'info' }))
 
@@ -336,25 +492,23 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       emit({ phase: 'open_form', message: `Opened application form for ${best.job.title}.`, level: 'info' })
     } else if (mode === 'alibaba-apply') {
       const listUrl = startUrl ?? config.alibabaCareersUrl
-      const { jobs } = await scrapeJobList(sessionId, listUrl, trace)
-      if (jobs.length === 0) {
+      const pipeline = await runAlibabaMatchPipeline({ sessionId, listUrl, profile, config, trace, emit, llm })
+      if (pipeline.jobs.length === 0) {
         return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the Alibaba list page.', trace, emit })
       }
 
-      emit({ phase: 'scrape_list', message: `Scraped ${jobs.length} Alibaba jobs. Opening top ${Math.min(config.maxJobsToDetail, jobs.length)} for detail…`, level: 'info' })
-      const preRanked = matchJobs(profile, jobs).slice(0, config.maxJobsToDetail)
-      const detailed: ScrapedJob[] = []
-      for (const m of preRanked) {
-        try { detailed.push((await scrapeJobDetail(sessionId, m.job as ScrapedJob, trace)).job) }
-        catch (error) { trace.record({ phase: 'scrape_detail', action: `Detail failed: ${(error as Error).message}`, status: 'warn' }) }
-      }
-
-      const pool = detailed.length > 0 ? detailed : jobs
-      matches = matchJobs(profile, pool)
-      matches = await refineMatchesWithLlm(matches, profile, llm)
-      const best = matches[0]
-      if (!best || best.score <= 0) {
-        return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: 'No suitable Alibaba job match found.', trace, emit })
+      matches = pipeline.matches
+      const best = pipeline.decision.best
+      if (!pipeline.decision.shouldApply || !best) {
+        return finalizeRun({
+          mode,
+          profile,
+          matches,
+          finalState: 'no_match',
+          message: `No suitable Alibaba job match found. ${pipeline.decision.reason}`,
+          trace,
+          emit,
+        })
       }
 
       chosenJob = best.job
@@ -365,11 +519,23 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         `Match score: ${best.score.toFixed(2)}. ${best.reason}`,
         'Use the current Alibaba page and any visible job/application information to fill only fields that can be mapped confidently from the resume.',
       ].filter(Boolean).join('\n')
-      trace.record({ phase: 'match', action: `Best Alibaba match: ${best.job.title} (score ${best.score.toFixed(2)}).`, status: best.score <= 0 ? 'warn' : 'ok', observation: best.reason })
-      emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: best.score <= 0 ? 'warn' : 'info' })
+      trace.record({ phase: 'match', action: `Selected Alibaba match: ${best.job.title} (score ${best.score.toFixed(2)}; threshold ${pipeline.decision.threshold.toFixed(2)}).`, status: 'ok', observation: `${best.reason}\n${pipeline.decision.reason}` })
+      emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: 'info' })
       matches.slice(0, 5).forEach((m, i) => emit({ phase: 'match', message: `  ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.matchedSkills.slice(0, 5).join(', ')}`, level: 'info' }))
 
       const apply = await attemptApply(sessionId, best.job as ScrapedJob, gate, trace)
+      if (apply.directSubmitReview) {
+        return finalizeRun({
+          mode,
+          profile,
+          matches,
+          chosenJob,
+          finalState: 'direct_submit_review',
+          message: directSubmitReviewMessage(best.job.title, apply.directSubmitReview),
+          trace,
+          emit,
+        })
+      }
       if (apply.gateDecision !== 'approve') {
         return finalizeRun({
           mode,
@@ -428,6 +594,21 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         } catch (error) {
           trace.record({ phase: 'login', action: `Failed to save Alibaba cookies: ${(error as Error).message}`, status: 'warn' })
         }
+
+        const postLoginDirectSubmit = await detectAndRecordDirectSubmitReview(trace, apply.page, 'after login')
+        if (postLoginDirectSubmit) {
+          emit({ phase: 'apply', message: postLoginDirectSubmit.userMessage, level: 'gate' })
+          return finalizeRun({
+            mode,
+            profile,
+            matches,
+            chosenJob,
+            finalState: 'direct_submit_review',
+            message: directSubmitReviewMessage(best.job.title, postLoginDirectSubmit),
+            trace,
+            emit,
+          })
+        }
       } else if (apply.reachedForm) {
         emit({ phase: 'open_form', message: 'Alibaba application form reached; starting LLM fill.', level: 'info' })
       } else {
@@ -435,26 +616,27 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       }
     } else if (mode === 'match') {
       const listUrl = startUrl ?? config.alibabaCareersUrl
-      const { jobs } = await scrapeJobList(sessionId, listUrl, trace)
-      if (jobs.length === 0) {
+      const pipeline = await runAlibabaMatchPipeline({ sessionId, listUrl, profile, config, trace, emit, llm })
+      if (pipeline.jobs.length === 0) {
         return finalizeRun({ mode, profile, matches: [], finalState: 'no_jobs', message: 'No jobs found on the list page.', trace, emit })
       }
-      emit({ phase: 'scrape_list', message: `Scraped ${jobs.length} jobs. Opening top ${Math.min(config.maxJobsToDetail, jobs.length)} for detail…`, level: 'info' })
-      const preRanked = matchJobs(profile, jobs).slice(0, config.maxJobsToDetail)
-      const detailed: ScrapedJob[] = []
-      for (const m of preRanked) {
-        try { detailed.push((await scrapeJobDetail(sessionId, m.job as ScrapedJob, trace)).job) }
-        catch (error) { trace.record({ phase: 'scrape_detail', action: `Detail failed: ${(error as Error).message}`, status: 'warn' }) }
+      matches = pipeline.matches
+      const best = pipeline.decision.best
+      if (!pipeline.decision.shouldApply || !best) {
+        return finalizeRun({
+          mode,
+          profile,
+          matches,
+          finalState: 'no_match',
+          message: `No suitable match found. ${pipeline.decision.reason}`,
+          trace,
+          emit,
+        })
       }
-      const pool = detailed.length > 0 ? detailed : jobs
-      matches = matchJobs(profile, pool)
-      if (llm.hasKey) matches = await refineMatchesWithLlm(matches, profile, llm)
-      const best = matches[0]
-      if (!best) return finalizeRun({ mode, profile, matches, finalState: 'no_match', message: 'No suitable match found.', trace, emit })
       chosenJob = best.job
       extraContext = `Matched job: ${best.job.title} (${best.job.category || ''}). Match score: ${best.score.toFixed(2)}. ${best.reason}`
-      trace.record({ phase: 'match', action: `Best match: ${best.job.title} (score ${best.score.toFixed(2)}).`, status: best.score <= 0 ? 'warn' : 'ok', observation: best.reason })
-      emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: best.score <= 0 ? 'warn' : 'info' })
+      trace.record({ phase: 'match', action: `Selected match: ${best.job.title} (score ${best.score.toFixed(2)}; threshold ${pipeline.decision.threshold.toFixed(2)}).`, status: 'ok', observation: `${best.reason}\n${pipeline.decision.reason}` })
+      emit({ phase: 'match', message: `Best match → ${best.job.title} (score ${best.score.toFixed(2)})`, level: 'info' })
       matches.slice(0, 5).forEach((m, i) => emit({ phase: 'match', message: `  ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.matchedSkills.slice(0, 5).join(', ')}`, level: 'info' }))
       // match mode is read-only: hand off at the gate (no navigation into apply).
       const decision = await gate.confirm('final_submit', `Enter Alibaba's application flow for "${best.job.title}"?`, { url: best.job.detailUrl })
@@ -517,6 +699,8 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         ctx: { sessionId, highlight, trace },
         gate, extraContext,
         safetyMode: mode === 'raw' ? 'raw' : 'guarded',
+        permissionMode: config.human.permissionMode,
+        allowFinalSubmit: config.human.allowFinalSubmit,
         maxSteps: config.agent.maxSteps,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
         session: sessionRecorder,
@@ -656,6 +840,278 @@ function emptyProfile(sourceLabel: string): ResumeProfile {
     keywords: [],
     source: 'json',
   }
+}
+
+interface AlibabaMatchPipelineArgs {
+  sessionId: string
+  listUrl: string
+  profile: ResumeProfile
+  config: AgentConfig
+  trace: TraceRecorder
+  emit: (e: AgentEvent) => void
+  llm: LlmGateway
+}
+
+interface AlibabaMatchPipelineResult {
+  jobs: ScrapedJob[]
+  coarseMatches: MatchScore[]
+  matches: MatchScore[]
+  decision: MatchThresholdDecision
+}
+
+async function runAlibabaMatchPipeline(args: AlibabaMatchPipelineArgs): Promise<AlibabaMatchPipelineResult> {
+  const threshold = Number.isFinite(args.config.matchThreshold)
+    ? args.config.matchThreshold
+    : DEFAULT_MATCH_THRESHOLD
+  const crawl = await scrapeJobList(args.sessionId, args.listUrl, args.trace, {
+    maxPages: args.config.maxJobPagesToCrawl,
+    maxJobs: args.config.maxJobsToCrawl,
+  })
+  const jobs = crawl.jobs
+  if (jobs.length === 0) {
+    writeJobCandidatesArtifact(args.trace, 'job-candidates-coarse.json', {
+      schemaVersion: 'job-candidates/coarse/v1',
+      scanned: 0,
+      pagesScanned: crawl.pagesScanned ?? 0,
+      rawCount: crawl.rawCount ?? 0,
+      threshold,
+      candidates: [],
+    })
+    const decision = decideMatchThreshold([], threshold)
+    writeJobCandidatesArtifact(args.trace, 'job-candidates-final.json', {
+      schemaVersion: 'job-candidates/final/v1',
+      scanned: 0,
+      threshold: decision.threshold,
+      decision: serializeDecision(decision),
+      candidates: [],
+    })
+    return { jobs, coarseMatches: [], matches: [], decision }
+  }
+
+  args.emit({
+    phase: 'scrape_list',
+    message: `Scanned ${jobs.length} unique jobs across ${crawl.pagesScanned ?? 1} page(s); opening top ${Math.min(args.config.maxJobsToDetail, jobs.length)} for detail.`,
+    level: 'info',
+  })
+
+  const coarseMatches = matchJobsCoarse(args.profile, jobs)
+  writeJobCandidatesArtifact(args.trace, 'job-candidates-coarse.json', {
+    schemaVersion: 'job-candidates/coarse/v1',
+    scanned: jobs.length,
+    rawCount: crawl.rawCount ?? jobs.length,
+    pagesScanned: crawl.pagesScanned ?? 1,
+    siteAdvertisedTotal: crawl.total,
+    threshold,
+    candidates: serializeMatches(coarseMatches),
+  })
+  args.trace.record({
+    phase: 'match',
+    action: `Top coarse candidates from ${jobs.length} scanned jobs.`,
+    status: coarseMatches.length ? 'ok' : 'warn',
+    observation: formatTopMatches(coarseMatches, 8),
+  })
+  coarseMatches.slice(0, 5).forEach((m, i) =>
+    args.emit({ phase: 'match', message: `coarse ${i + 1}. ${m.job.title} — ${m.score.toFixed(2)}`, level: 'info' }),
+  )
+
+  const detailLimit = Math.max(0, Math.min(args.config.maxJobsToDetail, coarseMatches.length))
+  const toDetail = coarseMatches.slice(0, detailLimit)
+  const detailed: ScrapedJob[] = []
+  for (const m of toDetail) {
+    try {
+      detailed.push((await scrapeJobDetail(args.sessionId, m.job as ScrapedJob, args.trace)).job)
+    } catch (error) {
+      args.trace.record({ phase: 'scrape_detail', action: `Detail failed for "${m.job.title}": ${(error as Error).message}`, status: 'warn' })
+    }
+  }
+
+  const localFinal = detailed.length > 0
+    ? mergeCoarseAndDetailMatches(coarseMatches, matchJobs(args.profile, detailed))
+    : coarseMatches.slice(0, detailLimit || Math.min(10, coarseMatches.length))
+  const finalMatches = args.llm.hasKey && localFinal.length > 0
+    ? await refineMatchesWithLlm(localFinal, args.profile, args.llm, Math.min(detailLimit || localFinal.length, localFinal.length))
+    : localFinal
+  const decision = decideMatchThreshold(finalMatches, threshold)
+
+  writeJobCandidatesArtifact(args.trace, 'job-candidates-final.json', {
+    schemaVersion: 'job-candidates/final/v1',
+    scanned: jobs.length,
+    detailsOpened: detailed.length,
+    detailsAttempted: toDetail.length,
+    llmReranked: args.llm.hasKey && localFinal.length > 0,
+    threshold: decision.threshold,
+    decision: serializeDecision(decision),
+    candidates: serializeMatches(finalMatches),
+  })
+  args.trace.record({
+    phase: 'match',
+    action: `Top final candidates after ${detailed.length}/${toDetail.length} detail enrichments. ${decision.reason}`,
+    status: decision.shouldApply ? 'ok' : 'blocked',
+    observation: formatTopMatches(finalMatches, 8),
+  })
+
+  return { jobs, coarseMatches, matches: finalMatches, decision }
+}
+
+function mergeCoarseAndDetailMatches(coarseMatches: MatchScore[], detailMatches: MatchScore[]): MatchScore[] {
+  const coarseByKey = new Map(coarseMatches.flatMap((match) => jobIdentityKeys(match.job).map((key) => [key, match] as const)))
+  const merged = detailMatches.map((detailMatch) => {
+    const coarse = jobIdentityKeys(detailMatch.job).map((key) => coarseByKey.get(key)).find(Boolean)
+    if (!coarse) return detailMatch
+    const score = clampMatchScore(coarse.score * 0.45 + detailMatch.score * 0.55)
+    return {
+      ...detailMatch,
+      score,
+      reason: `Final: coarse ${coarse.score.toFixed(2)} + detail ${detailMatch.score.toFixed(2)}. ${detailMatch.reason}`,
+      matchedSkills: [...new Set([...coarse.matchedSkills, ...detailMatch.matchedSkills])],
+      missingSkills: detailMatch.missingSkills,
+    }
+  })
+  merged.sort((a, b) => b.score - a.score || b.matchedSkills.length - a.matchedSkills.length)
+  return merged
+}
+
+function clampMatchScore(score: number): number {
+  if (!Number.isFinite(score)) return 0
+  return Math.max(0, Math.min(1, Number(score.toFixed(4))))
+}
+
+function jobIdentityKeys(job: JobPosting): string[] {
+  const scraped = job as ScrapedJob
+  return [
+    scraped.positionId ? `position:${scraped.positionId}` : '',
+    job.id ? `id:${job.id}` : '',
+    job.detailUrl ? `url:${job.detailUrl}` : '',
+    job.title ? `title:${job.title.trim().toLowerCase()}` : '',
+  ].filter(Boolean)
+}
+
+function writeJobCandidatesArtifact(trace: TraceRecorder, name: string, value: unknown): string | undefined {
+  const content = `${JSON.stringify(value, null, 2)}\n`
+  let path = trace.agentTrace?.writeArtifact(name, content)
+  const legacyPath = join(trace.dir, name)
+  try {
+    writeFileSync(legacyPath, content)
+    path = path || legacyPath
+  } catch {
+    // Artifact writing is diagnostic; the run should still finish.
+  }
+  trace.agentTrace?.recordEvent('job_candidates_artifact', { name, path, legacyPath })
+  return path
+}
+
+function writeResumeProfileV2Artifact(trace: TraceRecorder, profile: ResumeProfileV2): string | undefined {
+  const artifact = {
+    schemaVersion: profile.schemaVersion,
+    name: profile.name,
+    email: profile.email,
+    phone: profile.phone,
+    location: profile.location,
+    summary: profile.summary,
+    targetRoles: profile.targetRoles,
+    skills: profile.skills,
+    projects: profile.projects,
+    experience: profile.experience,
+    education: profile.education,
+    keywords: profile.keywords,
+    seniority: profile.seniority,
+    source: {
+      path: profile.source.path,
+      type: profile.source.type,
+      extractionWarnings: profile.source.extractionWarnings,
+      textLength: profile.source.textLength,
+      parser: profile.source.parser,
+    },
+  }
+
+  const content = `${JSON.stringify(artifact, null, 2)}\n`
+  let path = trace.agentTrace?.writeArtifact('resume-profile-v2.json', content)
+  const legacyPath = join(trace.dir, 'resume-profile-v2.json')
+  try {
+    writeFileSync(legacyPath, content)
+    path = path || legacyPath
+  } catch {
+    // Artifact writing is diagnostic; the run should still finish.
+  }
+  trace.agentTrace?.recordEvent('resume_profile_v2_artifact', {
+    path,
+    legacyPath,
+    sourceType: profile.source.type,
+    parser: profile.source.parser,
+  })
+  return path
+}
+
+async function detectAndRecordDirectSubmitReview(
+  trace: TraceRecorder,
+  page: { url(): string } & Parameters<typeof detectDirectSubmitReview>[0],
+  context: string,
+): Promise<DirectSubmitReview | undefined> {
+  const review = await detectDirectSubmitReview(page).catch(() => undefined)
+  if (!review) return undefined
+  writeDirectSubmitReviewArtifact(trace, review)
+  trace.record({
+    phase: 'apply',
+    action: `Detected direct-submit review boundary ${context}.`,
+    url: page.url(),
+    risk: 'L4',
+    status: 'ok',
+    screenshotPath: await trace.screenshot(page, 'direct-submit-review'),
+    observation: review.userMessage,
+  })
+  return review
+}
+
+function writeDirectSubmitReviewArtifact(trace: TraceRecorder, review: DirectSubmitReview): string | undefined {
+  const content = `${JSON.stringify(review, null, 2)}\n`
+  let path = trace.agentTrace?.writeArtifact('direct-submit-review.json', content)
+  const legacyPath = join(trace.dir, 'direct-submit-review.json')
+  try {
+    writeFileSync(legacyPath, content)
+    path = path || legacyPath
+  } catch {
+    // Artifact writing is diagnostic; the run should still finish.
+  }
+  trace.agentTrace?.recordEvent('direct_submit_review', { path, legacyPath, review })
+  return path
+}
+
+function directSubmitReviewMessage(jobTitle: string, review: DirectSubmitReview): string {
+  return `Matched "${jobTitle}" and stopped at direct-submit review. ${review.userMessage}`
+}
+
+function serializeMatches(matches: MatchScore[]) {
+  return matches.map((match, index) => ({
+    rank: index + 1,
+    id: match.job.id,
+    positionId: (match.job as ScrapedJob).positionId,
+    title: match.job.title,
+    category: match.job.category,
+    location: match.job.location,
+    updated: match.job.updated,
+    detailUrl: match.job.detailUrl,
+    score: Number(match.score.toFixed(4)),
+    reason: match.reason,
+    matchedSkills: match.matchedSkills,
+    missingSkills: match.missingSkills,
+  }))
+}
+
+function serializeDecision(decision: MatchThresholdDecision) {
+  return {
+    threshold: decision.threshold,
+    shouldApply: decision.shouldApply,
+    reason: decision.reason,
+    best: decision.best ? serializeMatches([decision.best])[0] : undefined,
+  }
+}
+
+function formatTopMatches(matches: MatchScore[], limit: number): string {
+  if (matches.length === 0) return 'No candidates.'
+  return matches
+    .slice(0, limit)
+    .map((m, i) => `${i + 1}. ${m.job.title} — ${m.score.toFixed(2)} — ${m.reason.replace(/\s+/g, ' ')}`)
+    .join('\n')
 }
 
 async function scrapeStructuredJobList(sessionId: string): Promise<JobPosting[]> {
@@ -860,7 +1316,8 @@ function sessionStatusForFinalState(finalState: FinalState): Extract<AgentSessio
     finalState === 'login_required' ||
     finalState === 'no_jobs' ||
     finalState === 'no_match' ||
-    finalState === 'stopped_at_submit'
+    finalState === 'stopped_at_submit' ||
+    finalState === 'direct_submit_review'
   ) {
     return 'blocked'
   }
@@ -875,7 +1332,15 @@ function sessionEventTypeForStatus(status: Extract<AgentSessionStatus, 'complete
 }
 
 // Re-exports for SDK consumers.
-export { matchJobs, type JobPosting, type MatchScore } from './matcher.js'
+export {
+  DEFAULT_MATCH_THRESHOLD,
+  decideMatchThreshold,
+  matchJobs,
+  matchJobsCoarse,
+  type JobPosting,
+  type MatchScore,
+  type MatchThresholdDecision,
+} from './matcher.js'
 export { readResume, writeSampleResumePdf, type ResumeProfile } from './resume.js'
 export { LlmGateway } from './llm.js'
 export { CliHumanGate, AutoHumanGate, ScriptedHumanGate, type HumanGate } from './human.js'

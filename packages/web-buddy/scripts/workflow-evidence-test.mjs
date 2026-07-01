@@ -13,6 +13,7 @@ const workflowPhases = [
   'editing_resume',
   'filling_application',
   'reviewing',
+  'direct_submit_review',
   'ready_for_final_submit',
   'done',
   'blocked',

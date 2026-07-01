@@ -448,19 +448,18 @@ function humanHandoffGateKindFor(
 ): GateKind | undefined {
   if (state.phase === 'login_required') return 'login'
   if (state.phase === 'captcha_required') return 'captcha'
+  if (state.phase === 'direct_submit_review') return 'final_submit'
   if (state.phase === 'ready_for_final_submit') return 'final_submit'
   if (facts.gateKind === 'login' || facts.gateKind === 'captcha' || facts.gateKind === 'final_submit') return facts.gateKind
-
-  const phaseDefinition = phaseDefinitionFor(definition, state.phase)
-  if (phaseDefinition?.humanHandoffRequired && state.phase === 'login_required') return 'login'
-  if (phaseDefinition?.humanHandoffRequired && state.phase === 'captcha_required') return 'captcha'
-  if (phaseDefinition?.humanHandoffRequired && state.phase === 'ready_for_final_submit') return 'final_submit'
   return undefined
 }
 
 function blockerMessageFor(gateKind: GateKind | undefined, phase: WorkflowPhase): string {
   if (gateKind === 'login' || phase === 'login_required') return 'Human login required before continuing.'
   if (gateKind === 'captcha' || phase === 'captcha_required') return 'Human verification required before continuing.'
+  if (phase === 'direct_submit_review') {
+    return 'Direct-submit review required: no fillable fields were found and the next step is final submit.'
+  }
   if (gateKind === 'final_submit' || phase === 'ready_for_final_submit') {
     return 'Final submit requires human takeover before completion.'
   }

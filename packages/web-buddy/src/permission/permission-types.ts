@@ -6,6 +6,13 @@ import type { ToolCategory } from '../tools/types.js'
 import type { WorkflowPhase, WorkflowState } from '../workflow/workflow-state.js'
 
 export type PermissionAction = 'allow' | 'ask' | 'deny'
+export const PERMISSION_MODES = ['safe', 'review', 'trusted', 'autopilot'] as const
+export type PermissionMode = (typeof PERMISSION_MODES)[number]
+
+export interface PermissionModeConfig {
+  mode: PermissionMode
+  allowFinalSubmit: boolean
+}
 
 export type PermissionDecisionSource =
   | 'policy'
@@ -78,6 +85,7 @@ export interface PermissionDecision {
   policyRuleId?: string
   risk?: RiskLevel
   riskLevel: PolicyRiskLevel
+  permissionMode: PermissionMode
   reason: string
   decidedAt: string
   gateKind?: GateKind
@@ -230,6 +238,10 @@ export interface CreateWorkflowHandoffPermissionRequestInput {
   currentUrl?: string
   requestId?: string
   now?: () => Date
+}
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === 'string' && (PERMISSION_MODES as readonly string[]).includes(value)
 }
 
 export function createToolPermissionRequest(input: CreateToolPermissionRequestInput): PermissionRequest {

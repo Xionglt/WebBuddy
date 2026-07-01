@@ -1,0 +1,22 @@
+王小明 | Wang Xiaoming
+Email: wang.fixture@example.test
+Phone: +86 138 0000 5678
+Location: Hangzhou / Remote
+
+Summary: Full-stack engineer focused on AI workflow tools, bilingual product delivery, and reliable automation.
+
+Skills: TypeScript React Node.js Python LLM Docker Kubernetes 后端 全栈
+
+Experience
+Example AI Studio
+2021.06-Present
+Full-stack Engineer / 全栈工程师
+Built bilingual workflow consoles with React, TypeScript, Node.js, and Python services.
+
+Project
+Resume QA Harness
+Role: Lead Developer
+Used deterministic fixtures and fake model gateways to validate parser confidence and evidence.
+
+Education
+示例大学 Example University, Master, Software Engineering, 2017-2021

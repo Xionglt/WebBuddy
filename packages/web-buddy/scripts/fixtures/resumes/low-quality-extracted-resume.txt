@@ -1,0 +1,11 @@
+OCR EXPORT 17
+==== broken columns ====
+candidate summary moved out of order
+contact maybe at top but text is noisy
+mail :: low.quality.fixture@example.test
+tel :: 555 010 4455
+page footer page footer page footer
+selected words: platform, tools, delivery
+dates maybe 20O1 - 20l9
+education fragment unavailable
+skills section unreadable

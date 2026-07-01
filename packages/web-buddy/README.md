@@ -12,11 +12,13 @@ without a real account, captcha, or live website.
 
 ## Safety Contract
 
-The runtime does not automatically log in, solve captchas, upload files, save
-drafts, or final-submit real forms. Sensitive steps route through human gates.
-`PolicyEngine` decides allow/gate/block/auto-confirm before tools execute;
-`HumanGate` confirms or hands off sensitive steps. Trace, metrics, and
-`safety-report.json` are diagnostic artifacts, not runtime state sources.
+The runtime does not automatically log in, solve captchas, bypass human
+verification, upload files, save drafts, or final-submit real forms. Sensitive
+steps route through human gates. `PolicyEngine` classifies risk before tools
+execute; `PermissionEngine` maps policy to allow/ask/deny according to
+`PERMISSION_MODE`; `HumanGate` confirms or hands off sensitive steps.
+Trace, metrics, and `safety-report.json` are diagnostic artifacts, not runtime
+state sources.
 
 Full model: [../../docs/safety-model.md](../../docs/safety-model.md).
 
@@ -45,15 +47,50 @@ npm run test:mvp
 | --- | --- | --- |
 | `npm run demo:form` | Local form observation, resume-based filling, submit-adjacent gate behavior. | Offline fixture; never contacts a real site. |
 | `npm run demo:research` | Read-only page observation, structured summary artifact, trace, metrics, safety report. | Offline fixture; no login, no form submit, no L3/L4 action. |
-| `npm run demo:match` | Read-only Alibaba list/detail matching for the flagship workflow. | Does not enter final application submission. |
+| `npm run demo:match` | Read-only Alibaba multi-page list/detail matching for the flagship workflow. | Threshold-gated; does not final-submit. |
 | `npm run alibaba:apply` | Complex flagship workflow through the optional Claude Code adapter. | Requires model and human handoff for login/captcha/final submit. |
+
+## Resume and Matching v2
+
+Resume inputs for CLI/Web UI are `.pdf`, `.json`, and `.txt`. The v2 SDK
+parser (`readResumeV2` / `ingestResume`) returns `resume-profile/v2` with
+field-level confidence, short sanitized evidence, schema validation, optional
+LLM parsing, heuristic fallback, and deterministic email/phone repair. The
+current orchestrator still consumes the compatible `ResumeProfile` shape, so
+operator-facing runs use the same `--resume` flag while tests and SDK callers
+can inspect v2 output directly.
+
+```bash
+npm run test:resume
+npm run test:resume-ingest
+npm run fill -- https://your-recruiting-site.example/apply --resume /path/to/resume.pdf
+```
+
+Text PDFs are extracted with `pdfjs-dist`. Scanned or image-heavy PDFs are
+best-effort and produce warnings; do not assume PDF parsing is perfect.
+
+Alibaba/list-style matching now separates fast list crawl from detail
+enrichment:
+
+```bash
+npm run demo:match -- \
+  --resume /path/to/resume.pdf \
+  --max-pages 5 \
+  --max-crawl-jobs 100 \
+  --max-jobs 10 \
+  --match-threshold 0.45
+```
+
+The defaults are 5 pages, up to 100 unique list candidates, Top 10 detail pages,
+and a final match threshold of `0.45`. Low matches stop before the apply flow.
 
 ## Run Observability
 
 Each local Web Agent run writes an append-only session plus a unified trace
 identity. Session files are the runtime recovery source; trace files remain
 diagnostic review artifacts. `npm run report:safety` adds `safety-report.json`
-for the selected run:
+for the selected run. Mode-specific artifacts appear when that workflow
+produces them:
 
 ```text
 output/sessions/<sessionId>/session.json
@@ -68,6 +105,11 @@ output/traces/<sessionId>/agent-state.json
 output/traces/<sessionId>/safety-report.json
 output/traces/<sessionId>/artifacts/page-state-latest.json
 output/traces/<sessionId>/artifacts/form-state-latest.json
+output/traces/<sessionId>/artifacts/research-summary.json
+output/traces/<sessionId>/artifacts/risk-decisions.json
+output/traces/<sessionId>/artifacts/job-candidates-coarse.json
+output/traces/<sessionId>/artifacts/job-candidates-final.json
+output/traces/<sessionId>/artifacts/direct-submit-review.json
 ```
 
 Useful commands:
@@ -77,6 +119,12 @@ npm run report:safety
 npm run report:safety -- --run-id <runId>
 npm run report:safety -- --trace-dir ../../output/traces/<sessionId>
 npm run benchmark:research
+npm run test:resume-ingest
+npm run test:job-crawl-pagination
+npm run test:job-match-threshold
+npm run test:permission-modes
+npm run test:direct-submit-flow
+npm run test:risk-timeline
 npm run test:tool-execution
 npm run test:kernel
 npm run test:session
@@ -84,6 +132,27 @@ npm run test:session
 
 The research benchmark validates `metrics.json`, `page-state-latest.json`,
 `research-summary.json`, and `safety-report.json`.
+
+## Artifacts
+
+Primary run review artifacts live under `output/traces/<sessionId>/artifacts/`.
+Some Plan 2 artifacts are also copied to `output/<runId>/` for legacy scripts.
+
+- `page-state-latest.json` and `form-state-latest.json`: latest observed page
+  and form state for review.
+- `research-summary.json`: structured output from the read-only research demo.
+- `job-candidates-coarse.json`: all crawled list candidates after fast scoring.
+- `job-candidates-final.json`: detail-enriched and optionally LLM-reranked
+  shortlist plus the threshold decision.
+- `risk-decisions.json`: compact policy/permission outcomes with counts for
+  allowed, auto-allowed, gated, and denied actions.
+- `direct-submit-review.json`: explanation and signals when a recruiting site
+  has no fillable form and the next step would be final submit.
+- `safety-report.json`: generated report summarizing final-submit, login,
+  captcha, and high-risk outcomes.
+
+Artifacts are for debugging and audit. They may include screenshots, URLs, and
+resume-derived summaries, so keep `output/` out of commits.
 
 ## Phase 2 Kernel Notes
 
@@ -179,7 +248,14 @@ node dist/cli/demo.js <command> [options]
 
 Options include `--resume`, `--headful`, `--headless`, `--auto-gate`,
 `--model-key`, `--base-url`, `--model-name`, `--storage-state`, `--prompt`,
-`--keep-browser-open`, `--profile`, and `--max-jobs`.
+`--keep-browser-open`, `--profile`, `--permission-mode`, `--max-jobs`,
+`--max-pages`, `--max-crawl-jobs`, and `--match-threshold`.
+
+Permission modes can also be set with `PERMISSION_MODE=safe|review|trusted|autopilot`.
+They affect PermissionEngine decisions for local runtime tool calls. Login,
+captcha, upload, save-resume, and `final_submit` remain sensitive gates by
+default; `HUMAN_GATE_MODE=auto` is a non-interactive handoff mode, not final
+submit authorization.
 
 ## Web UI
 
@@ -189,6 +265,16 @@ npm run web
 
 Open `http://localhost:5178` to configure a model, upload a resume, run demos or
 fill workflows, and inspect live events, screenshots, trace steps, and metrics.
+
+From the repository root, the same UI and headless local checks can run inside
+Docker:
+
+```bash
+docker compose build
+docker compose up agent
+docker compose run --rm agent npm --prefix packages/web-buddy run test:e2e-auto-apply
+docker compose run --rm agent node packages/web-buddy/dist/cli/demo.js demo-form --headless --auto-gate
+```
 
 ## Architecture
 
@@ -254,6 +340,16 @@ npm run benchmark:simple      # local simple form benchmark
 npm run benchmark:complex     # local complex form benchmark
 npm run benchmark:research    # local read-only research benchmark
 npm run report:safety         # generate safety-report.json
+npm run test:model            # model chat + tool-calling smoke test
+npm run test:resume           # legacy resume parser regression
+npm run test:resume-ingest    # resume-profile/v2 fixtures and fallback
+npm run test:matcher          # matcher regression
+npm run test:job-crawl-pagination  # multi-page crawl + Top N detail fixture
+npm run test:job-match-threshold   # threshold stops low matches before apply
+npm run test:permission-modes # safe/review/trusted/autopilot rules
+npm run test:direct-submit-flow    # direct-submit review fixtures
+npm run test:risk-timeline    # risk-decisions artifact and counters
+npm run test:e2e-auto-apply   # localhost sandbox auto-apply
 npm run test:mvp              # full MVP regression entry
 npm run alibaba:apply         # optional Claude Code adapter path
 npm run alibaba:apply:raw     # local raw runtime comparison path
@@ -273,6 +369,75 @@ Supported wire formats:
 - Anthropic-compatible via `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and
   `ANTHROPIC_MODEL`.
 - OpenAI-compatible via `MODEL_API_KEY`, `MODEL_BASE_URL`, and `MODEL_NAME`.
+- Alibaba Cloud Model Studio / Bailian Qwen via `DASHSCOPE_API_KEY`,
+  `DASHSCOPE_BASE_URL`, and `DASHSCOPE_MODEL`.
+
+Qwen example:
+
+```env
+MODEL_PROVIDER=openai
+DASHSCOPE_API_KEY=your_api_key
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen-plus
+MODEL_ENABLE_THINKING=false
+```
+
+For workspace endpoints, use:
+
+```env
+MODEL_PROVIDER=openai
+DASHSCOPE_BASE_URL=https://<workspace-id>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+```
+
+Check model connectivity and function calling:
+
+```bash
+npm run test:model
+```
 
 Do not commit `.env`, cookies, storage state, resume content, or verification
 codes.
+
+## Troubleshooting
+
+### Resume fields look wrong or low-confidence
+
+Run `npm run test:resume-ingest` to verify the local parser path. For real
+files, prefer text PDFs, JSON, or TXT. Scanned PDFs may produce sparse text and
+warnings; review the generated profile before using it for a real workflow.
+
+### Matching stops at `no_match`
+
+Open `job-candidates-final.json` and check the threshold decision. You can tune
+`--match-threshold`, `--max-pages`, `--max-crawl-jobs`, or `--max-jobs`, but do
+not lower the threshold just to force an unrelated job into the apply flow.
+
+### Direct-submit review appears
+
+This is expected on sites that use online resumes and show only an agreement
+checkbox plus a final apply button. Review `direct-submit-review.json`; the
+runtime stopped before `final_submit`.
+
+### Permission mode still asks
+
+That is usually correct. Permission modes auto-allow only eligible non-final
+actions. Login, captcha, upload, save-resume, and final submit remain gated by
+default.
+
+### Model smoke test fails with provider/account errors
+
+`npm run test:model` depends on the configured provider account. HTTP 400/401,
+quota, or billing errors are external availability issues; local no-key
+fixtures can still pass.
+
+### Browser stays open in CI or no-TTY runs
+
+If `--keep-browser-open` or `PLAYWRIGHT_KEEP_BROWSER_OPEN=true` is set without
+a TTY, the process intentionally remains alive so the final page can be
+inspected. Stop the process or unset the flag.
+
+### Live site behavior differs from fixtures
+
+Recruiting site DOM and login flows change. Start headful, keep final-submit
+gated, inspect screenshots and trace artifacts, and complete login/captcha only
+manually. The runtime does not claim it can bypass those checks.

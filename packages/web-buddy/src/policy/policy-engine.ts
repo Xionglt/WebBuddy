@@ -184,7 +184,13 @@ function workflowGateKindForText(text: string, phase: WorkflowPhase | undefined)
   if ((phase === 'job_detail' || phase === 'entering_application') && APPLY_ENTRY_TEXT.test(text)) {
     return 'high_risk_action'
   }
-  if ((phase === 'reviewing' || phase === 'ready_for_final_submit') && REVIEW_SUBMIT_TEXT.test(text)) {
+  if (phase === 'direct_submit_review' && (REVIEW_SUBMIT_TEXT.test(text) || APPLY_ENTRY_TEXT.test(text))) {
+    return 'final_submit'
+  }
+  if (
+    (phase === 'reviewing' || phase === 'ready_for_final_submit') &&
+    REVIEW_SUBMIT_TEXT.test(text)
+  ) {
     return 'final_submit'
   }
   if (phase === 'login_required') return 'login'
@@ -223,7 +229,18 @@ function workflowRuleFor(
       tags: ['workflow', 'apply_entry'],
     }
   }
-  if ((phase === 'reviewing' || phase === 'ready_for_final_submit') && REVIEW_SUBMIT_TEXT.test(text)) {
+  if (phase === 'direct_submit_review' && (REVIEW_SUBMIT_TEXT.test(text) || APPLY_ENTRY_TEXT.test(text))) {
+    return {
+      policyCode: 'policy.workflow.final_submit',
+      ruleId: 'policy.workflow.final_submit.v1',
+      reason: 'Submit-like action in direct-submit review requires the final-submit safety gate.',
+      tags: ['workflow', 'final_submit'],
+    }
+  }
+  if (
+    (phase === 'reviewing' || phase === 'ready_for_final_submit') &&
+    REVIEW_SUBMIT_TEXT.test(text)
+  ) {
     return {
       policyCode: 'policy.workflow.final_submit',
       ruleId: 'policy.workflow.final_submit.v1',

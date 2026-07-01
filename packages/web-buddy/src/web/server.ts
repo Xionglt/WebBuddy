@@ -21,6 +21,7 @@ import { loadConfig, type AgentConfig, type ModelConfig } from '../sdk/config.js
 import { runJobApplicationAgent, type AgentEvent, type AgentRunResult } from '../sdk/orchestrator.js'
 import { sessionManager } from '../session/manager.js'
 import { defaultAuthPath } from '../runtime/local/login.js'
+import { RISK_DECISIONS_ARTIFACT } from '../policy/risk-decisions.js'
 import INDEX_HTML from './public/index.html'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -41,7 +42,7 @@ const runs = new Map<string, RunState>()
 
 interface RuntimeEvent {
   ts: string
-  level: 'info' | 'think' | 'act' | 'observe' | 'gate' | 'warn' | 'error' | 'done'
+  level: 'info' | 'think' | 'risk' | 'decision' | 'act' | 'observe' | 'gate' | 'warn' | 'error' | 'done'
   phase: string
   message: string
   data?: unknown
@@ -554,6 +555,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     const eventsFile = join(traceDir, 'events.jsonl')
     const metricsFile = join(traceDir, 'metrics.json')
     const agentStateFile = join(traceDir, 'agent-state.json')
+    const riskDecisionsFile = join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT)
     send(res, 200, {
       id: run.id,
       done: run.done,
@@ -567,6 +569,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       spans: spansFile && existsSync(spansFile) ? readJsonl(spansFile, 300) : [],
       events: eventsFile && existsSync(eventsFile) ? readJsonl(eventsFile, 100) : [],
       metrics: readJsonFile(metricsFile),
+      riskDecisions: readJsonFile(riskDecisionsFile),
       agentState: readJsonFile(agentStateFile),
     })
     return
@@ -633,11 +636,13 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     const traceDir = id ? join(outputDir(), 'traces', `run_${id}`) : ''
     const metricsFile = traceDir ? join(traceDir, 'metrics.json') : ''
     const agentStateFile = traceDir ? join(traceDir, 'agent-state.json') : ''
+    const riskDecisionsFile = traceDir ? join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT) : ''
     if (!id || !existsSync(traceFile)) {
       return send(res, 200, {
         steps: [],
         summary: null,
         metrics: readJsonFile(metricsFile),
+        riskDecisions: readJsonFile(riskDecisionsFile),
         agentState: readJsonFile(agentStateFile),
       })
     }
@@ -647,6 +652,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       steps,
       summary,
       metrics: readJsonFile(metricsFile),
+      riskDecisions: readJsonFile(riskDecisionsFile),
       agentState: readJsonFile(agentStateFile),
     })
     return

@@ -5,6 +5,11 @@ import type { RunMetrics, RunMetricsStatus } from '../metrics/schema.js'
 import { resolveTraceInputs, type ResolveTraceInputsOptions, type ResolvedTraceInputs } from '../metrics/trace-inputs.js'
 import type { WorkflowPhase } from '../workflow/workflow-state.js'
 import type { PolicyAuditEvent } from './policy-audit.js'
+import {
+  createRiskDecisionsArtifactFromEvents,
+  type RiskDecisionRecord,
+  type RiskDecisionSummary,
+} from './risk-decisions.js'
 
 export interface SafetyReport {
   schemaVersion: 'safety-report/v1'
@@ -17,6 +22,10 @@ export interface SafetyReport {
   captchaHandoffRequired: boolean
   highRiskActionCount: number
   gateCount: number
+  riskDecisionCount: number
+  autoAllowedCount: number
+  gatedCount: number
+  deniedCount: number
   policyCodes: string[]
   summary: string
 }
@@ -42,7 +51,14 @@ interface LegacyTraceStepJson {
 export function generateSafetyReport(options: ResolveTraceInputsOptions = {}): SafetyReportResult {
   const inputs = resolveTraceInputs(options)
   const metrics = aggregateMetrics(inputs)
-  const policyEvents = readPolicyEvents(inputs.files.eventsJsonl)
+  const traceEvents = readJsonl<AgentTraceEventJson>(inputs.files.eventsJsonl)
+  const policyEvents = readPolicyEvents(traceEvents)
+  const riskDecisions = createRiskDecisionsArtifactFromEvents({
+    events: traceEvents,
+    runId: metrics.runId || inputs.runId,
+    sessionId: metrics.sessionId || inputs.sessionId,
+  })
+  const riskSummary = summarizeFinalRiskOutcomes(riskDecisions.decisions)
   const legacySteps = readJsonl<LegacyTraceStepJson>(inputs.files.legacyTraceJsonl)
   const policyCodes = unique([
     ...policyEvents.map((event) => event.policyCode),
@@ -81,6 +97,10 @@ export function generateSafetyReport(options: ResolveTraceInputsOptions = {}): S
     captchaHandoffRequired,
     highRiskActionCount,
     gateCount,
+    riskDecisionCount: riskDecisions.summary.total,
+    autoAllowedCount: riskSummary.autoAllowed,
+    gatedCount: riskSummary.gated,
+    deniedCount: riskSummary.denied,
     policyCodes,
     summary: summarizeSafety({
       finalStatus: metrics.status,
@@ -90,6 +110,10 @@ export function generateSafetyReport(options: ResolveTraceInputsOptions = {}): S
       captchaHandoffRequired,
       highRiskActionCount,
       gateCount,
+      riskDecisionCount: riskDecisions.summary.total,
+      autoAllowedCount: riskSummary.autoAllowed,
+      gatedCount: riskSummary.gated,
+      deniedCount: riskSummary.denied,
     }),
     ...(finalWorkflowPhase ? { finalWorkflowPhase } : {}),
   }
@@ -116,8 +140,8 @@ export function generateAndWriteSafetyReport(options: ResolveTraceInputsOptions 
   return { ...result, path }
 }
 
-function readPolicyEvents(file: string | undefined): PolicyAuditEvent[] {
-  return readJsonl<AgentTraceEventJson>(file)
+function readPolicyEvents(events: AgentTraceEventJson[]): PolicyAuditEvent[] {
+  return events
     .filter((event) => event.event === 'policy_decision')
     .map((event) => tracePayloadValue(event.data))
     .filter(isPolicyAuditEvent)
@@ -139,14 +163,44 @@ function summarizeSafety(input: {
   captchaHandoffRequired: boolean
   highRiskActionCount: number
   gateCount: number
+  riskDecisionCount: number
+  autoAllowedCount: number
+  gatedCount: number
+  deniedCount: number
 }): string {
   if (input.finalSubmitBlocked) {
-    return `Final submit was attempted and blocked; ${input.gateCount} policy gate(s) were recorded.`
+    return `Final submit was attempted and blocked; ${input.gateCount} policy gate(s), ${input.autoAllowedCount} auto-allowed, ${input.gatedCount} gated, and ${input.deniedCount} denied risk outcome(s) were recorded.`
   }
   if (input.loginHandoffRequired) return 'Run required human login handoff before continuing.'
   if (input.captchaHandoffRequired) return 'Run required human verification handoff before continuing.'
   if (input.finalSubmitAttempted) return 'Final submit was attempted; review gate outcome before replaying.'
-  return `Run ended with status ${input.finalStatus}; ${input.highRiskActionCount} high-risk policy decision(s) were recorded.`
+  return `Run ended with status ${input.finalStatus}; ${input.highRiskActionCount} high-risk policy decision(s), ${input.autoAllowedCount} auto-allowed, ${input.gatedCount} gated, and ${input.deniedCount} denied risk outcome(s) were recorded.`
+}
+
+function summarizeFinalRiskOutcomes(decisions: RiskDecisionRecord[]): RiskDecisionSummary {
+  const permissionKeys = new Set<string>()
+  for (const decision of decisions) {
+    if (decision.source !== 'permission') continue
+    for (const key of riskDecisionActionKeys(decision)) permissionKeys.add(key)
+  }
+  const finalDecisions = decisions.filter((decision) => {
+    if (decision.source !== 'policy') return true
+    return !riskDecisionActionKeys(decision).some((key) => permissionKeys.has(key))
+  })
+  return {
+    total: finalDecisions.length,
+    allowed: finalDecisions.filter((decision) => decision.decision === 'allow').length,
+    autoAllowed: finalDecisions.filter((decision) => decision.decision === 'auto_allow').length,
+    gated: finalDecisions.filter((decision) => decision.decision === 'ask').length,
+    denied: finalDecisions.filter((decision) => decision.decision === 'deny').length,
+  }
+}
+
+function riskDecisionActionKeys(decision: RiskDecisionRecord): string[] {
+  return [
+    decision.requestId ? `request:${decision.requestId}` : '',
+    `${decision.step ?? 'unknown'}:${decision.tool}`,
+  ].filter(Boolean)
 }
 
 function readJsonl<T>(file: string | undefined): T[] {

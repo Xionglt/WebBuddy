@@ -1,0 +1,15 @@
+Alex Fixture
+Email: alex.fixture@example.test  Phone: +1 555 010 2233
+Location: Seattle, WA
+Summary: Senior frontend engineer building developer platforms and browser automation.
+
+Skills: TypeScript React Node.js Playwright Docker Kubernetes AWS
+
+Experience
+Fixture Labs
+2020.01-Present
+Senior Frontend Engineer
+Built internal tooling with React, TypeScript, and Playwright.
+
+Education
+Example University, Bachelor, Computer Science, 2014-2018

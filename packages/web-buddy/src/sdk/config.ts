@@ -1,6 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isPermissionMode, type PermissionMode } from '../permission/permission-types.js'
+
+export type { PermissionMode } from '../permission/permission-types.js'
 
 /**
  * Minimal .env loader — keeps the SDK dependency-free (no dotenv).
@@ -49,6 +52,8 @@ export interface ModelConfig {
   name: string
   /** Anthropic API version header. */
   anthropicVersion?: string
+  /** Provider-specific OpenAI-compatible request fields, e.g. Qwen enable_thinking. */
+  extraBody?: Record<string, unknown>
 }
 
 export interface BrowserRuntimeConfig {
@@ -71,7 +76,11 @@ export interface BrowserRuntimeConfig {
 export interface HumanLoopConfig {
   /** 'cli' prompts on stdin; 'auto' decides from policy without blocking. */
   mode: 'cli' | 'auto'
-  /** Risk levels the auto gate may approve without a human. L3/L4 always gated. */
+  /** User-facing permission profile. Defaults to safe. */
+  permissionMode: PermissionMode
+  /** Future explicit switch for final submit. Defaults false and is not exposed by CLI/env. */
+  allowFinalSubmit: boolean
+  /** Risk levels the legacy auto gate may approve without a human. */
   autoApproveRisk: Array<'L0' | 'L1' | 'L2'>
 }
 
@@ -85,6 +94,12 @@ export interface AgentConfig {
   human: HumanLoopConfig
   /** How many top job cards to open for detail before matching. */
   maxJobsToDetail: number
+  /** How many list pages/batches to scan before coarse ranking. */
+  maxJobPagesToCrawl: number
+  /** Maximum unique list candidates to keep during fast crawl. */
+  maxJobsToCrawl: number
+  /** Minimum final match score required before entering an application flow. */
+  matchThreshold: number
   /** Cookie-login (storageState) path. Empty → derive per host under trace.outDir/auth. */
   auth: { storageStatePath: string }
   /** Agent loop tuning. */
@@ -111,6 +126,38 @@ function numEnv(env: Record<string, string | undefined>, key: string, fallback: 
   return Number.isFinite(n) ? n : fallback
 }
 
+function firstNonEmpty(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return null
+}
+
+function parseJsonObjectEnv(env: Record<string, string | undefined>, key: string): Record<string, unknown> {
+  const raw = env[key]
+  if (!raw?.trim()) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function permissionModeEnv(env: Record<string, string | undefined>): PermissionMode {
+  const raw = env.PERMISSION_MODE
+  if (raw === undefined || !raw.trim()) return 'safe'
+  const value = raw.trim()
+  if (isPermissionMode(value)) return value
+  throw new Error(`Invalid PERMISSION_MODE="${raw}". Expected one of: safe, review, trusted, autopilot.`)
+}
+
+function humanGateModeEnv(env: Record<string, string | undefined>): HumanLoopConfig['mode'] {
+  return env.HUMAN_GATE_MODE === 'auto' ? 'auto' : 'cli'
+}
+
 /**
  * Build a fully-resolved AgentConfig.
  *
@@ -129,15 +176,18 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 
   // Model resolution. Prefer an explicit override; then Anthropic-format env
   // (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL, e.g. Zhipu GLM); then OpenAI env.
-  const ovrProvider = overrides.model?.provider
-  const anthropicToken = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? null
+  const envProvider = env.MODEL_PROVIDER === 'openai' || env.MODEL_PROVIDER === 'anthropic'
+    ? env.MODEL_PROVIDER
+    : undefined
+  const ovrProvider = overrides.model?.provider ?? envProvider
+  const anthropicToken = firstNonEmpty(env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_API_KEY)
   const useAnthropic =
     ovrProvider ? ovrProvider === 'anthropic' : Boolean(overrides.model?.authToken ?? anthropicToken)
 
   let model: ModelConfig
   if (useAnthropic) {
     // GLM (open.bigmodel.cn) exposes its Anthropic-compat API under /api/anthropic.
-    let base = (env.ANTHROPIC_API_BASE ?? env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com')
+    let base = (firstNonEmpty(env.ANTHROPIC_API_BASE, env.ANTHROPIC_BASE_URL) ?? 'https://api.anthropic.com')
       .replace(/\/+$/, '')
     if (!base.includes('/api/anthropic') && base.includes('bigmodel.cn')) base += '/api/anthropic'
     model = {
@@ -145,15 +195,32 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
       authToken: overrides.model?.authToken ?? anthropicToken,
       apiKey: overrides.model?.authToken ?? anthropicToken,
       baseUrl: overrides.model?.baseUrl ?? base,
-      name: overrides.model?.name ?? env.ANTHROPIC_MODEL ?? 'glm-4.7',
-      anthropicVersion: env.ANTHROPIC_VERSION ?? '2023-06-01',
+      name: overrides.model?.name ?? firstNonEmpty(env.ANTHROPIC_MODEL) ?? 'glm-4.7',
+      anthropicVersion: firstNonEmpty(env.ANTHROPIC_VERSION) ?? '2023-06-01',
     }
   } else {
-    const apiKey = overrides.model?.apiKey ?? env.MODEL_API_KEY ?? env.OPENAI_API_KEY ?? null
+    const apiKey =
+      overrides.model?.apiKey ?? firstNonEmpty(env.MODEL_API_KEY, env.OPENAI_API_KEY, env.DASHSCOPE_API_KEY)
     const baseUrl =
-      overrides.model?.baseUrl ?? env.MODEL_BASE_URL ?? env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1'
-    const modelName = overrides.model?.name ?? env.MODEL_NAME ?? env.OPENAI_MODEL ?? 'gpt-4o-mini'
-    model = { provider: 'openai', apiKey, baseUrl, name: modelName }
+      overrides.model?.baseUrl ??
+      firstNonEmpty(env.MODEL_BASE_URL, env.OPENAI_BASE_URL, env.DASHSCOPE_BASE_URL) ??
+      'https://api.openai.com/v1'
+    const modelName =
+      overrides.model?.name ?? firstNonEmpty(env.MODEL_NAME, env.OPENAI_MODEL, env.DASHSCOPE_MODEL) ?? 'gpt-4o-mini'
+    const extraBody = {
+      ...parseJsonObjectEnv(env, 'MODEL_EXTRA_BODY_JSON'),
+      ...(env.MODEL_ENABLE_THINKING === undefined
+        ? {}
+        : { enable_thinking: boolEnv(env, 'MODEL_ENABLE_THINKING', false) }),
+      ...(overrides.model?.extraBody ?? {}),
+    }
+    model = {
+      provider: 'openai',
+      apiKey,
+      baseUrl,
+      name: modelName,
+      ...(Object.keys(extraBody).length ? { extraBody } : {}),
+    }
   }
 
   const headless = boolEnv(env, 'PLAYWRIGHT_HEADLESS', true)
@@ -193,10 +260,15 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
       outDir: resolve(REPO_ROOT, overrides.trace?.outDir ?? env.TRACE_OUT_DIR ?? 'output'),
     },
     human: {
-      mode: (env.HUMAN_GATE_MODE as 'cli' | 'auto' | undefined) ?? 'cli',
-      autoApproveRisk: ['L0', 'L1', 'L2'],
+      mode: overrides.human?.mode ?? humanGateModeEnv(env),
+      permissionMode: overrides.human?.permissionMode ?? permissionModeEnv(env),
+      allowFinalSubmit: overrides.human?.allowFinalSubmit ?? false,
+      autoApproveRisk: overrides.human?.autoApproveRisk ?? ['L0', 'L1', 'L2'],
     },
-    maxJobsToDetail: overrides.maxJobsToDetail ?? numEnv(env, 'AGENT_MAX_JOBS_TO_DETAIL', 3),
+    maxJobsToDetail: overrides.maxJobsToDetail ?? numEnv(env, 'AGENT_MAX_JOBS_TO_DETAIL', 10),
+    maxJobPagesToCrawl: overrides.maxJobPagesToCrawl ?? numEnv(env, 'AGENT_MAX_JOB_PAGES_TO_CRAWL', 5),
+    maxJobsToCrawl: overrides.maxJobsToCrawl ?? numEnv(env, 'AGENT_MAX_JOBS_TO_CRAWL', 100),
+    matchThreshold: overrides.matchThreshold ?? numEnv(env, 'AGENT_MATCH_THRESHOLD', 0.45),
     auth: { storageStatePath: env.PLAYWRIGHT_STORAGE_STATE ?? '' },
     agent: { maxSteps: numEnv(env, 'AGENT_MAX_STEPS', 16) },
   }

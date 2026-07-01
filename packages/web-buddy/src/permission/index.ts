@@ -5,8 +5,10 @@ export type { PermissionEngineOptions } from './permission-engine.js'
 export { defaultPermissionRules } from './permission-rules.js'
 export type { PermissionRule, PermissionRuleContext } from './permission-rules.js'
 export {
+  PERMISSION_MODES,
   createToolPermissionRequest,
   createWorkflowHandoffPermissionRequest,
+  isPermissionMode,
 } from './permission-types.js'
 export type {
   ApprovalEnqueueInput,
@@ -25,6 +27,8 @@ export type {
   PermissionAction,
   PermissionDecision,
   PermissionDecisionSource,
+  PermissionMode,
+  PermissionModeConfig,
   PermissionRememberPolicy,
   PermissionRememberScope,
   PermissionRequest,

@@ -142,6 +142,7 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
     const hay = JSON.stringify(event)
     if (/handoff|manual|WEB_HANDOFF_WAITING/i.test(hay)) metrics.manualHandoffs += 1
     applyPolicyDecisionEvent(metrics, event)
+    applyPermissionDecisionEvent(metrics, event)
     applyContextSelectionEvent(metrics, event)
   }
 }
@@ -169,6 +170,37 @@ function applyPolicyDecisionEvent(metrics: RunMetrics, event: AgentTraceEventJso
 
   const policyCode = stringValue(data.policyCode)
   if (policyCode) incrementCount(metrics.policy.policyCodeCounts, policyCode)
+}
+
+function applyPermissionDecisionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event !== 'permission_decision') return
+
+  const data = tracePayloadValue(event.data)
+  const decision = isRecord(data) && isRecord(data.decision) ? data.decision : data
+  if (!isRecord(decision)) {
+    metrics.permission.decisions += 1
+    return
+  }
+
+  metrics.permission.decisions += 1
+  const action = stringValue(decision.action)
+  if (action === 'allow') metrics.permission.allows += 1
+  else if (action === 'ask') metrics.permission.asks += 1
+  else if (action === 'deny') metrics.permission.denies += 1
+
+  const auditTags = Array.isArray(decision.auditTags)
+    ? decision.auditTags.filter((tag): tag is string => typeof tag === 'string')
+    : []
+  if (auditTags.includes('permission:auto_allow')) metrics.permission.autoAllows += 1
+
+  const permissionMode = stringValue(decision.permissionMode)
+  if (permissionMode) incrementCount(metrics.permission.modeCounts, permissionMode)
+
+  const gateKind = stringValue(decision.gateKind)
+  if (gateKind) incrementCount(metrics.permission.gateKindCounts, gateKind)
+
+  const ruleId = stringValue(decision.ruleId)
+  if (ruleId) incrementCount(metrics.permission.ruleIdCounts, ruleId)
 }
 
 function applyContextSelectionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {

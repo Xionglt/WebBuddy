@@ -24,6 +24,7 @@ import { defaultAuthPath, ensureLogin } from '../runtime/local/login.js'
 import { AutoHumanGate, CliHumanGate } from '../sdk/human.js'
 import { LlmGateway } from '../sdk/llm.js'
 import { TraceRecorder } from '../sdk/trace.js'
+import { PERMISSION_MODES, isPermissionMode, type PermissionMode } from '../permission/index.js'
 
 interface Flags {
   resume?: string
@@ -36,9 +37,13 @@ interface Flags {
   listUrl?: string
   prompt?: string
   maxJobs: number
+  maxPages?: number
+  maxCrawlJobs?: number
+  matchThreshold?: number
   storageState?: string
   keepBrowserOpen?: boolean
   profile?: string
+  permissionMode?: PermissionMode
 }
 
 interface ParsedArgs {
@@ -48,12 +53,14 @@ interface ParsedArgs {
 
 const VALUE_FLAGS = new Set([
   '--resume', '--model-key', '--base-url', '--model-name',
-  '--list-url', '--max-jobs', '--storage-state', '--prompt', '--profile',
+  '--list-url', '--max-jobs', '--max-pages', '--max-crawl-jobs',
+  '--match-threshold', '--storage-state', '--prompt', '--profile',
+  '--permission-mode',
 ])
 
 /** Single-pass parser: value-flags consume their next token; others are positional. */
 function parseArgs(argv: string[]): ParsedArgs {
-  const flags: Flags = { maxJobs: 3 }
+  const flags: Flags = { maxJobs: 10 }
   const positionals: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
@@ -72,7 +79,11 @@ function parseArgs(argv: string[]): ParsedArgs {
         case '--list-url': flags.listUrl = v; break
         case '--prompt': flags.prompt = v; break
         case '--profile': flags.profile = v; break
+        case '--permission-mode': flags.permissionMode = parsePermissionMode(v); break
         case '--max-jobs': flags.maxJobs = Number(v); break
+        case '--max-pages': flags.maxPages = Number(v); break
+        case '--max-crawl-jobs': flags.maxCrawlJobs = Number(v); break
+        case '--match-threshold': flags.matchThreshold = Number(v); break
         case '--storage-state': flags.storageState = v; break
       }
     } else if (a?.startsWith('--')) {
@@ -84,11 +95,18 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { flags, positionals }
 }
 
+function parsePermissionMode(value: string): PermissionMode {
+  if (isPermissionMode(value)) return value
+  console.error(`Invalid --permission-mode "${value}". Expected one of: ${PERMISSION_MODES.join(', ')}`)
+  process.exit(2)
+}
+
 function applyFlags(config: AgentConfig, f: Flags): AgentConfig {
   if (f.headful) { config.browser.headless = false; config.browser.visualHighlight = true }
   if (f.headless) { config.browser.headless = true; config.browser.visualHighlight = false }
   if (f.autoGate) config.human.mode = 'auto'
   if (f.storageState) config.auth.storageStatePath = f.storageState
+  if (f.permissionMode) config.human.permissionMode = f.permissionMode
   return config
 }
 
@@ -97,6 +115,9 @@ function loadConfigWithFlags(f: Flags): AgentConfig {
     resumePath: f.resume,
     alibabaCareersUrl: f.listUrl,
     maxJobsToDetail: f.maxJobs,
+    maxJobPagesToCrawl: f.maxPages,
+    maxJobsToCrawl: f.maxCrawlJobs,
+    matchThreshold: f.matchThreshold,
     model: { apiKey: f.modelKey, baseUrl: f.baseUrl!, name: f.modelName! },
   }), f)
 }
@@ -143,6 +164,7 @@ function printHeader(title: string, config: AgentConfig, mode: AgentMode, extra?
     resume: config.resumePath,
     model: config.model.apiKey ? `${config.model.name} @ ${config.model.baseUrl}` : '(none — heuristic fallback only)',
     'human gate': config.human.mode,
+    permission: config.human.permissionMode,
   }
   if (extra) Object.assign(rows, extra)
   for (const [k, v] of Object.entries(rows)) console.log(` ${k.padEnd(12)} : ${v}`)
@@ -151,7 +173,7 @@ function printHeader(title: string, config: AgentConfig, mode: AgentMode, extra?
 }
 
 const ICON: Record<string, string> = {
-  info: '• ', warn: '⚠️ ', gate: '⛔', think: '💭', act: '🎯', observe: '👀', error: '✖ ', done: '✅',
+  info: '• ', warn: '⚠️ ', gate: '⛔', think: '💭', risk: '⚑ ', decision: '◆ ', act: '🎯', observe: '👀', error: '✖ ', done: '✅',
 }
 
 async function run(mode: AgentMode, f: Flags, startUrl?: string) {
@@ -252,7 +274,11 @@ OPTIONS
   --storage-state <p>   cookie file path (fill/login)
   --prompt <text>       task prompt for LLM-driven fill modes
   --profile <name>      run profile label for metrics (debug/fast/benchmark)
-  --max-jobs <n>        top-N jobs to open for detail (match, default 3)
+  --permission-mode <m> safe | review | trusted | autopilot (default safe)
+  --max-jobs <n>        top-N jobs to open for detail (match, default 10)
+  --max-pages <n>       list pages/batches to crawl (match, default 5)
+  --max-crawl-jobs <n>  max unique jobs to keep from fast crawl (default 100)
+  --match-threshold <n> minimum final score to enter apply flow (default 0.45)
   -h, --help            show this help
 
 EXAMPLES

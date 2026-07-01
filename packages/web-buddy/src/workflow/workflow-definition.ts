@@ -52,7 +52,7 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'observing',
       title: 'Observing',
       objective: 'Inspect the current page and infer whether it is part of a job application flow.',
-      allowedNextPhases: ['selecting_job', 'job_detail', 'login_required', 'captcha_required', 'filling_application', 'blocked'],
+      allowedNextPhases: ['selecting_job', 'job_detail', 'login_required', 'captcha_required', 'filling_application', 'direct_submit_review', 'blocked'],
       requiredEvidenceKinds: ['page'],
     },
     {
@@ -76,7 +76,7 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'entering_application',
       title: 'Entering application',
       objective: 'Open the application flow without performing final submission.',
-      allowedNextPhases: ['login_required', 'captcha_required', 'editing_resume', 'filling_application', 'blocked'],
+      allowedNextPhases: ['login_required', 'captcha_required', 'editing_resume', 'filling_application', 'direct_submit_review', 'blocked'],
       requiredEvidenceKinds: ['tool_result', 'page'],
     },
     {
@@ -84,7 +84,7 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'login_required',
       title: 'Login required',
       objective: 'Pause for human login before continuing the workflow.',
-      allowedNextPhases: ['entering_application', 'filling_application', 'blocked'],
+      allowedNextPhases: ['entering_application', 'filling_application', 'direct_submit_review', 'blocked'],
       requiredEvidenceKinds: ['page'],
       humanHandoffRequired: true,
     },
@@ -93,7 +93,7 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'captcha_required',
       title: 'Captcha required',
       objective: 'Pause for human verification before continuing the workflow.',
-      allowedNextPhases: ['entering_application', 'filling_application', 'blocked'],
+      allowedNextPhases: ['entering_application', 'filling_application', 'direct_submit_review', 'blocked'],
       requiredEvidenceKinds: ['page'],
       humanHandoffRequired: true,
     },
@@ -102,7 +102,7 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'editing_resume',
       title: 'Editing resume',
       objective: 'Prepare or upload resume information needed by the application.',
-      allowedNextPhases: ['filling_application', 'reviewing', 'blocked'],
+      allowedNextPhases: ['filling_application', 'reviewing', 'direct_submit_review', 'blocked'],
       requiredEvidenceKinds: ['form', 'tool_result'],
     },
     {
@@ -110,7 +110,7 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'filling_application',
       title: 'Filling application',
       objective: 'Fill required application fields while respecting permission gates.',
-      allowedNextPhases: ['editing_resume', 'reviewing', 'login_required', 'captcha_required', 'blocked'],
+      allowedNextPhases: ['editing_resume', 'reviewing', 'direct_submit_review', 'login_required', 'captcha_required', 'blocked'],
       requiredEvidenceKinds: ['form', 'tool_result'],
     },
     {
@@ -118,8 +118,17 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
       phase: 'reviewing',
       title: 'Reviewing',
       objective: 'Review filled application data and detect final submit controls.',
-      allowedNextPhases: ['filling_application', 'ready_for_final_submit', 'blocked'],
+      allowedNextPhases: ['filling_application', 'direct_submit_review', 'ready_for_final_submit', 'blocked'],
       requiredEvidenceKinds: ['form'],
+    },
+    {
+      id: 'direct_submit_review',
+      phase: 'direct_submit_review',
+      title: 'Direct submit review',
+      objective: 'Stop on online-resume/direct-submit pages that have no fillable fields before final submission.',
+      allowedNextPhases: ['ready_for_final_submit', 'done', 'blocked'],
+      requiredEvidenceKinds: ['page', 'form', 'policy'],
+      humanHandoffRequired: true,
     },
     {
       id: 'ready_for_final_submit',
@@ -149,6 +158,14 @@ export const jobApplicationWorkflowDefinition: WorkflowDefinition<WorkflowPhase>
     },
   ],
   completionCriteria: [
+    {
+      id: 'direct-submit-review-requires-page-form-and-policy-evidence',
+      kind: 'evidence_required',
+      description: 'Direct-submit review must be backed by page/form evidence and a final-submit policy evidence item.',
+      phase: 'direct_submit_review',
+      evidenceKinds: ['page', 'form', 'policy'],
+      required: true,
+    },
     {
       id: 'ready-for-final-submit-requires-form-and-policy-evidence',
       kind: 'evidence_required',

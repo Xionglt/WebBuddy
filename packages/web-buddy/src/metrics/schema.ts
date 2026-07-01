@@ -15,6 +15,17 @@ export interface PolicyMetrics {
   blockedReasonCounts: Record<string, number>
 }
 
+export interface PermissionMetrics {
+  decisions: number
+  allows: number
+  asks: number
+  denies: number
+  autoAllows: number
+  modeCounts: Record<string, number>
+  gateKindCounts: Record<string, number>
+  ruleIdCounts: Record<string, number>
+}
+
 export interface RunMetrics {
   schemaVersion: 'run-metrics/v1'
   generatedAt: string
@@ -57,6 +68,7 @@ export interface RunMetrics {
   promptBytes: number
   failureCategory: FailureCategory
   policy: PolicyMetrics
+  permission: PermissionMetrics
   warnings: string[]
 }
 
@@ -112,6 +124,7 @@ export function emptyRunMetrics(input: {
     promptBytes: 0,
     failureCategory: 'unknown',
     policy: emptyPolicyMetrics(),
+    permission: emptyPermissionMetrics(),
     warnings: input.warnings ? [...input.warnings] : [],
   }
 }
@@ -126,5 +139,18 @@ export function emptyPolicyMetrics(): PolicyMetrics {
     gateKindCounts: {},
     policyCodeCounts: {},
     blockedReasonCounts: {},
+  }
+}
+
+export function emptyPermissionMetrics(): PermissionMetrics {
+  return {
+    decisions: 0,
+    allows: 0,
+    asks: 0,
+    denies: 0,
+    autoAllows: 0,
+    modeCounts: {},
+    gateKindCounts: {},
+    ruleIdCounts: {},
   }
 }

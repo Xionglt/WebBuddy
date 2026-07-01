@@ -1,4 +1,5 @@
 import type { GateKind } from '../sdk/human.js'
+import type { RiskLevel } from '../sdk/trace.js'
 import type { WorkflowPhase } from '../workflow/workflow-state.js'
 import type { PolicyAction, PolicyEngineDecision, PolicyRiskLevel } from './policy-engine.js'
 
@@ -8,6 +9,7 @@ export interface PolicyAuditEvent {
   sessionId: string
   step: number
   toolName: string
+  risk?: RiskLevel
   action: PolicyAction
   riskLevel: PolicyRiskLevel
   gateKind?: GateKind
@@ -22,6 +24,7 @@ export function createPolicyAuditEvent(input: {
   sessionId: string
   step: number
   toolName: string
+  risk?: RiskLevel
   decision: PolicyEngineDecision
   at?: string
 }): PolicyAuditEvent {
@@ -32,6 +35,7 @@ export function createPolicyAuditEvent(input: {
     sessionId: input.sessionId,
     step: input.step,
     toolName: input.toolName,
+    ...(input.risk ? { risk: input.risk } : {}),
     action: decision.action,
     riskLevel: decision.riskLevel,
     policyCode: decision.policyCode,

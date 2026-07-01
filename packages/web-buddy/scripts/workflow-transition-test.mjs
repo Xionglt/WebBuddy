@@ -59,6 +59,29 @@ const reviewing = transitionWorkflowState({
 })
 assert.equal(reviewing.state.phase, 'reviewing')
 
+const directSubmitReview = transitionWorkflowState({
+  previous: entering.state,
+  currentUrl: 'https://example.test/apply/direct',
+  page: page({
+    url: 'https://example.test/apply/direct',
+    title: 'Direct apply',
+    textSummary: '我已阅读并同意申请工作需知。投递简历',
+    inputCount: 1,
+    buttonCount: 1,
+  }),
+  form: form({
+    url: 'https://example.test/apply/direct',
+    fields: [field(0, '我已阅读并同意申请工作需知', '', false, 'checkbox')],
+    missingRequired: [],
+    filledFields: [],
+    submitCandidates: [{ tag: 'button', type: 'submit', text: '投递简历', risk: 'L3', visible: true }],
+  }),
+  now,
+})
+assert.equal(directSubmitReview.state.phase, 'direct_submit_review')
+assert.equal(directSubmitReview.state.humanHandoffRequired, true)
+assert.match(directSubmitReview.state.blocker, /final submit/i)
+
 const ready = transitionWorkflowState({
   previous: reviewing.state,
   policyDecision: { action: 'gate', riskLevel: 'high', reason: 'final submit', gateKind: 'final_submit' },
@@ -115,12 +138,12 @@ function form(overrides = {}) {
   }
 }
 
-function field(index, label, value, required) {
+function field(index, label, value, required, type = 'text') {
   return {
     index,
     label,
     tag: 'input',
-    type: 'text',
+    type,
     value,
     required,
     filled: Boolean(value),
