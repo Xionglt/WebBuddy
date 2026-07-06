@@ -200,9 +200,20 @@ const raw = engine.evaluate({
   risk: 'L3',
   safetyMode: 'raw',
 })
-assert.equal(raw.action, 'auto_confirm')
+assert.equal(raw.action, 'gate')
 assert.equal(raw.gateKind, 'final_submit')
-assert.equal(raw.policyCode, 'policy.raw.auto_confirm')
+assert.equal(raw.policyCode, 'policy.high_risk.gate')
+
+const rawHighRiskClick = engine.evaluate({
+  toolName: 'browser_click',
+  args: { ref: 'apply-now' },
+  refLabel: 'Apply now',
+  risk: 'L3',
+  safetyMode: 'raw',
+})
+assert.equal(rawHighRiskClick.action, 'gate')
+assert.equal(rawHighRiskClick.actionIntent, 'apply_entry')
+assert.equal(rawHighRiskClick.policyCode, 'policy.workflow.apply_entry')
 
 const stale = engine.evaluate({
   toolName: 'browser_click_text',

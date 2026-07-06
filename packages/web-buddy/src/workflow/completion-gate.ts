@@ -12,6 +12,7 @@ import type { WorkflowPhase, WorkflowState } from './workflow-state.js'
 
 export type CompletionGateAction = 'allow' | 'block' | 'ignore' | 'reject'
 export type CompletionGateRecommendedStatus = 'completed' | 'blocked' | 'unchanged'
+export type WebBuddyTaskType = 'explore' | 'apply_entry' | 'fill_form' | 'final_review'
 
 export interface CompletionGateInput {
   done: boolean
@@ -25,6 +26,7 @@ export interface CompletionGateInput {
   fillLedgerSummary?: FillLedgerSummary
   requiresCurrentResumeUpload?: boolean
   currentResumeUploaded?: boolean
+  taskType?: WebBuddyTaskType
   source?: 'agent_done' | 'finalize' | 'manual' | (string & {})
 }
 
@@ -56,6 +58,7 @@ export class CompletionGate {
   evaluate(input: CompletionGateInput): CompletionGateDecision {
     const evaluation = input.workflowEvaluation
     const workflowPhase = evaluation?.state.phase ?? input.workflowState?.phase
+    const taskType = input.taskType ?? 'fill_form'
     const missingCriteria = copyMissingCriteria(evaluation?.missingCriteria ?? [])
     const blockers = copyBlockers(evaluation?.blockers ?? [])
     const evidenceIds = evidenceIdsFor(evaluation, missingCriteria, blockers)
@@ -115,6 +118,18 @@ export class CompletionGate {
     }
 
     if (!evaluation) {
+      if (isExploreSummaryCompletion(input)) {
+        return decision({
+          action: 'allow',
+          recommendedStatus: 'completed',
+          reason: completionReason('Completion gate allowed explore completion because the agent produced a candidate summary.', input),
+          missingCriteria,
+          blockers,
+          workflowPhase,
+          evidenceIds,
+        })
+      }
+
       return decision({
         action: 'ignore',
         recommendedStatus: 'unchanged',
@@ -184,6 +199,30 @@ export class CompletionGate {
       })
     }
 
+    if (taskType === 'final_review') {
+      return decision({
+        action: 'block',
+        recommendedStatus: 'blocked',
+        reason: completionReason('Completion gate blocked final_review completion because final submit requires human takeover and must not be auto-executed.', input),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
+    if (isExploreSummaryCompletion(input)) {
+      return decision({
+        action: 'allow',
+        recommendedStatus: 'completed',
+        reason: completionReason('Completion gate allowed explore completion because the agent produced a candidate summary.', input),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
     const blockingMissingCriteria = missingCriteria.filter(isRequiredOrCriticalMissingCriterion)
     if (blockingMissingCriteria.length > 0) {
       return decision({
@@ -220,6 +259,21 @@ export class CompletionGate {
         action: 'allow',
         recommendedStatus: 'completed',
         reason: completionReason('Completion gate allowed completion because workflow phase is done and no criteria are missing.', input),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
+    if (isExplorationCompletion(taskType, workflowPhase, blockers, missingCriteria)) {
+      return decision({
+        action: 'allow',
+        recommendedStatus: 'completed',
+        reason: completionReason(
+          `Completion gate allowed ${taskType} completion because the task reached workflow phase ${workflowPhase ?? 'unknown'} without fill-form-only missing criteria or final-submit blockers.`,
+          input,
+        ),
         missingCriteria,
         blockers,
         workflowPhase,
@@ -264,8 +318,12 @@ function actionableBlockedDoneReason(
 ): string | undefined {
   if (!input.done || !input.blocked) return undefined
   if (isFinalSubmitBoundary(workflowPhase, blockers)) return undefined
+  if (isExploratoryBlockedHandoff(input.taskType ?? 'fill_form', workflowPhase)) return undefined
 
   const facts = actionablePageFacts(input, workflowPhase)
+  if ((input.taskType ?? 'fill_form') === 'apply_entry' && facts.every((fact) => fact.code === 'UPLOAD_ENTRY_PRESENT')) {
+    return undefined
+  }
   if (facts.length === 0) return undefined
 
   if (facts.some((fact) => fact.code === 'ALIBABA_APPLICATION_CONFIRMATION_STILL_OPEN')) {
@@ -282,6 +340,18 @@ function actionableBlockedDoneReason(
     `Completion gate rejected agent_done(blocked=true) because the page still has actionable work: ${facts.map((fact) => fact.message).join('; ')}.`,
     'Return this reason to the model and continue operating instead of finalizing the run as blocked.',
   ].join(' ')
+}
+
+function isExploratoryBlockedHandoff(
+  taskType: WebBuddyTaskType,
+  workflowPhase: WorkflowPhase | string | undefined,
+): boolean {
+  if (taskType !== 'explore' && taskType !== 'apply_entry') return false
+  return workflowPhase === 'job_detail' ||
+    workflowPhase === 'entering_application' ||
+    workflowPhase === 'login_required' ||
+    workflowPhase === 'captcha_required' ||
+    workflowPhase === 'blocked'
 }
 
 interface ActionablePageFact {
@@ -454,6 +524,7 @@ function fillCompletenessCriteria(
   input: CompletionGateInput,
   workflowPhase: WorkflowPhase | string | undefined,
 ): WorkflowCriterionMissing[] {
+  if (input.taskType && input.taskType !== 'fill_form') return []
   if (isFinalSubmitBoundary(workflowPhase, input.workflowEvaluation?.blockers ?? [])) return []
   const criteria: WorkflowCriterionMissing[] = []
   const formCoverage = input.formCoverage ?? input.form?.formCoverage ?? input.workflowState?.formCoverage
@@ -504,6 +575,28 @@ function fillCompletenessCriteria(
   }
 
   return criteria
+}
+
+function isExplorationCompletion(
+  taskType: WebBuddyTaskType,
+  workflowPhase: WorkflowPhase | string | undefined,
+  blockers: WorkflowBlocker[],
+  missingCriteria: WorkflowCriterionMissing[],
+): boolean {
+  if (taskType !== 'explore' && taskType !== 'apply_entry') return false
+  if (isFinalSubmitBoundary(workflowPhase, blockers)) return false
+  if (missingCriteria.some(isRequiredOrCriticalMissingCriterion)) return false
+  return workflowPhase === 'job_detail' ||
+    workflowPhase === 'entering_application' ||
+    workflowPhase === 'login_required' ||
+    workflowPhase === 'captcha_required' ||
+    workflowPhase === 'blocked'
+}
+
+function isExploreSummaryCompletion(input: CompletionGateInput): boolean {
+  if (input.taskType !== 'explore') return false
+  if (isFinalSubmitBoundary(input.workflowEvaluation?.state.phase ?? input.workflowState?.phase, input.workflowEvaluation?.blockers ?? [])) return false
+  return typeof input.summary === 'string' && /\S/.test(input.summary)
 }
 
 function fillCriterion(id: string, description: string, reason: string): WorkflowCriterionMissing {

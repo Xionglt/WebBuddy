@@ -79,15 +79,12 @@ export class PolicyEngine {
     }
 
     const gateKind = gateKindForActionIntent(actionIntent)
-    const rawAutoConfirm = input.safetyMode === 'raw' && isAutoConfirmClick(input.toolName)
-    const rule = rawAutoConfirm
-      ? rawAutoConfirmRule()
-      : freshnessCue
-        ? staleHighRiskRule(freshnessCue)
-        : workflowRuleFor(actionIntent, gateKind, workflowPhase) ?? highRiskGateRule(gateKind)
+    const rule = freshnessCue
+      ? staleHighRiskRule(freshnessCue)
+      : workflowRuleFor(actionIntent, gateKind, workflowPhase) ?? highRiskGateRule(gateKind)
 
     return buildDecision({
-      action: rawAutoConfirm ? 'auto_confirm' : freshnessCue ? 'block' : 'gate',
+      action: freshnessCue ? 'block' : 'gate',
       riskLevel,
       actionIntent,
       gateKind,
@@ -256,15 +253,6 @@ function highRiskGateRule(gateKind: GateKind): DecisionRule {
   }
 }
 
-function rawAutoConfirmRule(): DecisionRule {
-  return {
-    policyCode: 'policy.raw.auto_confirm',
-    ruleId: 'policy.raw.auto_confirm.v1',
-    reason: 'Raw safety mode auto-confirms high-risk click actions for compatibility.',
-    tags: ['raw', 'auto_confirm'],
-  }
-}
-
 function staleHighRiskRule(reason: string): DecisionRule {
   return {
     policyCode: 'policy.freshness.high_risk_stale',
@@ -276,10 +264,6 @@ function staleHighRiskRule(reason: string): DecisionRule {
 
 function workflowPhaseFor(input: Pick<PolicyEngineInput, 'workflowState' | 'workflowPhase'>): WorkflowPhase | undefined {
   return input.workflowPhase ?? input.workflowState?.phase
-}
-
-function isAutoConfirmClick(toolName: string): boolean {
-  return toolName === 'browser_click' || toolName === 'browser_click_text'
 }
 
 function reasonForGate(gateKind: GateKind): string {

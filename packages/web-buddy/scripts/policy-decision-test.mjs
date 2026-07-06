@@ -83,11 +83,24 @@ const rawSubmit = decideToolPolicy({
   risk: 'L3',
   safetyMode: 'raw',
 })
-assert.equal(rawSubmit.action, 'auto_confirm')
+assert.equal(rawSubmit.action, 'gate')
 assert.equal(rawSubmit.actionIntent, 'final_submit')
 assert.equal(rawSubmit.gateKind, 'final_submit')
 assert.equal(rawSubmit.requiresFreshContext, true)
-assert.equal(rawSubmit.policyCode, 'policy.raw.auto_confirm')
+assert.equal(rawSubmit.policyCode, 'policy.high_risk.gate')
+
+const rawHighRiskClick = decideToolPolicy({
+  toolName: 'browser_click',
+  args: { ref: 'job-apply' },
+  refLabel: 'Apply now',
+  risk: 'L4',
+  safetyMode: 'raw',
+  workflowPhase: 'job_detail',
+})
+assert.equal(rawHighRiskClick.action, 'gate')
+assert.equal(rawHighRiskClick.riskLevel, 'critical')
+assert.equal(rawHighRiskClick.actionIntent, 'apply_entry')
+assert.equal(rawHighRiskClick.policyCode, 'policy.workflow.apply_entry')
 
 const staleSubmit = decideToolPolicy({
   toolName: 'browser_click_text',

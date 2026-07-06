@@ -126,8 +126,64 @@ assert.equal(policyBlock.policyCode, 'policy.freshness.high_risk_stale')
 assert.equal(policyBlock.ruleId, 'policy.freshness.high_risk_stale.v1')
 assert.equal(policyBlock.requiresFreshContext, true)
 
+const rawTrustedHighRiskGate = new PermissionEngine({
+  now: () => fixedDate,
+  permissionMode: 'trusted',
+}).evaluate(permissionRequest({
+  requestId: 'perm-raw-trusted-high-risk',
+  toolName: 'browser_click_text',
+  args: { text: 'Apply now' },
+  risk: 'L3',
+  riskLevel: 'high',
+  policyAction: 'gate',
+  gateKind: 'high_risk_action',
+  policyCode: 'policy.workflow.apply_entry',
+  ruleId: 'policy.workflow.apply_entry.v1',
+  reason: 'Apply-entry action requires a high-risk gate but is not a final-submit action.',
+  auditTags: ['action:gate', 'risk:high', 'safety:raw'],
+}))
+assert.equal(rawTrustedHighRiskGate.action, 'ask')
+assert.equal(rawTrustedHighRiskGate.gateKind, 'high_risk_action')
+assert(!rawTrustedHighRiskGate.auditTags.includes('auto_allow:permission_mode'))
+
 const rawAutoConfirm = engine.evaluate(permissionRequest({
   requestId: 'perm-raw-auto-confirm',
+  toolName: 'browser_click_text',
+  args: { text: 'Open details' },
+  risk: 'L3',
+  riskLevel: 'high',
+  policyAction: 'auto_confirm',
+  gateKind: 'high_risk_action',
+  policyCode: 'policy.raw.auto_confirm',
+  ruleId: 'policy.raw.auto_confirm.v1',
+  reason: 'Raw safety mode auto-confirms high-risk click actions for compatibility.',
+}))
+assert.equal(rawAutoConfirm.action, 'allow')
+assert.equal(rawAutoConfirm.source, 'policy')
+assert.equal(rawAutoConfirm.gateKind, 'high_risk_action')
+assert(rawAutoConfirm.auditTags.includes('compat:auto_confirm'))
+
+const finalSubmitWithAllowFlag = new PermissionEngine({
+  now: () => fixedDate,
+  permissionMode: 'autopilot',
+  allowFinalSubmit: true,
+}).evaluate(permissionRequest({
+  requestId: 'perm-final-submit-allow-flag',
+  toolName: 'browser_click_text',
+  args: { text: 'Submit application' },
+  risk: 'L4',
+  riskLevel: 'critical',
+  policyAction: 'gate',
+  gateKind: 'final_submit',
+  policyCode: 'policy.workflow.final_submit',
+  ruleId: 'policy.workflow.final_submit.v1',
+  reason: 'Submit-like action in review phase requires the final-submit safety gate.',
+}))
+assert.equal(finalSubmitWithAllowFlag.action, 'ask')
+assert.equal(finalSubmitWithAllowFlag.gateKind, 'final_submit')
+
+const rawAutoConfirmFinalSubmit = engine.evaluate(permissionRequest({
+  requestId: 'perm-raw-auto-confirm-final-submit',
   toolName: 'browser_click_text',
   args: { text: 'Submit application' },
   risk: 'L3',
@@ -136,12 +192,10 @@ const rawAutoConfirm = engine.evaluate(permissionRequest({
   gateKind: 'final_submit',
   policyCode: 'policy.raw.auto_confirm',
   ruleId: 'policy.raw.auto_confirm.v1',
-  reason: 'Raw safety mode auto-confirms high-risk click actions for compatibility.',
+  reason: 'Legacy raw auto-confirm request.',
 }))
-assert.equal(rawAutoConfirm.action, 'allow')
-assert.equal(rawAutoConfirm.source, 'policy')
-assert.equal(rawAutoConfirm.gateKind, 'final_submit')
-assert(rawAutoConfirm.auditTags.includes('compat:auto_confirm'))
+assert.equal(rawAutoConfirmFinalSubmit.action, 'ask')
+assert.equal(rawAutoConfirmFinalSubmit.gateKind, 'final_submit')
 
 for (const field of ['source', 'risk', 'reason', 'rememberable', 'gateKind']) {
   assert(field in policyGate, `permission decision should include ${field}`)
@@ -162,6 +216,7 @@ function permissionRequest({
   ruleId,
   reason,
   requiresFreshContext,
+  auditTags,
 }) {
   return {
     schemaVersion: 'permission-request/v1',
@@ -189,7 +244,7 @@ function permissionRequest({
       policyCode,
       ruleId,
       reason,
-      auditTags: [`action:${policyAction}`, `risk:${riskLevel}`],
+      auditTags: auditTags ?? [`action:${policyAction}`, `risk:${riskLevel}`],
       ...(requiresFreshContext ? { requiresFreshContext } : {}),
     },
   }

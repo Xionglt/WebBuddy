@@ -47,6 +47,7 @@ function rawAutoConfirmRule(): PermissionRule {
     id: 'permission.raw_auto_confirm.allow.v1',
     evaluate(request, context) {
       if (request.policy.action !== 'auto_confirm') return undefined
+      if (isSensitiveGate(gateKindFor(request))) return undefined
       return buildDecision(request, context, {
         action: 'allow',
         source: 'policy',
@@ -63,20 +64,6 @@ function finalSubmitRule(): PermissionRule {
     id: 'permission.final_submit.ask.v1',
     evaluate(request, context) {
       if (gateKindFor(request) !== 'final_submit') return undefined
-      if (context.permissionMode === 'autopilot' && context.allowFinalSubmit) {
-        return buildDecision(request, context, {
-          action: 'allow',
-          source: 'config_rule',
-          ruleId: 'permission.mode.autopilot.final_submit.allow.v1',
-          reason: 'Final-submit action was explicitly allowed by allowFinalSubmit in autopilot mode.',
-          gateKind: 'final_submit',
-          extraAuditTags: [
-            'permission:auto_allow',
-            'auto_allow:permission_mode',
-            'allow_final_submit:true',
-          ],
-        })
-      }
       return buildDecision(request, context, {
         action: 'ask',
         source: 'policy',
@@ -275,6 +262,7 @@ function isPermissionModeAutoAllowable(request: PermissionRequest, context: Perm
   if (request.subject.kind === 'workflow_handoff') return false
   if (!isHighRisk(request)) return false
   if (request.risk === 'L4' || request.riskLevel === 'critical') return false
+  if (request.policy.auditTags.includes('safety:raw')) return false
 
   const gateKind = gateKindFor(request)
   if (isSensitiveGate(gateKind)) return false

@@ -21,6 +21,17 @@ const blockedRuntime = CompletionGate.evaluate({
 assert.equal(blockedRuntime.action, 'block')
 assert.equal(blockedRuntime.recommendedStatus, 'blocked')
 
+const blockedExploreAtLogin = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'login_required' }),
+  taskType: 'explore',
+  source: 'agent_done',
+})
+assert.equal(blockedExploreAtLogin.action, 'block')
+assert.equal(blockedExploreAtLogin.recommendedStatus, 'blocked')
+assert.equal(blockedExploreAtLogin.workflowPhase, 'login_required')
+
 const rejectedAlibabaConfirmation = CompletionGate.evaluate({
   done: true,
   blocked: true,
@@ -44,6 +55,30 @@ assert.match(rejectedAlibabaConfirmation.reason, /ALIBABA_APPLICATION_CONFIRMATI
 assert.match(rejectedAlibabaConfirmation.reason, /投递/)
 assert.match(rejectedAlibabaConfirmation.reason, /取消/)
 
+const blockedExploreAtApplyEntry = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'entering_application' }),
+  page: pageState({
+    url: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=fixture',
+    pageType: 'detail',
+    textSummary: '温馨提示：你暂未申请职位，本月能申请5个职位，请慎重选择！ 取消 投递',
+  }),
+  form: formState({
+    submitCandidates: [
+      submitCandidate('取消'),
+      submitCandidate('投递'),
+    ],
+  }),
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: false,
+  taskType: 'explore',
+  source: 'agent_done',
+})
+assert.equal(blockedExploreAtApplyEntry.action, 'block')
+assert.equal(blockedExploreAtApplyEntry.recommendedStatus, 'blocked')
+assert.match(blockedExploreAtApplyEntry.reason, /runtime already marked the attempt as blocked/)
+
 const rejectedUploadEntry = CompletionGate.evaluate({
   done: true,
   blocked: true,
@@ -56,6 +91,28 @@ const rejectedUploadEntry = CompletionGate.evaluate({
 })
 assert.equal(rejectedUploadEntry.action, 'reject')
 assert.match(rejectedUploadEntry.reason, /upload entry/i)
+
+const blockedApplyEntryAtUpload = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({
+    phase: 'filling_application',
+    blockers: [{
+      kind: 'human_handoff',
+      gateKind: 'upload_resume',
+      message: 'Resume upload requires human takeover.',
+      evidenceIds: ['ev-policy-upload'],
+    }],
+  }),
+  page: pageState({ pageType: 'form', textSummary: 'Application form 上传附件简历' }),
+  form: formState({
+    uploadHints: [{ tag: 'input', type: 'file', text: '上传附件简历', visible: true, accept: '.pdf' }],
+  }),
+  taskType: 'apply_entry',
+  source: 'agent_done',
+})
+assert.equal(blockedApplyEntryAtUpload.action, 'block')
+assert.equal(blockedApplyEntryAtUpload.recommendedStatus, 'blocked')
 
 const rejectedMissingRequired = CompletionGate.evaluate({
   done: true,
@@ -229,6 +286,61 @@ const rejectedResumeNotUploaded = CompletionGate.evaluate({
 })
 assert.equal(rejectedResumeNotUploaded.action, 'reject')
 assert.match(rejectedResumeNotUploaded.reason, /fill_current_resume_uploaded/)
+
+const allowedExploreDoesNotRequireResumeUpload = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'job_detail' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: false,
+  taskType: 'explore',
+  source: 'agent_done',
+})
+assert.equal(allowedExploreDoesNotRequireResumeUpload.action, 'allow')
+assert.equal(allowedExploreDoesNotRequireResumeUpload.recommendedStatus, 'completed')
+assert.match(allowedExploreDoesNotRequireResumeUpload.reason, /allowed explore completion/)
+
+const allowedExploreSummaryWithMissingWorkflowEvidence = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({
+    phase: 'observing',
+    missingCriteria: [missingUserConfirmCriterion()],
+  }),
+  summary: 'Candidate summary: ATH-AI Agent role looks relevant; login is required before applying.',
+  taskType: 'explore',
+  source: 'agent_done',
+})
+assert.equal(allowedExploreSummaryWithMissingWorkflowEvidence.action, 'allow')
+assert.equal(allowedExploreSummaryWithMissingWorkflowEvidence.recommendedStatus, 'completed')
+assert.match(allowedExploreSummaryWithMissingWorkflowEvidence.reason, /candidate summary/i)
+
+const rejectedFillFormStillRequiresResumeUpload = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: false,
+  taskType: 'fill_form',
+  source: 'agent_done',
+})
+assert.equal(rejectedFillFormStillRequiresResumeUpload.action, 'reject')
+assert.match(rejectedFillFormStillRequiresResumeUpload.reason, /fill_current_resume_uploaded/)
+
+const blockedFinalReviewRequiresHumanTakeover = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  taskType: 'final_review',
+  source: 'agent_done',
+})
+assert.equal(blockedFinalReviewRequiresHumanTakeover.action, 'block')
+assert.equal(blockedFinalReviewRequiresHumanTakeover.recommendedStatus, 'blocked')
+assert.match(blockedFinalReviewRequiresHumanTakeover.reason, /human takeover/i)
 
 const allowedDone = CompletionGate.evaluate({
   done: true,
