@@ -181,6 +181,33 @@ export const TOOL_CATALOG: ToolDef[] = [
     metadata: { produces: ['ResumeProfileV2'], readOnly: true },
   },
   {
+    name: 'job_match_candidates',
+    description:
+      'Read-only candidate discovery for job lists. Scans the current visible/list page, optionally across list pages, ranks job candidates against the resume, and returns detail URLs, reasons, confidence, missing skill gaps, and non-skill context. This tool never decides task completion and never enters an application flow.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        maxPages: {
+          type: 'number',
+          description: 'Maximum list pages/batches to scan when the site supports pagination. Default: 1.',
+        },
+        maxJobs: {
+          type: 'number',
+          description: 'Maximum unique jobs to scan. Default: 50.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum ranked candidates to return. Default: 10.',
+        },
+      },
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { produces: ['JobMatchCandidates'], readOnly: true },
+  },
+  {
     name: 'plan_form_fill',
     description:
       'Create or refresh a deterministic FieldPlan for the current form using the full resume profile and saved user answers. Read-only planning tool; use before browser_set_field on application forms.',

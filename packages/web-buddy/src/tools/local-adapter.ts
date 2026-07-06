@@ -23,6 +23,9 @@ import { sessionManager } from '../session/manager.js'
 import type { HumanInput } from '../sdk/human.js'
 import type { LlmGateway } from '../sdk/llm.js'
 import type { ToolSchema } from '../sdk/llm.js'
+import { scrapeJobList } from '../sdk/alibaba.js'
+import { matchJobsCoarse, type JobPosting, type MatchScore } from '../sdk/matcher.js'
+import type { ResumeProfile } from '../sdk/resume.js'
 import type { RiskLevel, TraceRecorder } from '../sdk/trace.js'
 import { pageView } from '../runtime/local/page-view.js'
 import { listLocalToolDefs } from './catalog.js'
@@ -152,6 +155,54 @@ const localHandlers: Record<string, LocalHandler> = {
     const result = ctx.profileStore.query(section, typeof args.query === 'string' ? args.query : undefined)
     return {
       observation: `resume_query(${section}) returned:\n${JSON.stringify(result.data, null, 2)}`,
+      data: result,
+      pageChanged: false,
+    }
+  },
+
+  async job_match_candidates(args, ctx) {
+    if (!ctx.profileStore) {
+      return {
+        observation: 'FAILED (NO_PROFILE_STORE): job_match_candidates requires parsed resume context.',
+        pageChanged: false,
+      }
+    }
+    const page = sessionManager.get(ctx.sessionId)?.page
+    if (!page) {
+      return {
+        observation: 'FAILED (NO_PAGE): job_match_candidates requires an active browser page.',
+        pageChanged: false,
+      }
+    }
+
+    const profile = profileFromStore(ctx.profileStore)
+    const currentUrl = page.url()
+    const maxPages = positiveInt(args.maxPages, 1)
+    const maxJobs = positiveInt(args.maxJobs, 50)
+    const limit = positiveInt(args.limit, 10)
+    const isAlibabaList = /talent-holding\.alibaba\.com\/off-campus\/position-list/i.test(currentUrl)
+    const jobs = isAlibabaList
+      ? (await scrapeJobList(ctx.sessionId, currentUrl, ctx.trace, { maxPages, maxJobs })).jobs
+      : await extractVisibleJobCandidates(ctx.sessionId, maxJobs)
+
+    const matches = matchJobsCoarse(profile, jobs).slice(0, limit)
+    const result = {
+      schemaVersion: 'job-match-candidates/v1',
+      sourceUrl: page.url(),
+      scanned: jobs.length,
+      returned: matches.length,
+      note: 'Candidate discovery only. The autonomous agent must choose any next action; this result does not satisfy completion and does not authorize applying.',
+      candidates: matches.map(serializeCandidateMatch),
+    }
+    ctx.trace.record({
+      phase: 'tool:job_match_candidates',
+      action: `Ranked ${matches.length}/${jobs.length} job candidates from ${isAlibabaList ? 'Alibaba list' : 'visible page'} without entering application flow.`,
+      url: result.sourceUrl,
+      status: jobs.length ? 'ok' : 'warn',
+      observation: matches.map((match, index) => `${index + 1}. ${match.job.title} — ${match.score.toFixed(2)} — ${match.reason}`).join('\n') || 'No candidates found.',
+    })
+    return {
+      observation: `job_match_candidates returned ${matches.length}/${jobs.length} ranked candidates:\n${JSON.stringify(result, null, 2)}`,
       data: result,
       pageChanged: false,
     }
@@ -393,6 +444,143 @@ const localHandlers: Record<string, LocalHandler> = {
   async agent_done(args) {
     return { observation: `agent_done: ${args.summary}`, done: true, data: { blocked: Boolean(args.blocked) } }
   },
+}
+
+function positiveInt(value: unknown, fallback: number): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+}
+
+function profileFromStore(profileStore: ProfileStore): ResumeProfile {
+  const all = profileStore.query('all').data as Record<string, unknown>
+  const skills = fieldValues(all.skills)
+  const keywords = fieldValues(all.keywords)
+  const targetRoles = fieldValues(all.targetRoles)
+  const contact = all.contact as Record<string, unknown> | undefined
+  const summary = all.summary as Record<string, unknown> | undefined
+  return {
+    name: fieldValue(contact?.name),
+    email: fieldValue(contact?.email),
+    phone: fieldValue(contact?.phone),
+    location: fieldValue(contact?.location),
+    summary: fieldValue(summary?.summary),
+    skills,
+    keywords: [...new Set([...keywords, ...targetRoles])],
+    experience: Array.isArray(all.experience) ? all.experience as ResumeProfile['experience'] : fieldArray(all.experience),
+    education: Array.isArray(all.education) ? all.education as ResumeProfile['education'] : fieldArray(all.education),
+    source: 'json',
+  }
+}
+
+function fieldArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[]
+  const nested = (value as { value?: unknown } | undefined)?.value
+  return Array.isArray(nested) ? nested as T[] : []
+}
+
+function fieldValues(value: unknown): string[] {
+  return fieldArray<unknown>(value)
+    .map((item) => typeof item === 'string' ? item : String(item ?? ''))
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function fieldValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value || undefined
+  const nested = (value as { value?: unknown } | undefined)?.value
+  return typeof nested === 'string' && nested ? nested : undefined
+}
+
+async function extractVisibleJobCandidates(sessionId: string, maxJobs: number): Promise<JobPosting[]> {
+  const page = sessionManager.get(sessionId)?.page
+  if (!page) return []
+  const raw = await page.evaluate((maxJobs) => {
+    const clean = (value: string | null | undefined): string => (value || '').replace(/\s+/g, ' ').trim()
+    const absolute = (value: string | null | undefined): string | undefined => {
+      if (!value) return undefined
+      try { return new URL(value, location.href).toString() } catch { return undefined }
+    }
+    const textOf = (root: Element, selector: string): string => clean(root.querySelector(selector)?.textContent)
+    const roots = new Set<Element>()
+    for (const selector of [
+      '[data-job-card]',
+      '[data-position-id]',
+      '[data-job-id]',
+      'article.job-card',
+      '.job-card',
+      '.position-card',
+      '.position-item',
+      '.job-list-item',
+      '.job-item',
+      'article',
+      'a[href*="position-detail"]',
+      'a[href*="positionId"]',
+    ]) {
+      for (const el of Array.from(document.querySelectorAll(selector)).slice(0, maxJobs * 2)) {
+        roots.add(el.closest('[data-job-card],[data-position-id],[data-job-id],article.job-card,.job-card,.position-card,.position-item,.job-list-item,.job-item,article') || el)
+      }
+    }
+    return Array.from(roots).slice(0, maxJobs).map((card, index) => {
+      const link = card.querySelector<HTMLAnchorElement>('a[href*="position-detail"],a[href*="positionId"],a[href]')
+      const title =
+        clean(card.getAttribute('data-title')) ||
+        textOf(card, '[data-job-title],.job-title,.position-title,h1,h2,h3,h4') ||
+        clean(link?.textContent) ||
+        clean(card.textContent).split(/\s+更新于|Updated/i)[0] ||
+        `job-${index + 1}`
+      const category = clean(card.getAttribute('data-category')) || textOf(card, '[data-category],.category')
+      const locationText = clean(card.getAttribute('data-location')) || textOf(card, '[data-location],.location')
+      const tags = [
+        clean(card.getAttribute('data-tags')),
+        clean(card.getAttribute('data-job-tags')),
+        textOf(card, '[data-job-tags],[data-tags]'),
+      ].filter(Boolean).join(' ')
+      const detailUrl =
+        absolute(card.getAttribute('data-detail-url')) ||
+        absolute(link?.getAttribute('href')) ||
+        undefined
+      return {
+        id: clean(card.getAttribute('data-job-id')) || clean(card.getAttribute('data-position-id')) || `visible-${index + 1}`,
+        title,
+        category: category || undefined,
+        location: locationText || undefined,
+        detailUrl,
+        searchText: [title, category, locationText, tags, clean(card.textContent)].filter(Boolean).join(' '),
+        tags: tags.split(/[,\s，、/]+/).map((tag) => tag.trim()).filter(Boolean),
+      }
+    }).filter((job) => job.title && !/筛选|清除|职位类别/.test(job.title))
+  }, maxJobs).catch(() => [])
+  return raw.map((job) => ({
+    ...job,
+    tags: [...new Set([...job.tags, ...tokenizeLocal(job.searchText)])],
+  }))
+}
+
+function tokenizeLocal(text: string): string[] {
+  const lower = text.toLowerCase()
+  return [
+    ...(lower.match(/[a-z][a-z0-9.+#-]{1,}/g) || []),
+    ...(lower.match(/[一-鿿]{2,}/g) || []),
+  ].map((token) => token.replace(/[.-]+$/, '')).filter(Boolean)
+}
+
+function serializeCandidateMatch(match: MatchScore) {
+  return {
+    id: match.job.id,
+    title: match.job.title,
+    score: Number(match.score.toFixed(4)),
+    confidence: Number(match.score.toFixed(4)),
+    reason: match.reason,
+    detailUrl: match.job.detailUrl,
+    applicationUrl: match.job.applicationUrl,
+    category: match.job.category,
+    location: match.job.location,
+    updated: match.job.updated,
+    matchedSkills: match.matchedSkills,
+    missingSkills: match.missingSkills,
+    context: match.context,
+    tagTaxonomy: match.tagTaxonomy,
+  }
 }
 
 export function createLocalTools(defs: CatalogToolDef[] = listLocalToolDefs()): LocalToolDef[] {

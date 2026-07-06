@@ -19,6 +19,26 @@ export interface JobPosting {
   searchText: string
   /** Tokenized requirement/tag keywords (lower-case). */
   tags: string[]
+  /** Classified tags so matcher context does not become fake skill gaps. */
+  tagTaxonomy?: JobTagTaxonomy
+}
+
+export type JobTagCategory =
+  | 'skill'
+  | 'location'
+  | 'business_unit'
+  | 'product'
+  | 'freshness'
+  | 'role_keyword'
+
+export type JobTagTaxonomy = Record<JobTagCategory, string[]>
+
+export interface MatchContext {
+  location: string[]
+  businessUnit: string[]
+  product: string[]
+  freshness: string[]
+  roleKeywords: string[]
 }
 
 export interface MatchScore {
@@ -31,6 +51,10 @@ export interface MatchScore {
   matchedSkills: string[]
   /** Skills the job asks for but the resume lacks. */
   missingSkills: string[]
+  /** Non-skill match context. This is preference/evidence, not a skill gap. */
+  context?: MatchContext
+  /** Classified job tags used by the scorer. */
+  tagTaxonomy?: JobTagTaxonomy
 }
 
 export const DEFAULT_MATCH_THRESHOLD = 0.45
@@ -97,6 +121,84 @@ const ROLE_TERMS = [
   'product', '产品', 'design', '设计', 'security', '安全',
 ]
 
+const KNOWN_SKILL_TERMS = new Set([
+  'llm', 'nlp', 'rag', 'aigc',
+  'node', 'nodejs', 'node.js', 'react', 'vue', 'angular', 'svelte',
+  'typescript', 'javascript', 'python', 'java', 'go', 'golang', 'rust', 'c++',
+  'fastapi', 'django', 'flask', 'spring', 'nextjs', 'next.js', 'nuxt',
+  'docker', 'kubernetes', 'k8s', 'playwright', 'selenium', 'mysql', 'postgresql',
+  'redis', 'mongodb', 'spark', 'hadoop', 'pytorch', 'tensorflow',
+  '机器学习', '深度学习', '大模型',
+])
+
+const LOCATION_TERMS = [
+  '杭州', '北京', '上海', '深圳', '广州', '成都', '武汉', '西安', '南京', '苏州',
+  'hangzhou', 'beijing', 'shanghai', 'shenzhen', 'guangzhou', 'chengdu',
+]
+
+const FRESHNESS_TERMS = new Set(['new', '最新', '新', '急招', 'hot'])
+
+const PRODUCT_TERMS = new Set(['qoder', 'qoderwake', 'vibe', 'tongyi', '通义', '钉钉', '淘宝', '天猫', '闲鱼', '夸克'])
+
+function emptyTaxonomy(): JobTagTaxonomy {
+  return {
+    skill: [],
+    location: [],
+    business_unit: [],
+    product: [],
+    freshness: [],
+    role_keyword: [],
+  }
+}
+
+function pushTag(taxonomy: JobTagTaxonomy, category: JobTagCategory, tag: string): void {
+  const normalized = normalizeSkill(tag.trim().toLowerCase())
+  if (!normalized || taxonomy[category].includes(normalized)) return
+  taxonomy[category].push(normalized)
+}
+
+function classifyTag(raw: string, job?: Pick<JobPosting, 'title' | 'category' | 'location'>): JobTagCategory {
+  const tag = raw.trim()
+  const lower = normalizeSkill(tag.toLowerCase())
+  const compact = lower.replace(/[\s/_-]+/g, '')
+  if (!tag) return 'role_keyword'
+  if (FRESHNESS_TERMS.has(lower)) return 'freshness'
+  if (LOCATION_TERMS.some((loc) => lower.includes(loc.toLowerCase())) || (job?.location && job.location.includes(tag))) return 'location'
+  if (PRODUCT_TERMS.has(lower) || PRODUCT_TERMS.has(compact)) return 'product'
+  if (/事业部|业务|部门|bu\b|ath/i.test(tag)) return 'business_unit'
+  if (KNOWN_SKILL_TERMS.has(lower) || KNOWN_SKILL_TERMS.has(compact)) return 'skill'
+  if (ROLE_TERMS.some((role) => lower.includes(role) || role.includes(lower))) return 'role_keyword'
+  return 'role_keyword'
+}
+
+export function classifyJobTags(job: JobPosting): JobTagTaxonomy {
+  const taxonomy = emptyTaxonomy()
+  for (const tag of job.tags || []) {
+    pushTag(taxonomy, classifyTag(tag, job), tag)
+  }
+  for (const location of tokenize(job.location || '')) pushTag(taxonomy, 'location', location)
+  for (const category of tokenize(job.category || '')) {
+    pushTag(taxonomy, classifyTag(category, job), category)
+  }
+  for (const titleToken of tokenize(job.title || '')) {
+    const category = classifyTag(titleToken, job)
+    if (category === 'skill' || category === 'product' || category === 'business_unit' || category === 'role_keyword') {
+      pushTag(taxonomy, category, titleToken)
+    }
+  }
+  return taxonomy
+}
+
+function matchContext(taxonomy: JobTagTaxonomy): MatchContext {
+  return {
+    location: taxonomy.location,
+    businessUnit: taxonomy.business_unit,
+    product: taxonomy.product,
+    freshness: taxonomy.freshness,
+    roleKeywords: taxonomy.role_keyword,
+  }
+}
+
 function extractTargetRoles(profile: ResumeProfile): string[] {
   const withTargets = profile as ResumeProfileWithTargets
   const explicit = Array.isArray(withTargets.targetRoles)
@@ -154,7 +256,9 @@ export function matchJobsCoarse(profile: ResumeProfile, jobs: JobPosting[]): Mat
       .join(' ')
     const titleText = job.title || ''
     const categoryText = job.category || ''
+    const tagTaxonomy = job.tagTaxonomy ?? classifyJobTags(job)
     const jobTags = new Set(job.tags.map(normalizeSkill))
+    const skillTags = new Set(tagTaxonomy.skill.map(normalizeSkill))
 
     const matchedSkills = matchTokens(resumeSkills, listText, jobTags)
     const titleMatches = matchTokens([...targetRoles, ...resumeSkills], titleText, jobTags)
@@ -185,9 +289,8 @@ export function matchJobsCoarse(profile: ResumeProfile, jobs: JobPosting[]): Mat
         negative,
     )
 
-    const missingSkills = [...jobTags]
+    const missingSkills = [...skillTags]
       .filter((tag) => !resumeSkills.includes(tag))
-      .filter((tag) => /[a-z]/.test(tag) || /[一-鿿]/.test(tag))
       .slice(0, 8)
     const reasons = [
       matchedSkills.length ? `skills ${matchedSkills.slice(0, 5).join(', ')}` : 'no skill overlap',
@@ -202,6 +305,8 @@ export function matchJobsCoarse(profile: ResumeProfile, jobs: JobPosting[]): Mat
       reason: `Coarse: ${reasons.join('; ')}.`,
       matchedSkills,
       missingSkills,
+      context: matchContext(tagTaxonomy),
+      tagTaxonomy,
     }
   })
 
@@ -253,7 +358,9 @@ export function matchJobs(profile: ResumeProfile, jobs: JobPosting[]): MatchScor
   )
 
   const results: MatchScore[] = jobs.map((job) => {
+    const tagTaxonomy = job.tagTaxonomy ?? classifyJobTags(job)
     const jobTags = new Set(job.tags.map(normalizeSkill))
+    const skillTags = new Set(tagTaxonomy.skill.map(normalizeSkill))
     const jobText = ` ${normalizeText(job.searchText)} `
 
     const matchedSkills = [...resumeSkills].filter((skill) => {
@@ -261,14 +368,12 @@ export function matchJobs(profile: ResumeProfile, jobs: JobPosting[]): MatchScor
       return jobText.includes(` ${skill} `) || jobText.includes(skill)
     })
 
-    const missingSkills = [...jobTags]
+    const missingSkills = [...skillTags]
       .filter((t) => resumeSkills.has(t) === false)
-      // Only surface "missing" for tags that look like concrete skills.
-      .filter((t) => /[a-z]/.test(t) || /[一-鿿]/.test(t))
       .slice(0, 8)
 
     const overlap = matchedSkills.length
-    const demand = Math.max(jobTags.size, 1)
+    const demand = Math.max(skillTags.size, matchedSkills.length, 1)
     // Coverage = fraction of job demands the resume satisfies; weighted by
     // absolute overlap so a job asking for 2 of 2 skills we have beats one
     // asking for 10 of 10.
@@ -281,7 +386,7 @@ export function matchJobs(profile: ResumeProfile, jobs: JobPosting[]): MatchScor
         : `Matches ${overlap} skill(s): ${matchedSkills.slice(0, 6).join(', ')}` +
           (missingSkills.length ? `; missing ${missingSkills.slice(0, 4).join(', ')}` : '')
 
-    return { job, score, reason, matchedSkills, missingSkills }
+    return { job, score, reason, matchedSkills, missingSkills, context: matchContext(tagTaxonomy), tagTaxonomy }
   })
 
   results.sort((a, b) => b.score - a.score || b.matchedSkills.length - a.matchedSkills.length)

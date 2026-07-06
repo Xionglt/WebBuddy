@@ -1106,6 +1106,8 @@ function serializeMatches(matches: MatchScore[]) {
     reason: match.reason,
     matchedSkills: match.matchedSkills,
     missingSkills: match.missingSkills,
+    context: match.context,
+    tagTaxonomy: match.tagTaxonomy,
   }))
 }
 

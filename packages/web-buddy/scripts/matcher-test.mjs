@@ -24,6 +24,15 @@ const jobs = [
     tags: ['react', 'typescript', 'node', 'frontend', '工程师'],
   },
   {
+    id: 'alibaba-agent',
+    title: 'ATH-AI创新事业部-AI Agent研发工程师-QoderWake',
+    category: '技术-AI',
+    location: '杭州',
+    updated: 'new',
+    searchText: 'ATH-AI Qoder Vibe 杭州 new Node Web AI Agent 研发 工程师',
+    tags: ['ATH-AI', 'Qoder', 'Vibe', '杭州', 'new', 'Node', 'Web', 'AI', 'Agent', '研发', '工程师'],
+  },
+  {
     id: 'partial',
     title: '后端工程师 Backend Engineer (Go)',
     category: '技术-后端',
@@ -53,6 +62,13 @@ for (const s of best.matchedSkills) {
 // The zero-overlap job must score lowest and have no matched skills.
 const worst = matches[matches.length - 1]
 assert.strictEqual(worst.matchedSkills.length, 0, 'zero-overlap job should match nothing')
+
+const agentJob = matches.find((match) => match.job.id === 'alibaba-agent')
+assert(agentJob, 'Alibaba AI Agent job should be present')
+for (const nonSkill of ['ath-ai', 'qoder', 'vibe', '杭州', 'new']) {
+  assert(!agentJob.missingSkills.includes(nonSkill), `${nonSkill} must be context/preference, not a missing skill`)
+}
+assert(agentJob.score > 0.2, `Node/Web/AI/Agent job should not be buried by business/product tags, got ${agentJob.score}`)
 
 const reranked = [
   { ...matches[1], score: 0.44 },
