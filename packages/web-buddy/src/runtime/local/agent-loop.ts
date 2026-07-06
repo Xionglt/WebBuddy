@@ -80,6 +80,7 @@ import {
   completionGate as defaultCompletionGate,
   type CompletionGateDecision,
   type CompletionGateInput,
+  type WebBuddyTaskType,
 } from '../../workflow/completion-gate.js'
 import { workflowEngine as defaultWorkflowEngine, type WorkflowEngineEvaluation, type WorkflowEngineInput } from '../../workflow/workflow-engine.js'
 import { EvidenceStore, type AddWorkflowEvidenceInput, type WorkflowEvidence } from '../../workflow/workflow-evidence.js'
@@ -105,6 +106,8 @@ export interface AgentLoopInput {
   fillLedgerSummary?: FillLedgerSummary
   /** True when the current task includes a concrete local resume file that should be uploaded. */
   requiresCurrentResumeUpload?: boolean
+  /** Explicit task contract for completion criteria. */
+  taskType?: WebBuddyTaskType
   llm: LlmGateway
   registry: ToolRegistry
   ctx: ToolContext
@@ -194,7 +197,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
     summary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary,
   })
-  const requiresCurrentResumeUpload = input.requiresCurrentResumeUpload ?? hasCurrentResumePath(input.extraContext)
+  const taskType = input.taskType ?? (input.safetyMode === 'raw' ? 'explore' : 'fill_form')
+  const requiresCurrentResumeUpload = input.requiresCurrentResumeUpload ?? false
   let currentResumeUploaded = false
   const ctx: ToolContext = {
     ...input.ctx,
@@ -1014,6 +1018,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           fillLedgerSummary: fillLedger.summary(),
           requiresCurrentResumeUpload,
           currentResumeUploaded,
+          taskType,
           source: 'model_no_tool_calls',
         })
         await recordCompletionGateDecision(completionGateDecision, step)
@@ -1549,6 +1554,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           fillLedgerSummary: fillLedger.summary(),
           requiresCurrentResumeUpload,
           currentResumeUploaded,
+          taskType,
           source: 'agent_done',
         })
 
@@ -1605,6 +1611,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             fillLedgerSummary: fillLedger.summary(),
             requiresCurrentResumeUpload,
             currentResumeUploaded,
+            taskType,
             source: 'agent_done',
           })
           await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
@@ -1861,9 +1868,6 @@ function isFieldPlan(value: unknown): value is FieldPlan {
   return plan.schemaVersion === 'field-plan/v1' && Array.isArray(plan.planned)
 }
 
-function hasCurrentResumePath(extraContext: string | undefined): boolean {
-  return /Current task resume file path:\s*\S+/i.test(extraContext ?? '')
-}
 
 function updateFillLedgerAfterTool(
   ledger: FillLedger,

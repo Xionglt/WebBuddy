@@ -316,6 +316,31 @@ async function runPermissionScenarios() {
     assert.equal(allowGateDecision?.action, 'allow')
     assert.equal(allowGateDecision?.recommendedStatus, 'completed')
 
+    const rawReadOnlyResumeGate = new RecordingCompletionGate('allow')
+    await runLoopScenario({
+      trace,
+      store,
+      sessionId: 'raw-read-only-resume-contract',
+      call: { id: 'raw-read-only-done-call', name: 'agent_done', arguments: { summary: 'Stopped at human handoff.', blocked: true } },
+      risk: 'L1',
+      gateDecisions: [],
+      seedFresh: true,
+      withSession: true,
+      safetyMode: 'raw',
+      taskType: 'explore',
+      extraContext: [
+        'Current task resume file path: /tmp/current-resume.pdf',
+        'Use this resume path as read-only context for matching.',
+      ].join('\n'),
+      workflowEngine: new RecordingWorkflowEngine(),
+      completionGate: rawReadOnlyResumeGate,
+    })
+    assert(rawReadOnlyResumeGate.inputs.length >= 1, 'raw read-only resume scenario should evaluate completion gate')
+    assert(
+      rawReadOnlyResumeGate.inputs.every((input) => input.requiresCurrentResumeUpload === false),
+      'raw mode must not infer required resume upload from read-only resume path context',
+    )
+
     const policyDeny = await runLoopScenario({
       trace,
       store,
@@ -333,24 +358,23 @@ async function runPermissionScenarios() {
     const denyEntry = policyDeny.transcript.find((entry) => entry.type === 'permission_decision')
     assert.equal(denyEntry?.decision?.action, 'deny')
 
-    const rawAutoConfirm = await runLoopScenario({
+    const rawGate = await runLoopScenario({
       trace,
       store,
-      sessionId: 'permission-raw-auto-confirm',
+      sessionId: 'permission-raw-gate',
       call: { id: 'raw-click', name: 'browser_click_text', arguments: { text: 'Submit application' } },
       risk: 'L3',
       safetyMode: 'raw',
       gateDecisions: ['takeover'],
-      seedFresh: false,
+      seedFresh: true,
       withSession: true,
     })
-    assert.equal(rawAutoConfirm.result.blocked, false, 'raw auto_confirm should allow execution')
-    assert.equal(rawAutoConfirm.toolCalls.length, 1, 'raw auto_confirm should execute the tool')
-    assert.equal(rawAutoConfirm.toolCalls[0].args.confirmed, true, 'raw auto_confirm should set confirmed=true')
-    assert.equal(rawAutoConfirm.gate.requests.length, 0, 'raw auto_confirm should not call HumanGate')
-    assert.equal(rawAutoConfirm.queue.snapshot().all.length, 0, 'raw auto_confirm should not enqueue approval')
-    const rawPermission = rawAutoConfirm.transcript.find((entry) => entry.type === 'permission_decision')
-    assert.equal(rawPermission?.decision?.action, 'allow')
+    assert.equal(rawGate.result.blocked, true, 'raw L3 click should block on human takeover')
+    assert.equal(rawGate.toolCalls.length, 0, 'raw L3 click should not execute without approval')
+    assert.equal(rawGate.gate.requests.length, 1, 'raw L3 click should call HumanGate')
+    assert.equal(rawGate.queue.snapshot().all.length, 1, 'raw L3 click should enqueue approval')
+    const rawPermission = rawGate.transcript.find((entry) => entry.type === 'permission_decision')
+    assert.equal(rawPermission?.decision?.action, 'ask')
 
     const upload = await runLoopScenario({
       trace,
@@ -405,6 +429,8 @@ async function runLoopScenario({
   call,
   risk,
   safetyMode = 'guarded',
+  taskType,
+  extraContext,
   gateDecisions,
   seedFresh,
   withSession = false,
@@ -449,6 +475,8 @@ async function runLoopScenario({
     gate,
     maxSteps: 3,
     safetyMode,
+    taskType,
+    extraContext,
     approvalQueue: queue,
     session,
     workflowEngine,

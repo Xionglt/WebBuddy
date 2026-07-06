@@ -3,6 +3,7 @@ import type {
   AgentRuntimeLlm,
   AgentSafetyMode,
 } from '../agent/types.js'
+import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { HumanGate } from '../sdk/human.js'
 import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
@@ -29,6 +30,7 @@ export interface AgentKernelInput {
   onRuntimeEvent?: (event: AgentRuntimeEvent) => void
   extraContext?: string
   safetyMode?: AgentSafetyMode
+  taskType?: WebBuddyTaskType
   session?: SessionRecorder
   controller?: AgentRunController
 }
@@ -65,6 +67,7 @@ export class AgentKernel {
       goal: input.goal,
       maxSteps: input.maxSteps,
       safetyMode: input.safetyMode ?? 'guarded',
+      taskType: input.taskType,
     })
 
     const result = await this.queryLoop.run({

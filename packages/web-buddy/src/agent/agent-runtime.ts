@@ -32,6 +32,7 @@ export class AgentRuntime {
       onRuntimeEvent: input.onEvent,
       extraContext: input.extraContext,
       safetyMode: input.safetyMode,
+      taskType: input.taskType,
       session: input.session,
       controller: input.controller,
     })

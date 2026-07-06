@@ -10,6 +10,7 @@ import type { SessionRecorder } from '../session/index.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
 import type { TaskState } from '../task/task-state.js'
 import type { RunMemory } from '../context/run-memory.js'
+import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
@@ -45,6 +46,8 @@ export interface AgentRuntimeInput {
   extraContext?: string
   /** `raw` removes job-application workflow guardrails so the model drives the browser directly. */
   safetyMode?: AgentSafetyMode
+  /** Explicit task contract for completion criteria. */
+  taskType?: WebBuddyTaskType
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
   /** Optional kernel-level run controller for abort/pause/status integration. */
@@ -75,6 +78,7 @@ export interface PromptAssemblerInput {
   fillLedgerSummary?: FillLedgerSummary
   answerSummary?: string
   safetyMode?: AgentSafetyMode
+  taskType?: WebBuddyTaskType
 }
 
 export interface LoopContextState {

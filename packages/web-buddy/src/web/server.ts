@@ -22,6 +22,7 @@ import { runJobApplicationAgent, type AgentEvent, type AgentRunResult } from '..
 import { sessionManager } from '../session/manager.js'
 import { defaultAuthPath } from '../runtime/local/login.js'
 import { RISK_DECISIONS_ARTIFACT } from '../policy/risk-decisions.js'
+import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -33,6 +34,7 @@ function outputDir(): string {
 
 interface RunState {
   id: string
+  mode: string
   events: AgentEvent[]
   subscribers: Set<ServerResponse>
   result: AgentRunResult | null
@@ -50,6 +52,8 @@ interface RuntimeEvent {
 
 interface RuntimeRunState {
   id: string
+  runtime: 'claude-code'
+  mode?: string
   events: RuntimeEvent[]
   subscribers: Set<ServerResponse>
   child: ChildProcess | null
@@ -130,6 +134,37 @@ function readJsonFile(file: string): unknown | null {
   }
 }
 
+function parseTaskType(value: unknown): WebBuddyTaskType | undefined {
+  if (value === 'explore' || value === 'apply_entry' || value === 'fill_form' || value === 'final_review') {
+    return value
+  }
+  return undefined
+}
+
+function parseWebBuddyMode(value: unknown): AgentRunResult['mode'] | undefined {
+  if (
+    value === 'raw' ||
+    value === 'fill' ||
+    value === 'match' ||
+    value === 'alibaba-apply' ||
+    value === 'demo-form' ||
+    value === 'demo-research' ||
+    value === 'auto-apply'
+  ) {
+    return value
+  }
+  return undefined
+}
+
+function normalizeRequiredUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  try {
+    return new URL(value.trim()).toString()
+  } catch {
+    return undefined
+  }
+}
+
 /** Push an event to a run's buffer + all live SSE subscribers. */
 function emitRun(run: RunState, event: AgentEvent) {
   run.events.push(event)
@@ -156,6 +191,8 @@ function endRuntime(run: RuntimeRunState, exitCode?: number | null, signal?: Nod
     signal,
     runDir: run.runDir,
     traceDir: run.traceDir,
+    runtime: run.runtime,
+    mode: run.mode,
     status: exitCode === 0 ? 'done' : 'failed',
   }
   for (const sub of run.subscribers) {
@@ -176,9 +213,9 @@ function endRun(run: RunState, result: AgentRunResult | null, error?: string) {
   run.subscribers.clear()
 }
 
-async function startRun(opts: { mode: string; startUrl?: string; resumePath?: string; headless?: boolean }) {
+async function startRun(opts: { mode: string; startUrl?: string; resumePath?: string; headless?: boolean; taskPrompt?: string; taskType?: WebBuddyTaskType; requiresCurrentResumeUpload?: boolean }) {
   const id = `web-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
-  const run: RunState = { id, events: [], subscribers: new Set(), result: null, done: false }
+  const run: RunState = { id, mode: opts.mode, events: [], subscribers: new Set(), result: null, done: false }
   runs.set(id, run)
 
   const base = loadConfig()
@@ -196,6 +233,9 @@ async function startRun(opts: { mode: string; startUrl?: string; resumePath?: st
     config,
     mode: opts.mode as AgentRunResult['mode'],
     startUrl: opts.startUrl,
+    taskPrompt: opts.taskPrompt,
+    taskType: opts.taskType,
+    requiresCurrentResumeUpload: opts.requiresCurrentResumeUpload,
     runId: id,
     source: 'web-ui',
     profile: 'debug',
@@ -210,6 +250,7 @@ async function startRun(opts: { mode: string; startUrl?: string; resumePath?: st
 
 async function startRuntimeRun(opts: {
   preset?: string
+  mode?: string
   url: string
   prompt: string
   resumePath?: string
@@ -225,6 +266,8 @@ async function startRuntimeRun(opts: {
   const continueFile = join(controlDir, 'continue.signal')
   const run: RuntimeRunState = {
     id,
+    runtime: 'claude-code',
+    mode: opts.mode,
     events: [],
     subscribers: new Set(),
     child: null,
@@ -488,12 +531,14 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   // --- runtime web agent -----------------------------------------------
   if (p === '/api/runtime/run' && req.method === 'POST') {
     const body = JSON.parse((await readBody(req)).toString('utf8') || '{}')
-    if (typeof body.url !== 'string' || !body.url.trim() || typeof body.prompt !== 'string' || !body.prompt.trim()) {
-      return send(res, 400, { error: 'url and prompt are required' })
+    const url = normalizeRequiredUrl(body.url)
+    if (!url || typeof body.prompt !== 'string' || !body.prompt.trim()) {
+      return send(res, 400, { error: 'valid url and prompt are required' })
     }
     const id = await startRuntimeRun({
       preset: typeof body.preset === 'string' ? body.preset : 'generic',
-      url: body.url.trim(),
+      mode: typeof body.mode === 'string' ? body.mode : undefined,
+      url,
       prompt: body.prompt.trim(),
       resumePath: typeof body.resumePath === 'string' && body.resumePath.trim() ? body.resumePath.trim() : undefined,
       headless: Boolean(body.headless),
@@ -502,7 +547,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       allowedDomains: typeof body.allowedDomains === 'string' && body.allowedDomains.trim() ? body.allowedDomains.trim() : undefined,
       profile: typeof body.profile === 'string' && body.profile.trim() ? body.profile.trim() : undefined,
     })
-    send(res, 200, { runId: id })
+    send(res, 200, { runId: id, runtime: 'claude-code', mode: typeof body.mode === 'string' ? body.mode : undefined })
     return
   }
   if (p === '/api/runtime/events' && req.method === 'GET') {
@@ -518,7 +563,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     res.write('retry: 2000\n\n')
     for (const e of run.events) res.write(`data: ${JSON.stringify(e)}\n\n`)
     if (run.done) {
-      res.write(`data: ${JSON.stringify({ _end: true, exitCode: run.exitCode, signal: run.signal, runDir: run.runDir, traceDir: run.traceDir })}\n\n`)
+      res.write(`data: ${JSON.stringify({ _end: true, exitCode: run.exitCode, signal: run.signal, runDir: run.runDir, traceDir: run.traceDir, runtime: run.runtime, mode: run.mode })}\n\n`)
       return res.end()
     }
     run.subscribers.add(res)
@@ -558,6 +603,8 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     const riskDecisionsFile = join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT)
     send(res, 200, {
       id: run.id,
+      runtime: run.runtime,
+      mode: run.mode,
       done: run.done,
       exitCode: run.exitCode,
       signal: run.signal,
@@ -577,6 +624,8 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (p === '/api/runtime/runs' && req.method === 'GET') {
     send(res, 200, [...runtimeRuns.values()].map((r) => ({
       id: r.id,
+      runtime: r.runtime,
+      mode: r.mode,
       done: r.done,
       events: r.events.length,
       exitCode: r.exitCode,
@@ -590,13 +639,24 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   // --- run --------------------------------------------------------------
   if (p === '/api/run' && req.method === 'POST') {
     const body = JSON.parse((await readBody(req)).toString('utf8') || '{}')
+    const mode = parseWebBuddyMode(body.mode)
+    const startUrl = normalizeRequiredUrl(body.startUrl)
+    if (!mode) {
+      return send(res, 400, { error: 'valid mode is required' })
+    }
+    if (!startUrl) {
+      return send(res, 400, { error: 'valid startUrl is required' })
+    }
     const id = await startRun({
-      mode: body.mode || 'demo-form',
-      startUrl: body.startUrl,
+      mode,
+      startUrl,
       resumePath: body.resumePath,
       headless: body.headless,
+      taskPrompt: typeof body.taskPrompt === 'string' ? body.taskPrompt : typeof body.prompt === 'string' ? body.prompt : undefined,
+      taskType: parseTaskType(body.taskType),
+      requiresCurrentResumeUpload: body.requiresCurrentResumeUpload === true,
     })
-    send(res, 200, { runId: id })
+    send(res, 200, { runId: id, runtime: 'web-buddy', mode })
     return
   }
   if (p === '/api/stop' && req.method === 'POST') {
@@ -619,7 +679,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     res.write('retry: 2000\n\n')
     for (const e of run.events) res.write(`data: ${JSON.stringify(e)}\n\n`)
     if (run.done) {
-      res.write(`data: ${JSON.stringify({ _end: true, finalState: run.result?.finalState, message: run.result?.message, summary: run.result?.summary })}\n\n`)
+      res.write(`data: ${JSON.stringify({ _end: true, runtime: 'web-buddy', mode: run.mode, finalState: run.result?.finalState, message: run.result?.message, summary: run.result?.summary })}\n\n`)
       return res.end()
     }
     run.subscribers.add(res)
@@ -630,17 +690,29 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   // --- trace ------------------------------------------------------------
   if (p === '/api/trace' && req.method === 'GET') {
     const id = q('id')
+    const run = id ? runs.get(id) : undefined
     const dir = id ? join(outputDir(), id) : ''
     const traceFile = join(dir, 'trace.jsonl')
     const summaryFile = join(dir, 'summary.json')
     const traceDir = id ? join(outputDir(), 'traces', `run_${id}`) : ''
+    const spansFile = traceDir ? join(traceDir, 'spans.jsonl') : ''
+    const eventsFile = traceDir ? join(traceDir, 'events.jsonl') : ''
     const metricsFile = traceDir ? join(traceDir, 'metrics.json') : ''
     const agentStateFile = traceDir ? join(traceDir, 'agent-state.json') : ''
     const riskDecisionsFile = traceDir ? join(traceDir, 'artifacts', RISK_DECISIONS_ARTIFACT) : ''
     if (!id || !existsSync(traceFile)) {
       return send(res, 200, {
+        id,
+        runtime: 'web-buddy',
+        mode: run?.mode,
+        done: run?.done ?? false,
+        finalState: run?.result?.finalState,
+        runDir: existsSync(dir) ? dir : undefined,
+        traceDir: existsSync(traceDir) ? traceDir : undefined,
         steps: [],
         summary: null,
+        spans: spansFile && existsSync(spansFile) ? readJsonl(spansFile, 300) : [],
+        events: eventsFile && existsSync(eventsFile) ? readJsonl(eventsFile, 100) : [],
         metrics: readJsonFile(metricsFile),
         riskDecisions: readJsonFile(riskDecisionsFile),
         agentState: readJsonFile(agentStateFile),
@@ -649,8 +721,17 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     const steps = readFileSync(traceFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     const summary = readJsonFile(summaryFile)
     send(res, 200, {
+      id,
+      runtime: 'web-buddy',
+      mode: run?.mode,
+      done: run?.done ?? false,
+      finalState: run?.result?.finalState,
+      runDir: dir,
+      traceDir: existsSync(traceDir) ? traceDir : undefined,
       steps,
       summary,
+      spans: spansFile && existsSync(spansFile) ? readJsonl(spansFile, 300) : [],
+      events: eventsFile && existsSync(eventsFile) ? readJsonl(eventsFile, 100) : [],
       metrics: readJsonFile(metricsFile),
       riskDecisions: readJsonFile(riskDecisionsFile),
       agentState: readJsonFile(agentStateFile),
@@ -686,7 +767,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
 
   // --- runs list (debug) ------------------------------------------------
   if (p === '/api/runs' && req.method === 'GET') {
-    send(res, 200, [...runs.values()].map((r) => ({ id: r.id, done: r.done, events: r.events.length, finalState: r.result?.finalState })))
+    send(res, 200, [...runs.values()].map((r) => ({ id: r.id, mode: r.mode, done: r.done, events: r.events.length, finalState: r.result?.finalState })))
     return
   }
 

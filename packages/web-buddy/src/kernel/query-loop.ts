@@ -6,6 +6,7 @@ import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
 import { runAgentLoop, type AgentEvent, type AgentLoopResult } from '../runtime/local/agent-loop.js'
 import { ToolRegistry, type ToolContext } from '../runtime/local/tool-registry.js'
+import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import type { KernelEvent } from './kernel-events.js'
 import {
@@ -34,6 +35,7 @@ export interface QueryLoopInput {
   onRuntimeEvent?: (event: AgentRuntimeEvent) => void
   extraContext?: string
   safetyMode?: AgentSafetyMode
+  taskType?: WebBuddyTaskType
   permissionMode?: PermissionMode
   allowFinalSubmit?: boolean
   session?: SessionRecorder
@@ -86,6 +88,7 @@ export class QueryLoop {
         },
         extraContext: input.extraContext,
         safetyMode: input.safetyMode,
+        taskType: input.taskType,
         permissionMode: input.permissionMode,
         allowFinalSubmit: input.allowFinalSubmit,
         session: input.session,

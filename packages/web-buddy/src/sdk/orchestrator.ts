@@ -42,6 +42,7 @@ import {
   type AgentSessionStatus,
   type SessionRecorder,
 } from '../session/index.js'
+import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 
 /**
  * Unified local Web Agent orchestrator. One pipeline, plus safe demos:
@@ -118,6 +119,10 @@ export interface RunOptions {
   source?: RunSource
   /** Runtime profile label for metrics comparison. */
   profile?: string
+  /** Explicit task contract for completion criteria. */
+  taskType?: WebBuddyTaskType
+  /** Explicitly require uploading the current local resume file before completion. */
+  requiresCurrentResumeUpload?: boolean
 }
 
 function mockApplicationFormUrl(profile: ResumeProfile): string {
@@ -350,6 +355,7 @@ function legacyProfileToResumeV2Fallback(
 export async function runJobApplicationAgent(options: RunOptions = {}): Promise<AgentRunResult> {
   const config = options.config ?? loadConfig()
   const mode: AgentMode = options.mode ?? 'fill'
+  const taskType = options.taskType ?? defaultTaskTypeForMode(mode)
   const emit = options.onEvent ?? ((_e: AgentEvent) => {})
   const gate: HumanGate = options.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate(undefined, { allowLocalFinalSubmit: mode === 'auto-apply' }) : new CliHumanGate())
   const llm = options.llm ?? new LlmGateway(config.model)
@@ -686,7 +692,13 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     }
 
     const useLlm = llm.hasKey
-    const llmExtraContext = [extraContext, currentResumeUploadContext(config.resumePath)].filter(Boolean).join('\n')
+    const llmExtraContext = [
+      extraContext,
+      `Task type: ${taskType}. Completion criteria must follow this task contract.`,
+      mode === 'raw' || !options.requiresCurrentResumeUpload
+        ? currentResumeReadOnlyContext(config.resumePath)
+        : currentResumeUploadContext(config.resumePath),
+    ].filter(Boolean).join('\n')
     if (useLlm) {
       const goal =
         mode === 'raw'
@@ -705,6 +717,8 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         permissionMode: config.human.permissionMode,
         allowFinalSubmit: config.human.allowFinalSubmit,
         maxSteps: config.agent.maxSteps,
+        taskType,
+        requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
         session: sessionRecorder,
       })
@@ -1315,6 +1329,12 @@ function defaultGoalForMode(mode: AgentMode): string {
   return 'Fill the application form on the current page using the resume.'
 }
 
+function defaultTaskTypeForMode(mode: AgentMode): WebBuddyTaskType {
+  if (mode === 'raw') return 'explore'
+  if (mode === 'match' || mode === 'demo-research') return 'explore'
+  return 'fill_form'
+}
+
 function currentResumeUploadContext(resumePath: string): string {
   if (!resumePath || !existsSync(resumePath)) return ''
   return [
@@ -1322,6 +1342,16 @@ function currentResumeUploadContext(resumePath: string): string {
     'Resume-first rule: if the site shows an existing uploaded resume, do not treat it as satisfying this task unless it is this exact file or the human explicitly asks to reuse the existing site resume.',
     'When a resume upload/re-upload/附件简历/上传简历 entry is visible, use browser_form_snapshot first, then call browser_upload_file with filePath equal to the current task resume path. Uploading is gated by upload_resume permission.',
     'After uploading, refresh the form/page state and continue filling any required application fields. Do not click a true final submit/确认投递/提交申请 button.',
+  ].join('\n')
+}
+
+function currentResumeReadOnlyContext(resumePath: string): string {
+  if (!resumePath || !existsSync(resumePath)) return ''
+  return [
+    `Current task resume file path: ${resumePath}`,
+    'Use the parsed resume and resume file path as read-only context for matching and reasoning.',
+    'Do not upload, save, or transmit this resume file unless the user explicitly asks for that exact action and the runtime receives the required human approval.',
+    'For exploratory job search or fit assessment tasks, it is valid to stop with agent_done once the requested candidates, chosen job, or human handoff point has been reached.',
   ].join('\n')
 }
 

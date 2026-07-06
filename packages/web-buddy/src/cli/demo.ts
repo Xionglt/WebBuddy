@@ -25,6 +25,7 @@ import { AutoHumanGate, CliHumanGate } from '../sdk/human.js'
 import { LlmGateway } from '../sdk/llm.js'
 import { TraceRecorder } from '../sdk/trace.js'
 import { PERMISSION_MODES, isPermissionMode, type PermissionMode } from '../permission/index.js'
+import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 
 interface Flags {
   resume?: string
@@ -44,6 +45,8 @@ interface Flags {
   keepBrowserOpen?: boolean
   profile?: string
   permissionMode?: PermissionMode
+  taskType?: WebBuddyTaskType
+  requiresCurrentResumeUpload?: boolean
 }
 
 interface ParsedArgs {
@@ -55,7 +58,7 @@ const VALUE_FLAGS = new Set([
   '--resume', '--model-key', '--base-url', '--model-name',
   '--list-url', '--max-jobs', '--max-pages', '--max-crawl-jobs',
   '--match-threshold', '--storage-state', '--prompt', '--profile',
-  '--permission-mode',
+  '--permission-mode', '--task-type',
 ])
 
 /** Single-pass parser: value-flags consume their next token; others are positional. */
@@ -68,6 +71,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (a === '--headless') flags.headless = true
     else if (a === '--auto-gate') flags.autoGate = true
     else if (a === '--keep-browser-open' || a === '--keep-open') flags.keepBrowserOpen = true
+    else if (a === '--requires-current-resume-upload') flags.requiresCurrentResumeUpload = true
     else if (VALUE_FLAGS.has(a)) {
       const v = argv[++i]
       if (v === undefined) { console.error(`Option ${a} requires a value`); process.exit(2) }
@@ -80,6 +84,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         case '--prompt': flags.prompt = v; break
         case '--profile': flags.profile = v; break
         case '--permission-mode': flags.permissionMode = parsePermissionMode(v); break
+        case '--task-type': flags.taskType = parseTaskType(v); break
         case '--max-jobs': flags.maxJobs = Number(v); break
         case '--max-pages': flags.maxPages = Number(v); break
         case '--max-crawl-jobs': flags.maxCrawlJobs = Number(v); break
@@ -93,6 +98,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
   return { flags, positionals }
+}
+
+function parseTaskType(value: string): WebBuddyTaskType {
+  if (value === 'explore' || value === 'apply_entry' || value === 'fill_form' || value === 'final_review') return value
+  console.error(`Invalid --task-type "${value}". Expected one of: explore, apply_entry, fill_form, final_review`)
+  process.exit(2)
 }
 
 function parsePermissionMode(value: string): PermissionMode {
@@ -192,7 +203,8 @@ async function run(mode: AgentMode, f: Flags, startUrl?: string) {
   )
 
   const result = await runJobApplicationAgent({
-    config, mode, startUrl, taskPrompt: f.prompt,
+    config, mode, startUrl, taskPrompt: f.prompt, taskType: f.taskType,
+    requiresCurrentResumeUpload: f.requiresCurrentResumeUpload,
     source: 'cli-demo',
     profile: f.profile ?? 'debug',
     onEvent: (e) => console.log(`${ICON[e.level] || '• '}${e.phase.padEnd(12)} ${e.message}`),
@@ -273,6 +285,7 @@ OPTIONS
   --list-url <url>      Alibaba position-list URL (match)
   --storage-state <p>   cookie file path (fill/login)
   --prompt <text>       task prompt for LLM-driven fill modes
+  --task-type <type>    explore | apply_entry | fill_form | final_review
   --profile <name>      run profile label for metrics (debug/fast/benchmark)
   --permission-mode <m> safe | review | trusted | autopilot (default safe)
   --max-jobs <n>        top-N jobs to open for detail (match, default 10)
