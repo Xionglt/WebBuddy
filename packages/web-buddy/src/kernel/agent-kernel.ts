@@ -4,7 +4,7 @@ import type {
   AgentSafetyMode,
 } from '../agent/types.js'
 import type { HumanGate } from '../sdk/human.js'
-import type { ResumeProfile } from '../sdk/resume.js'
+import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
 import { ToolRegistry, type ToolContext } from '../runtime/local/tool-registry.js'
 import type { KernelEvent, KernelEventType } from './kernel-events.js'
@@ -19,6 +19,7 @@ import { createTurnStateSnapshot } from './turn-state.js'
 export interface AgentKernelInput {
   goal: string
   resume: ResumeProfile
+  resumeV2?: ResumeProfileV2
   llm: AgentRuntimeLlm
   registry?: ToolRegistry
   ctx: ToolContext

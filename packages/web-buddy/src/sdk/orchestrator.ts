@@ -228,7 +228,7 @@ async function ensureResume(
   trace: TraceRecorder,
   emit: (e: AgentEvent) => void,
   llm?: LlmGateway,
-): Promise<ResumeProfile> {
+): Promise<{ profile: ResumeProfile; profileV2: ResumeProfileV2 }> {
   const path = config.resumePath
   if (!existsSync(path)) {
     emit({ phase: 'parse_resume', message: `Resume not found at ${path}; generating sample resume PDF.`, level: 'warn' })
@@ -279,7 +279,7 @@ async function ensureResume(
     level: parseStatus === 'ok' ? 'info' : 'warn',
   })
 
-  return legacyProfile
+  return { profile: legacyProfile, profileV2 }
 }
 
 function legacySourceToV2Type(source: ResumeProfile['source']): ResumeProfileV2['source']['type'] {
@@ -397,7 +397,9 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
       })
     }
 
-    const profile = await ensureResume(config, trace, emit, llm)
+    const resumeProfiles = await ensureResume(config, trace, emit, llm)
+    const profile = resumeProfiles.profile
+    const profileV2 = resumeProfiles.profileV2
     if ((mode === 'alibaba-apply' || mode === 'raw') && !llm.hasKey) {
       return finalizeRun({
         mode,
@@ -695,7 +697,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
             ? options.taskPrompt || DEFAULT_ALIBABA_APPLY_PROMPT
           : 'Fill the application form on the current page using my resume. Map resume fields to the matching form inputs. Do NOT click any submit/投递 button. If you hit a login wall or captcha, call agent_done with blocked=true.'
       const loopResult = await runAgentLoop({
-        goal, resume: profile, llm,
+        goal, resume: profile, resumeV2: profileV2, llm,
         registry: new ToolRegistry(),
         ctx: { sessionId, highlight, trace },
         gate, extraContext: llmExtraContext,

@@ -1,3 +1,6 @@
+import type { FillLedgerSummary } from '../fill/fill-ledger.js'
+import type { FormCoverage } from '../observation/form-state.js'
+
 export type WorkflowPhase =
   | 'observing'
   | 'selecting_job'
@@ -23,6 +26,9 @@ export interface WorkflowState {
   updatedAt: string
   humanHandoffRequired?: boolean
   blocker?: string
+  formCoverage?: FormCoverage
+  fillLedgerSummary?: FillLedgerSummary
+  currentResumeUploaded?: boolean
   lastTransition?: {
     from: WorkflowPhase
     to: WorkflowPhase

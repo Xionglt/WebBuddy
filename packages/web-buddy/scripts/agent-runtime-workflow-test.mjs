@@ -126,6 +126,57 @@ class AlibabaConfirmationDoneLlm {
   }
 }
 
+class PrematureFillDoneLlm {
+  constructor() {
+    this.hasKey = true
+    this.label = 'premature-fill-done-llm'
+    this.calls = 0
+  }
+
+  async chatWithTools(messages) {
+    this.calls += 1
+    const rendered = JSON.stringify(messages)
+    if (this.calls === 1) {
+      assert(rendered.includes('pendingRequired=1'), 'runtime prompt should include FillLedger pending required summary')
+      return {
+        content: 'The form looks simple; I will stop early.',
+        toolCalls: [{ id: 'premature-fill-done', name: 'agent_done', arguments: { summary: 'Done without filling.', blocked: false } }],
+      }
+    }
+    if (this.calls === 2) {
+      assert(
+        rendered.includes('fill_form_coverage_scrolled_bottom') && rendered.includes('fill_pending_required_zero'),
+        'runtime should return executable fill-completeness gaps to the model',
+      )
+      return {
+        content: 'I need a full form audit first.',
+        toolCalls: [{ id: 'audit-form', name: 'browser_form_audit', arguments: {} }],
+      }
+    }
+    if (this.calls === 3) {
+      return {
+        content: 'Now I will fill the required name field.',
+        toolCalls: [{
+          id: 'set-name',
+          name: 'browser_set_field',
+          arguments: {
+            label: 'Name',
+            fieldKey: 'name',
+            fieldIndex: 0,
+            controlKind: 'text',
+            intendedValue: 'Zhang San',
+          },
+        }],
+      }
+    }
+    assert(rendered.includes('pendingRequired=0'), 'FillLedger should show no pending required fields after browser_set_field')
+    return {
+      content: 'The required field is filled and audited.',
+      toolCalls: [{ id: 'done-after-fill', name: 'agent_done', arguments: { summary: 'Filled required fields.', blocked: false } }],
+    }
+  }
+}
+
 class LoginClearingGate {
   async confirm(kind) {
     assert.equal(kind, 'login')
@@ -258,6 +309,45 @@ try {
   assert.equal(alibabaDoneLlm.calls >= 2, true, 'runtime should continue after premature Alibaba dialog agent_done')
   assert.equal(await alibabaPage.locator('[role="dialog"]').count(), 0, 'test model should get a chance to resolve the dialog')
   assert.equal(alibabaDoneResult.done, true)
+
+  await openHtml('workflow-premature-fill-done', `<!doctype html><html><head><title>Application Form</title></head><body>
+    <h1>Application form</h1>
+    <label for="name">Name</label><input id="name" required />
+  </body></html>`)
+  const prematureFillLlm = new PrematureFillDoneLlm()
+  const prematureFillResult = await runtime.run({
+    goal: 'Fill the current application form.',
+    resume: profile,
+    llm: prematureFillLlm,
+    ctx: {
+      sessionId: 'workflow-premature-fill-done',
+      highlight: false,
+      trace,
+      fieldPlan: {
+        schemaVersion: 'field-plan/v1',
+        planned: [{
+          fieldKey: 'name',
+          fieldIndex: 0,
+          label: 'Name',
+          controlKind: 'text',
+          required: true,
+          requiredConfidence: 1,
+          intendedValue: 'Zhang San',
+          valueSource: 'resume',
+          confidence: 1,
+        }],
+        fieldCount: 1,
+        updatedAt: '2026-06-30T00:00:00.000Z',
+      },
+    },
+    gate: new AutoHumanGate(),
+    maxSteps: 6,
+  })
+  assert.equal(prematureFillLlm.calls >= 4, true, 'runtime should continue after premature fill agent_done')
+  assert.equal(prematureFillResult.done, true)
+  assert.equal(prematureFillResult.blocked, true)
+  assert.match(prematureFillResult.summary, /required workflow evidence is missing/i)
+  assert.equal(await sessionManager.get('workflow-premature-fill-done')?.page.locator('#name').inputValue(), 'Zhang San')
 
   console.log('agent-runtime-workflow-test: PASS')
 } finally {

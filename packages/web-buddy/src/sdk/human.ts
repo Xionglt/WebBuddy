@@ -22,8 +22,24 @@ export interface GateContext {
   detail?: string
 }
 
+export interface HumanInfoRequest {
+  field: string
+  question: string
+  options?: string[]
+  abortSignal?: AbortSignal
+}
+
+export interface HumanInfoResponse {
+  answer: string
+}
+
+export interface HumanInput {
+  requestInfo(request: HumanInfoRequest): Promise<HumanInfoResponse>
+}
+
 export interface HumanGate {
   confirm(kind: GateKind, message: string, context?: GateContext): Promise<GateDecision>
+  requestInfo?(request: HumanInfoRequest): Promise<HumanInfoResponse>
 }
 
 export const GATE_LABELS: Record<GateKind, string> = {
@@ -83,6 +99,28 @@ export class CliHumanGate implements HumanGate {
     return 'approve'
   }
 
+  async requestInfo(request: HumanInfoRequest): Promise<HumanInfoResponse> {
+    const lines = [
+      '',
+      '┌── HUMAN INPUT ─────────────────────────────────────────────',
+      `│ [${request.field}] ${request.question}`,
+    ]
+    if (request.options?.length) lines.push(`│ options: ${request.options.join(' / ')}`)
+    lines.push('└────────────────────────────────────────────────────────────')
+    // eslint-disable-next-line no-console
+    console.log(lines.join('\n'))
+
+    if (!stdin.isTTY) {
+      throw new Error('Human input is required, but stdin is not interactive.')
+    }
+
+    const rl = this.getRl()
+    const answer = request.abortSignal
+      ? await rl.question('answer> ', { signal: request.abortSignal })
+      : await rl.question('answer> ')
+    return { answer: answer.trim() }
+  }
+
   close(): void {
     this.rl?.close()
     this.rl = null
@@ -127,11 +165,22 @@ function isLocalUrl(url?: string): boolean {
  */
 export class ScriptedHumanGate implements HumanGate {
   private cursor = 0
-  constructor(private readonly script: GateDecision[]) {}
+  private answerCursor = 0
+  constructor(
+    private readonly script: GateDecision[],
+    private readonly answers: string[] = [],
+  ) {}
 
   async confirm(): Promise<GateDecision> {
     const decision = this.script[this.cursor] ?? 'takeover'
     this.cursor += 1
     return decision
+  }
+
+  async requestInfo(): Promise<HumanInfoResponse> {
+    const answer = this.answers[this.answerCursor]
+    this.answerCursor += 1
+    if (answer === undefined) throw new Error('ScriptedHumanGate has no scripted answer for ask_user.')
+    return { answer }
   }
 }

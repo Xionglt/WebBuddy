@@ -1,0 +1,183 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Set Field Fixture</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 24px;
+      }
+      form {
+        max-width: 720px;
+      }
+      .field,
+      fieldset {
+        border: 0;
+        margin: 0 0 20px;
+        padding: 0;
+      }
+      label,
+      legend {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      input,
+      textarea,
+      select,
+      .custom-select,
+      .cascader {
+        border: 1px solid #777;
+        box-sizing: border-box;
+        min-height: 36px;
+        padding: 8px;
+        width: 320px;
+      }
+      textarea {
+        min-height: 72px;
+      }
+      .dropdown,
+      .cascader-dropdown {
+        background: #fff;
+        border: 1px solid #777;
+        margin-top: 4px;
+        padding: 4px;
+        width: 320px;
+      }
+      .hidden {
+        display: none;
+      }
+      .option,
+      .cascader-option {
+        cursor: default;
+        padding: 6px 8px;
+      }
+      .cascader-menu {
+        display: inline-block;
+        min-width: 140px;
+        vertical-align: top;
+      }
+      .inline-label {
+        display: inline-block;
+        font-weight: 400;
+        margin-right: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <form>
+      <div class="field" id="controlled-field">
+        <label for="controlled-name">受控姓名</label>
+        <input id="controlled-name" name="controlledName" value="" />
+        <output id="controlled-output"></output>
+      </div>
+
+      <div class="field">
+        <label for="bio">个人简介</label>
+        <textarea id="bio" name="bio"></textarea>
+      </div>
+
+      <div class="field">
+        <label for="education">学历</label>
+        <select id="education" name="education">
+          <option value="">请选择</option>
+          <option value="bachelor">本科</option>
+          <option value="master">硕士</option>
+          <option value="doctor">博士</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>城市</label>
+        <div id="city-select" class="custom-select" role="combobox" aria-haspopup="listbox" tabindex="0">
+          <span class="placeholder">请选择城市</span>
+        </div>
+        <div id="city-dropdown" class="dropdown hidden" role="listbox">
+          <div class="option" role="option" data-value="hangzhou">杭州</div>
+          <div class="option" role="option" data-value="shanghai">上海</div>
+          <div class="option" role="option" data-value="beijing">北京</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>地区</label>
+        <div id="region-cascader" class="cascader ant-cascader" role="combobox" aria-haspopup="tree" tabindex="0">
+          <span class="placeholder">请选择地区</span>
+        </div>
+        <div id="region-dropdown" class="cascader-dropdown ant-cascader-dropdown ant-cascader-dropdown-hidden hidden">
+          <div class="cascader-menu ant-cascader-menu">
+            <div class="cascader-option ant-cascader-menu-item" data-value="zhejiang">浙江</div>
+            <div class="cascader-option ant-cascader-menu-item" data-value="jiangsu">江苏</div>
+          </div>
+          <div class="cascader-menu ant-cascader-menu">
+            <div class="cascader-option ant-cascader-menu-item" data-value="hangzhou">杭州</div>
+            <div class="cascader-option ant-cascader-menu-item" data-value="suzhou">苏州</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="start-date">入职日期</label>
+        <input id="start-date" name="startDate" type="date" />
+      </div>
+
+      <fieldset class="radio-group">
+        <legend>工作方式</legend>
+        <label class="inline-label"><input type="radio" name="workMode" value="onsite" /> 现场</label>
+        <label class="inline-label"><input type="radio" name="workMode" value="remote" /> 远程</label>
+      </fieldset>
+
+      <div class="field">
+        <label><input id="agreement" type="checkbox" name="agreement" /> 我同意协议</label>
+      </div>
+
+      <div class="field">
+        <label for="resume">简历文件</label>
+        <input id="resume" type="file" name="resume" />
+      </div>
+    </form>
+
+    <script>
+      const controlled = document.getElementById('controlled-name')
+      const controlledOutput = document.getElementById('controlled-output')
+      controlled.addEventListener('input', () => {
+        controlled.value = controlled.value
+        controlledOutput.value = controlled.value
+      })
+
+      const citySelect = document.getElementById('city-select')
+      const cityDropdown = document.getElementById('city-dropdown')
+      citySelect.addEventListener('click', () => {
+        cityDropdown.classList.remove('hidden')
+      })
+      cityDropdown.querySelectorAll('.option').forEach((option) => {
+        option.addEventListener('click', () => {
+          citySelect.innerHTML = '<span class="ant-select-selection-item">' + option.textContent.trim() + '</span>'
+          citySelect.dataset.value = option.dataset.value
+          cityDropdown.classList.add('hidden')
+        })
+      })
+
+      const region = document.getElementById('region-cascader')
+      const regionDropdown = document.getElementById('region-dropdown')
+      const regionParts = []
+      region.addEventListener('click', () => {
+        regionDropdown.classList.remove('hidden')
+        regionDropdown.classList.remove('ant-cascader-dropdown-hidden')
+      })
+      regionDropdown.querySelectorAll('.cascader-option').forEach((option) => {
+        option.addEventListener('click', () => {
+          const text = option.textContent.trim()
+          if (!regionParts.includes(text)) regionParts.push(text)
+          region.innerHTML = '<span class="ant-cascader-picker-label">' + regionParts.join(' / ') + '</span>'
+          if (regionParts.length >= 2) {
+            regionDropdown.classList.add('hidden')
+            regionDropdown.classList.add('ant-cascader-dropdown-hidden')
+          }
+        })
+      })
+    </script>
+  </body>
+</html>

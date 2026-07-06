@@ -1,8 +1,19 @@
-import type { FormFieldOption, FormFieldState, FormState, SubmitCandidate, UploadHint } from './form-state.js'
+import type {
+  FieldLocatorHints,
+  FormControlKind,
+  FormCoverage,
+  FormFieldOption,
+  FormFieldState,
+  FormState,
+  SubmitCandidate,
+  UploadHint,
+} from './form-state.js'
 import { normalizePageFacts, type PageFacts } from './page-facts.js'
 
 export interface RawFormField {
   index?: number
+  fieldKey?: string
+  controlKind?: FormControlKind
   tag?: string
   type?: string
   role?: string
@@ -11,12 +22,16 @@ export interface RawFormField {
   name?: string
   id?: string
   value?: string
+  filled?: boolean
+  checked?: boolean
   required?: boolean
+  requiredConfidence?: number
   disabled?: boolean
   readonly?: boolean
   invalid?: boolean
   error?: string
   nearbyText?: string
+  locatorHints?: FieldLocatorHints
   options?: RawFormFieldOption[]
 }
 
@@ -50,6 +65,7 @@ export interface RawFormSnapshot {
   uploadHints?: RawUploadHint[]
   visibleErrors?: string[]
   facts?: Partial<PageFacts>
+  formCoverage?: FormCoverage
 }
 
 export function buildFormState(raw: RawFormSnapshot, updatedAt = new Date().toISOString()): FormState {
@@ -68,6 +84,7 @@ export function buildFormState(raw: RawFormSnapshot, updatedAt = new Date().toIS
     uploadHints,
     visibleErrors,
     ...(facts ? { facts } : {}),
+    ...(raw.formCoverage ? { formCoverage: raw.formCoverage } : {}),
     updatedAt,
   }
 }
@@ -77,6 +94,8 @@ function toFieldState(field: RawFormField, fallbackIndex: number): FormFieldStat
   const label = normalize(field.label) || normalize(field.placeholder) || normalize(field.name) || normalize(field.id) || normalize(field.nearbyText) || `field-${fallbackIndex + 1}`
   return {
     index: field.index ?? fallbackIndex,
+    fieldKey: normalize(field.fieldKey) || undefined,
+    controlKind: normalizeControlKind(field.controlKind, field.tag, field.type, field.role),
     label,
     tag: field.tag,
     type: field.type,
@@ -86,13 +105,80 @@ function toFieldState(field: RawFormField, fallbackIndex: number): FormFieldStat
     placeholder: field.placeholder,
     value,
     required: Boolean(field.required),
-    filled: value.length > 0,
+    requiredConfidence: clampConfidence(field.requiredConfidence),
+    filled: typeof field.filled === 'boolean' ? field.filled : isFilled(field, value),
+    checked: field.checked,
     disabled: Boolean(field.disabled),
     readonly: Boolean(field.readonly),
     invalid: Boolean(field.invalid),
     error: field.error,
+    locatorHints: normalizeLocatorHints(field.locatorHints),
     options: normalizeOptions(field.options),
   }
+}
+
+function isFilled(field: RawFormField, value: string): boolean {
+  const controlKind = normalizeControlKind(field.controlKind, field.tag, field.type, field.role)
+  if (controlKind === 'checkbox' || controlKind === 'radio') return Boolean(field.checked)
+  if (controlKind === 'select_native' || controlKind === 'select_custom' || controlKind === 'cascader') {
+    if (field.options?.some((option) => option.selected && (normalize(option.value) || normalize(option.label)))) return true
+    return value.length > 0 && !/^(请选择|please select|select|choose)$/i.test(value)
+  }
+  return value.length > 0
+}
+
+function normalizeControlKind(
+  value: FormControlKind | undefined,
+  tag?: string,
+  type?: string,
+  role?: string,
+): FormControlKind | undefined {
+  if (
+    value === 'text' ||
+    value === 'textarea' ||
+    value === 'select_native' ||
+    value === 'select_custom' ||
+    value === 'cascader' ||
+    value === 'date' ||
+    value === 'radio' ||
+    value === 'checkbox' ||
+    value === 'file' ||
+    value === 'unknown'
+  ) {
+    return value
+  }
+  const normalizedTag = normalize(tag).toLowerCase()
+  const normalizedType = normalize(type).toLowerCase()
+  const normalizedRole = normalize(role).toLowerCase()
+  if (normalizedType === 'checkbox' || normalizedRole === 'checkbox' || normalizedRole === 'switch') return 'checkbox'
+  if (normalizedType === 'radio' || normalizedRole === 'radio') return 'radio'
+  if (normalizedType === 'file') return 'file'
+  if (normalizedTag === 'select') return 'select_native'
+  if (normalizedRole === 'combobox') return 'select_custom'
+  if (normalizedTag === 'textarea') return 'textarea'
+  if (/date|time|month|week/.test(normalizedType)) return 'date'
+  if (normalizedTag === 'input' || /textbox|searchbox/.test(normalizedRole)) return 'text'
+  return undefined
+}
+
+function clampConfidence(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || Number.isNaN(value)) return undefined
+  return Math.max(0, Math.min(1, value))
+}
+
+function normalizeLocatorHints(hints: FieldLocatorHints | undefined): FieldLocatorHints | undefined {
+  if (!hints) return undefined
+  const normalized = {
+    aria: normalize(hints.aria) || undefined,
+    text: normalize(hints.text) || undefined,
+    css: normalize(hints.css) || undefined,
+    xpath: normalize(hints.xpath) || undefined,
+    name: normalize(hints.name) || undefined,
+    id: normalize(hints.id) || undefined,
+    placeholder: normalize(hints.placeholder) || undefined,
+    label: normalize(hints.label) || undefined,
+  }
+  return Object.values(normalized).some(Boolean) ? normalized : undefined
 }
 
 function toSubmitCandidate(candidate: RawSubmitCandidate): SubmitCandidate {

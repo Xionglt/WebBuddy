@@ -1,5 +1,7 @@
 import type { FormFieldState, FormState, UploadHint } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
+import type { FillLedgerSummary } from '../fill/fill-ledger.js'
+import type { FormCoverage } from '../observation/form-state.js'
 import type {
   WorkflowBlocker,
   WorkflowCriterionMissing,
@@ -19,6 +21,10 @@ export interface CompletionGateInput {
   workflowEvaluation?: WorkflowEngineEvaluation
   page?: PageState
   form?: FormState
+  formCoverage?: FormCoverage
+  fillLedgerSummary?: FillLedgerSummary
+  requiresCurrentResumeUpload?: boolean
+  currentResumeUploaded?: boolean
   source?: 'agent_done' | 'finalize' | 'manual' | (string & {})
 }
 
@@ -59,6 +65,23 @@ export class CompletionGate {
         action: 'ignore',
         recommendedStatus: 'unchanged',
         reason: completionReason('Completion gate ignored because runtime has not received a done signal.', input),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds,
+      })
+    }
+
+    const fillCompletenessMissing = fillCompletenessCriteria(input, workflowPhase)
+    if (fillCompletenessMissing.length > 0) {
+      missingCriteria.push(...fillCompletenessMissing)
+      return decision({
+        action: 'reject',
+        recommendedStatus: 'unchanged',
+        reason: completionReason(
+          `Completion gate rejected premature agent_done because fill-completeness criteria are not satisfied: ${fillCompletenessGapSummary(fillCompletenessMissing)}. Continue with the suggested next actions instead of ending the run.`,
+          input,
+        ),
         missingCriteria,
         blockers,
         workflowPhase,
@@ -425,6 +448,78 @@ function uniqueFacts(facts: ActionablePageFact[]): ActionablePageFact[] {
     result.push(fact)
   }
   return result
+}
+
+function fillCompletenessCriteria(
+  input: CompletionGateInput,
+  workflowPhase: WorkflowPhase | string | undefined,
+): WorkflowCriterionMissing[] {
+  if (isFinalSubmitBoundary(workflowPhase, input.workflowEvaluation?.blockers ?? [])) return []
+  const criteria: WorkflowCriterionMissing[] = []
+  const formCoverage = input.formCoverage ?? input.form?.formCoverage ?? input.workflowState?.formCoverage
+  const ledger = input.fillLedgerSummary ?? input.workflowState?.fillLedgerSummary
+  const hasPlannedFillWork = (ledger?.total ?? 0) > 0
+  const shouldRequireAudit = hasPlannedFillWork
+
+  if (shouldRequireAudit && formCoverage?.scrolledBottom !== true) {
+    criteria.push(fillCriterion(
+      'fill_form_coverage_scrolled_bottom',
+      'Form coverage audit must reach the bottom of the form before completion.',
+      formCoverage
+        ? 'Run browser_form_audit or scroll/audit again until formCoverage.scrolledBottom is true.'
+        : 'Run browser_form_audit so formCoverage evidence proves the whole form was scanned.',
+    ))
+  }
+
+  if (hasPlannedFillWork && ledger && ledger.pendingRequired > 0) {
+    criteria.push(fillCriterion(
+      'fill_pending_required_zero',
+      'FillLedger pendingRequired must be 0 before completion.',
+      `Fill or explicitly resolve ${ledger.pendingRequired} required field(s) still pending in FillLedger.`,
+    ))
+  }
+
+  if (hasPlannedFillWork && ledger && ledger.failed > 0) {
+    criteria.push(fillCriterion(
+      'fill_failed_zero',
+      'FillLedger failed must be 0 before completion.',
+      `Retry, inspect options, or mark a safe alternative for ${ledger.failed} failed field(s).`,
+    ))
+  }
+
+  if (hasPlannedFillWork && ledger && ledger.needsUser > 0) {
+    criteria.push(fillCriterion(
+      'fill_needs_user_zero',
+      'FillLedger needsUser must be 0 before completion.',
+      `Call ask_user for ${ledger.needsUser} field(s) that need user input, then fill the answers.`,
+    ))
+  }
+
+  if (input.requiresCurrentResumeUpload && input.currentResumeUploaded !== true && input.workflowState?.currentResumeUploaded !== true) {
+    criteria.push(fillCriterion(
+      'fill_current_resume_uploaded',
+      'The current task resume file must be uploaded before completion.',
+      'Use browser_upload_file for the current resumePath, then refresh form/page state.',
+    ))
+  }
+
+  return criteria
+}
+
+function fillCriterion(id: string, description: string, reason: string): WorkflowCriterionMissing {
+  return {
+    id,
+    kind: 'evidence_required',
+    description,
+    evidenceKinds: [],
+    missingEvidenceKinds: [],
+    evidenceIds: [],
+    reason,
+  }
+}
+
+function fillCompletenessGapSummary(criteria: WorkflowCriterionMissing[]): string {
+  return criteria.map((criterion) => `${criterion.id}: ${criterion.reason}`).join('; ')
 }
 
 function isRequiredOrCriticalMissingCriterion(criterion: WorkflowCriterionMissing): boolean {

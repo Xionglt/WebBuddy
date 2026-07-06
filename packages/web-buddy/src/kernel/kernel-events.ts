@@ -18,6 +18,7 @@ export type KernelEventType =
   | 'workflow_evidence_recorded'
   | 'workflow_evaluated'
   | 'completion_gate_evaluated'
+  | 'user_answer_recorded'
   | 'session_restored'
   | 'user_confirmed'
   | 'session_completion_rechecked'

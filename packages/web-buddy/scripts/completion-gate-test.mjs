@@ -172,6 +172,64 @@ assert.equal(blockedMissingUserConfirm.recommendedStatus, 'blocked')
 assert.deepEqual(blockedMissingUserConfirm.missingCriteria[0].missingEvidenceKinds, ['user_confirm'])
 assert.match(blockedMissingUserConfirm.reason, /required workflow evidence is missing/i)
 
+const rejectedNoAudit = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  form: formState({ fields: [filledField('姓名', 'Zhang San')] }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  source: 'agent_done',
+})
+assert.equal(rejectedNoAudit.action, 'reject')
+assert.match(rejectedNoAudit.reason, /fill_form_coverage_scrolled_bottom/)
+assert.match(rejectedNoAudit.reason, /browser_form_audit/)
+
+const rejectedLedgerPendingRequired = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 2, verified: 1, pendingRequired: 1 }),
+  source: 'agent_done',
+})
+assert.equal(rejectedLedgerPendingRequired.action, 'reject')
+assert.match(rejectedLedgerPendingRequired.reason, /fill_pending_required_zero/)
+
+const rejectedLedgerNeedsUser = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 2, verified: 1, needsUser: 1 }),
+  source: 'agent_done',
+})
+assert.equal(rejectedLedgerNeedsUser.action, 'reject')
+assert.match(rejectedLedgerNeedsUser.reason, /ask_user/)
+
+const rejectedLedgerFailed = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 2, verified: 1, failed: 1 }),
+  source: 'agent_done',
+})
+assert.equal(rejectedLedgerFailed.action, 'reject')
+assert.match(rejectedLedgerFailed.reason, /fill_failed_zero/)
+
+const rejectedResumeNotUploaded = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: false,
+  source: 'agent_done',
+})
+assert.equal(rejectedResumeNotUploaded.action, 'reject')
+assert.match(rejectedResumeNotUploaded.reason, /fill_current_resume_uploaded/)
+
 const allowedDone = CompletionGate.evaluate({
   done: true,
   blocked: false,
@@ -179,6 +237,10 @@ const allowedDone = CompletionGate.evaluate({
     phase: 'done',
     evidenceIds: ['ev-tool-done', 'ev-user-confirm'],
   }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: true,
   source: 'agent_done',
 })
 assert.equal(allowedDone.action, 'allow')
@@ -241,6 +303,33 @@ function formState(overrides = {}) {
     submitCandidates: [],
     uploadHints: [],
     visibleErrors: [],
+    updatedAt: '2026-06-30T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function scrolledBottomCoverage(overrides = {}) {
+  return {
+    schemaVersion: 'form-coverage/v1',
+    scrolledTop: true,
+    scrolledBottom: true,
+    segments: 2,
+    totalFieldsSeen: 1,
+    auditTool: 'browser_form_audit',
+    updatedAt: '2026-06-30T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function ledgerSummary(overrides = {}) {
+  return {
+    schemaVersion: 'fill-ledger-summary/v1',
+    total: 0,
+    verified: 0,
+    failed: 0,
+    needsUser: 0,
+    skipped: 0,
+    pendingRequired: 0,
     updatedAt: '2026-06-30T00:00:00.000Z',
     ...overrides,
   }

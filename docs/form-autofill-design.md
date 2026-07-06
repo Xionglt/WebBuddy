@@ -1,6 +1,6 @@
 # Web-Buddy 自主填表能力设计文档（信息获取 → 转化 → 填写）
 
-状态：设计草案（v1，2026-07-03）
+状态：实现进度表（v1，2026-07-03）
 关联：`docs/golden-problems.md`（GP-001 / GP-002）、`docs/safety-model.md`
 
 ---
@@ -385,31 +385,32 @@ FillLedger.needsUser = 0                    # 无待问用户
 
 ---
 
-## 7. 分阶段落地计划
+## 7. 实现进度表
 
-每阶段可独立合入、独立回归（沿用现有 `scripts/*-test.mjs` + `npm run build`）。
+本节从原"分阶段落地计划"更新为当前实现进度。状态以 2026-07-03 本地 QA 为准。
 
-### Phase 1 — 打通信息（1~2 天，投产比最高）
-- 停止压扁简历：`resumeV2` 传入 + `ProfileStore` + `resume_query` 工具。
-- `ask_user` 工具 + `AnswerStore` + `info_request` gate。
-- prompt 增加"缺细节先 resume_query / 缺信息用 ask_user"的指令。
-- **验收**：新增 `scripts/resume-query-test.mjs`、`scripts/ask-user-flow-test.mjs`；demo-form 上能填出比现在多的字段；构建通过。
+| 模块 | 状态 | 已落地 | 验证 |
+| --- | --- | --- | --- |
+| 完整简历透传 | 已完成 | `AgentLoopInput.resumeV2`、`ProfileStore`、运行时上下文注入 | `npm run test:resume-query` 通过 |
+| `resume_query` | 已完成 | L0 本地工具，可按 section 查询 V2 简历，结果写 transcript | `scripts/resume-query-test.mjs` 通过 |
+| `ask_user` / AnswerStore | 已完成 | L0 信息请求工具，复用 human input 入口，同 field 去重，写 `user_answer` transcript | `scripts/ask-user-flow-test.mjs` 通过 |
+| FILL_PLAN prompt 段 | 已完成 | `ContextSnapshot` 增 `fieldPlan` / `fillLedgerSummary` / `answerSummary`，`prompt-sections.ts` 渲染填表上下文 | `npm run test:prompt-sections`、`npm run test:context` 覆盖 |
+| FieldPlan 类型 | 已完成 | `fill/field-plan.ts` 定义 `FieldPlan` / `PlannedField` / `FieldPlanner` 接口 | build 覆盖 |
+| FieldPlanner 实现 | 已完成 | 已有确定性 mapper、normalizers、枚举模糊匹配、LLM 兜底、`plan_form_fill` 工具和保守自动触发；LLM 只补 `valueSource=none` 的未决字段，不覆盖确定性结果 | `npm run test:field-planner`、`npm run test:tool-catalog` 通过 |
+| 滚动表单审计 | 已完成 | `browser/form-audit.ts`、`browser_form_audit`、`formCoverage` 写入 FormState/WorkflowState | `npm run test:form-audit` 通过 |
+| 自定义选项探测 | 已完成 | `browser/inspect-options.ts`、`browser_inspect_options`，覆盖 role/listbox、Ant Select、cascader fixture | `npm run test:inspect-options` 通过 |
+| 必填检测增强 | 已完成 | `requiredConfidence`、错误文案匹配、checkbox/自定义控件状态进入 FormState | `npm run test:form-audit`、`npm run test:observation` 通过 |
+| `browser_set_field` | 已完成 | L2 高层写字段工具，覆盖 text/textarea/native select/custom select/cascader/date/radio/checkbox，文件字段拒绝转由 upload 工具处理 | `scripts/set-field-test.mjs` 通过 |
+| 回读校验 | 已完成 | `set_field` 执行后 readback，比对 intendedValue，失败返回结构化原因 | `scripts/set-field-test.mjs` 通过 |
+| FillLedger | 已完成 | `fill/fill-ledger.ts`、运行时实例化，随 `browser_set_field` 结果更新并注入 prompt/workflow | `npm run test:completion-gate`、`npm run test:agent-runtime-workflow` 通过 |
+| fill-completion gate | 已完成 | completion gate 消费 `formCoverage`、`fillLedgerSummary`、`requiresCurrentResumeUpload`、`currentResumeUploaded`，拒绝过早 `agent_done` | `npm run test:completion-gate`、`npm run test:agent-runtime-workflow` 通过 |
+| demo-form 本地验收 | 已完成 | 离线 demo 能解析简历、打开本地表单、填 name/email/phone/summary，并在 L3 save 边界停住不提交；新增固定离线脚本避免误走外部模型 | `npm run demo:form:offline` 通过；外部 GLM 路径曾因 HTTP 529 阻塞 |
+| 真实阿里 E2E | 待跑 | 本轮未触碰真实站点；需在执行前确认 GP-002 quota 弹窗 final_submit 边界、当前简历上传证据、整页表单审计证据 | 见第 12 节检查清单 |
 
-### Phase 2 — 转化层（2~3 天，核心）
-- `FieldPlanner`（确定性 mapper + LLM 兜底）+ `Normalizers` + `matchOption`。
-- `FILL_PLAN` prompt 段 + ContextSnapshot 扩展。
-- **验收**：`scripts/field-planner-test.mjs`（给定字段集+简历，断言 PlannedField 正确，含派生"工作年限/最高学历"、枚举模糊匹配）；纯确定性路径不依赖网络。
+当前主要缺口：
 
-### Phase 3 — 观察 + 执行增强（2~3 天）
-- `browser_form_audit`（滚动审计 + formCoverage）。
-- `browser_inspect_options`（自定义下拉/级联选项）。
-- `browser_set_field`（分派 + 回读校验）。
-- **验收**：新增本地 HTML fixture（含自定义下拉、级联、日期、懒加载区）+ `scripts/set-field-test.mjs`、`scripts/form-audit-test.mjs`。
-
-### Phase 4 — 完成度闭环（1~2 天）
-- `FillLedger` + prompt 注入 + fill-completion criteria。
-- 接 GP-002 的 `currentResumeUploaded` / `formScrollAuditStatus`。
-- **验收**：扩展 `scripts/completion-gate-test.mjs`：pendingRequired>0 / 未滚到底 / needsUser>0 时拒绝 agent_done；全绿后允许停在 final_submit 边界。真实阿里 E2E 复跑，目标"先填全+验证，再停最终提交前"。
+- `FieldPlanner` 的外部真实模型调用仍需要单独 smoke/E2E；本地回归使用 fake LLM 覆盖 hybrid merge 语义。
+- demo-form 的 LLM 驱动路径仍依赖外部模型，本轮 GLM 返回 HTTP 529；固定离线 heuristic 脚本已通过，可作为 QA 默认验收路径。
 
 ---
 
@@ -433,6 +434,13 @@ FillLedger.needsUser = 0                    # 无待问用户
 | 回读校验误判自定义控件 | 值不在 .value 上 | 校验读多来源（value / aria / 选中项文案）；失败降级为 unverified 而非 failed 阻塞 |
 | 工作量 | 4 阶段较大 | Phase 1 单独就能显著改善"填不出字段"，可先只做 Phase 1+2 |
 
+### 9.1 已知限制（实现后补记）
+
+| 限制 | 说明 | 现状/后续 |
+| --- | --- | --- |
+| FieldPlan 不随表单变化自动重算 | `ensureFieldPlan` 有 `if (ctx.fieldPlan) return` 守卫，上传简历、滚动露出新字段、或页面跳转后，plan 不会自动刷新，需模型主动调 `plan_form_fill(refresh:true)` | prompt（NEXT_ACTION_RULES）已提示"FILL_PLAN missing/stale 时先 plan_form_fill"，但依赖模型自觉。后续可在"表单字段数变化 / URL 变化"时自动使 plan 失效 |
+| 工作年限按段求和会重复累加 | `normalizers.ts:deriveYearsOfExperience` 逐段 `period` 相加，若多段经历时间重叠会高估年限（可能偏差 1–2 年） | 低优先级。后续可改为按月份区间取并集去重后再统计 |
+
 ---
 
 ## 10. 最小可行切片（如果只做一件事）
@@ -447,3 +455,20 @@ FillLedger.needsUser = 0                    # 无待问用户
 1. `ask_user` 在非交互（无 TTY / benchmark）下的默认行为：跳过该字段并记 `needs_user`，还是整任务 block？（建议：记 `needs_user` 并继续，不阻塞主流程。）
 2. FieldPlanner 的 LLM 兜底是否允许联网调用？在纯离线回归里应可关闭，只跑确定性路径。
 3. `browser_set_field` 是否直接取代旧的三个填写工具，还是灰度共存一段时间？（建议共存，prompt 引导优先用新工具。）
+
+## 12. 真实阿里 E2E 前检查清单
+
+执行真实站点前，先确认以下项，避免重复 GP-002 中"旧简历/未填全/误投递"风险。
+
+| 检查项 | 必须满足的证据 |
+| --- | --- |
+| 账号与登录 | 使用显式 `login` 命令预先登录；不在 agent 中自动输入账号、密码、短信码或处理验证码。 |
+| 简历文件 | `extraContext` / trace 中有 `Current task resume file path`；上传动作只能走真实 `input[type=file]` 或明确上传控件。 |
+| 当前简历已生效 | `currentResumeUploaded=true`，并保留上传后的页面观察、截图或表单状态证据；未确认时不得进入最终投递。 |
+| 整页表单审计 | 已运行 `browser_form_audit`，`formCoverage.scrolledBottom=true`，首屏外字段也进入 FormState。 |
+| 必填字段 | `FillLedger.pendingRequired=0`，无确定必填未填；`failed=0`，无未处理写入失败；`needsUser=0`，无待问用户信息。 |
+| 自定义选项 | 对关键 select/cascader 已用 `browser_inspect_options` 或页面观察证明选项和值匹配。 |
+| 保存/上传/最终提交 | `save_resume`、`upload_resume`、`final_submit` 仍由 gate 控制；permission mode 不得绕过 final submit。 |
+| quota 弹窗 | 出现"本月能申请 N 个职位 / 请慎重选择 / 投递名额"等文案时，弹窗确认按钮按 `final_submit` 处理，不作为普通申请流程确认。 |
+| agent_done | 只有在 fresh observation 之后，且 completion gate 没有返回缺口时，才接受完成或停在最终提交边界。 |
+| 输出归档 | 保存 trace、session transcript、final screenshot、page-state/form-state artifacts，便于复盘真实风险边界。 |

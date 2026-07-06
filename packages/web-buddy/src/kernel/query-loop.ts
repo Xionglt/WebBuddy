@@ -2,7 +2,7 @@ import type { AgentRuntimeEvent, AgentRuntimeLlm, AgentSafetyMode, AgentStopReas
 import type { HumanGate } from '../sdk/human.js'
 import type { LlmGateway } from '../sdk/llm.js'
 import type { PermissionMode } from '../permission/index.js'
-import type { ResumeProfile } from '../sdk/resume.js'
+import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
 import { runAgentLoop, type AgentEvent, type AgentLoopResult } from '../runtime/local/agent-loop.js'
 import { ToolRegistry, type ToolContext } from '../runtime/local/tool-registry.js'
@@ -24,6 +24,7 @@ import { createTokenBudgetSnapshot, type TokenBudgetSnapshot } from './token-bud
 export interface QueryLoopInput {
   goal: string
   resume: ResumeProfile
+  resumeV2?: ResumeProfileV2
   llm: AgentRuntimeLlm
   registry?: ToolRegistry
   ctx: ToolContext
@@ -73,6 +74,7 @@ export class QueryLoop {
       const loopResult = await runAgentLoop({
         goal: input.goal,
         resume: input.resume,
+        resumeV2: input.resumeV2,
         llm: input.llm as LlmGateway,
         registry,
         ctx: input.ctx,

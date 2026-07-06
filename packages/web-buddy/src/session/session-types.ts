@@ -113,6 +113,16 @@ export interface UserConfirmationEntry extends TranscriptEntryBase {
   confirmation: unknown
 }
 
+export interface UserAnswerEntry extends TranscriptEntryBase {
+  type: 'user_answer'
+  toolCallId?: string
+  field: string
+  question: string
+  answer: string
+  source: 'ask_user'
+  data?: unknown
+}
+
 export interface WorkflowEvaluationEntry extends TranscriptEntryBase {
   type: 'workflow_evaluation'
   evaluation: unknown
@@ -156,6 +166,7 @@ export type TranscriptEntry =
   | WorkflowSnapshotEntry
   | WorkflowEvidenceEntry
   | UserConfirmationEntry
+  | UserAnswerEntry
   | WorkflowEvaluationEntry
   | CompletionGateEntry
   | ContextCompactionEntry

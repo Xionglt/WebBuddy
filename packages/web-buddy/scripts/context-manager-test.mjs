@@ -57,6 +57,36 @@ try {
     reason: 'Application fields are present.',
     updatedAt: '2026-06-25T00:00:30.000Z',
   }
+  const fieldPlan = {
+    schemaVersion: 'field-plan/v1',
+    planned: [
+      {
+        fieldKey: 'email',
+        fieldIndex: 1,
+        label: 'Email',
+        controlKind: 'text',
+        required: true,
+        intendedValue: 'zhangsan@example.com',
+        valueSource: 'resume',
+        sourceRef: 'contact.email',
+        confidence: 0.97,
+      },
+    ],
+    sourceFormUrl: pageState.url,
+    fieldCount: 2,
+    updatedAt: '2026-06-25T00:00:31.000Z',
+  }
+  const fillLedgerSummary = {
+    schemaVersion: 'fill-ledger-summary/v1',
+    total: 1,
+    verified: 0,
+    failed: 0,
+    needsUser: 0,
+    skipped: 0,
+    pendingRequired: 1,
+    updatedAt: '2026-06-25T00:00:32.000Z',
+  }
+  const answerSummary = '- field=Email | answer=zhangsan@example.com | source=ask_user | at=2026-06-25T00:00:33.000Z'
 
   const provider = {
     getPageState(sessionId) {
@@ -83,6 +113,9 @@ try {
     blockers: ['captcha not present'],
     taskState,
     workflowState,
+    fieldPlan,
+    fillLedgerSummary,
+    answerSummary,
     updatedAt: '2026-06-25T00:01:00.000Z',
   })
 
@@ -97,6 +130,9 @@ try {
   assert.equal(snapshot.blockers[0], 'captcha not present')
   assert.deepEqual(snapshot.taskState, taskState)
   assert.deepEqual(snapshot.workflowState, workflowState)
+  assert.deepEqual(snapshot.fieldPlan, fieldPlan)
+  assert.deepEqual(snapshot.fillLedgerSummary, fillLedgerSummary)
+  assert.equal(snapshot.answerSummary, answerSummary)
   assert.equal(snapshot.freshness.staleAfterMs, 30_000)
   assert.equal(snapshot.freshness.pageStateUpdatedAt, pageState.updatedAt)
   assert.equal(snapshot.freshness.formStateUpdatedAt, formState.updatedAt)
