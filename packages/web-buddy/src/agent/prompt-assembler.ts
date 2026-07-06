@@ -28,7 +28,7 @@ export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
     'On Alibaba position-detail pages, if a small checkbox says 申请此职位表明您已阅读并同意 / 申请工作需知 next to 投递简历, check that box before clicking 投递简历. This is an application-entry precondition, not permission to click a true final submit button later.',
     'For any element marked risk=L3 or risk=L4, the human must approve before the action runs; you may still request it because the system gates it.',
     'If you hit a login wall or captcha you cannot pass, call agent_done with blocked=true and explain.',
-    'Prefer to fill only the fields you can map confidently from the resume. Leave unknown fields untouched.',
+    'Fill fields from FILL_PLAN first. When a field cannot be mapped, call resume_query for the full resume section or ask_user for missing information before leaving it blank; only leave a field untouched when no resume, derived, or user-answer source exists.',
     'If the task context provides a current resume file path, an existing on-site resume is NOT sufficient by itself. Prefer uploading the current resume file first, through browser_upload_file, before continuing the application flow unless the human explicitly says to reuse the existing on-site resume.',
   ]
 }
@@ -52,6 +52,9 @@ export class PromptAssembler {
       extraContext: input.extraContext,
       taskState: input.taskState ?? createDefaultTaskState({ goal: input.goal, updatedAt }),
       workflowState: input.workflowState,
+      fieldPlan: input.fieldPlan,
+      fillLedgerSummary: input.fillLedgerSummary,
+      answerSummary: input.answerSummary,
       updatedAt,
     })
   }

@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Form Observation Fixture</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 24px;
+      }
+      form {
+        max-width: 680px;
+      }
+      .ant-form-item,
+      .field {
+        margin: 0 0 24px;
+      }
+      .ant-form-item-label,
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .ant-form-item-required::after {
+        color: #d33;
+        content: " *";
+      }
+      input,
+      .ant-select,
+      .ant-cascader {
+        border: 1px solid #888;
+        box-sizing: border-box;
+        min-height: 36px;
+        padding: 8px;
+        width: 320px;
+      }
+      .spacer {
+        height: 980px;
+      }
+      .ant-select-dropdown,
+      .ant-cascader-dropdown {
+        background: white;
+        border: 1px solid #777;
+        box-shadow: 0 2px 8px rgb(0 0 0 / 15%);
+        margin-top: 4px;
+        padding: 4px;
+        width: 320px;
+      }
+      .ant-select-dropdown-hidden,
+      .ant-cascader-dropdown-hidden {
+        display: none;
+      }
+      .ant-select-item-option,
+      .ant-cascader-menu-item {
+        cursor: default;
+        padding: 6px 8px;
+      }
+      .ant-cascader-menu {
+        display: inline-block;
+        min-width: 140px;
+        vertical-align: top;
+      }
+      .ant-form-item-explain-error {
+        color: #b00020;
+        margin-top: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <form>
+      <div class="ant-form-item">
+        <div class="ant-form-item-label"><label for="full-name">姓名</label></div>
+        <input id="full-name" name="fullName" value="张三" />
+      </div>
+
+      <div class="ant-form-item">
+        <div class="ant-form-item-label ant-form-item-required"><label>城市</label></div>
+        <div class="ant-select" role="combobox" aria-expanded="false" aria-haspopup="listbox" tabindex="0">
+          <span class="ant-select-selection-placeholder">请选择城市</span>
+        </div>
+        <div class="ant-select-dropdown ant-select-dropdown-hidden" role="listbox">
+          <div class="ant-select-item-option" role="option" data-value="hangzhou">杭州</div>
+          <div class="ant-select-item-option" role="option" data-value="shanghai">上海</div>
+          <div class="ant-select-item-option" role="option" data-value="beijing">北京</div>
+        </div>
+      </div>
+
+      <div class="ant-form-item">
+        <div class="ant-form-item-label"><label>地区</label></div>
+        <div class="ant-cascader" role="combobox" aria-haspopup="tree" tabindex="0">
+          <span class="ant-select-selection-placeholder">请选择地区</span>
+        </div>
+        <div class="ant-cascader-dropdown ant-cascader-dropdown-hidden">
+          <div class="ant-cascader-menu">
+            <div class="ant-cascader-menu-item" data-value="zhejiang">浙江</div>
+            <div class="ant-cascader-menu-item" data-value="jiangsu">江苏</div>
+          </div>
+          <div class="ant-cascader-menu">
+            <div class="ant-cascader-menu-item" data-value="hangzhou">杭州</div>
+            <div class="ant-cascader-menu-item" data-value="ningbo">宁波</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label><input type="checkbox" name="agreement" checked /> 我已阅读协议</label>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="ant-form-item required">
+        <div class="ant-form-item-label ant-form-item-required"><label for="portfolio">作品链接</label></div>
+        <input id="portfolio" name="portfolio" type="url" />
+        <div class="ant-form-item-explain-error">作品链接不能为空</div>
+      </div>
+
+      <div class="field">
+        <label for="source">信息来源</label>
+        <select id="source" name="source">
+          <option value="">请选择</option>
+          <option value="referral" selected>朋友推荐</option>
+          <option value="search">搜索引擎</option>
+        </select>
+      </div>
+    </form>
+
+    <script>
+      const city = document.querySelector('.ant-select')
+      const cityDropdown = document.querySelector('.ant-select-dropdown')
+      const cascader = document.querySelector('.ant-cascader')
+      const cascaderDropdown = document.querySelector('.ant-cascader-dropdown')
+
+      city.addEventListener('click', () => {
+        city.setAttribute('aria-expanded', 'true')
+        cityDropdown.classList.remove('ant-select-dropdown-hidden')
+      })
+      cascader.addEventListener('click', () => {
+        cascaderDropdown.classList.remove('ant-cascader-dropdown-hidden')
+      })
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return
+        city.setAttribute('aria-expanded', 'false')
+        cityDropdown.classList.add('ant-select-dropdown-hidden')
+        cascaderDropdown.classList.add('ant-cascader-dropdown-hidden')
+      })
+    </script>
+  </body>
+</html>

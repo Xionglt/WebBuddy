@@ -60,6 +60,31 @@ const snapshot = {
     reason: 'All required fields appear filled and submit candidates are visible.',
     updatedAt: '2026-06-25T00:00:02.500Z',
   },
+  fieldPlan: {
+    schemaVersion: 'field-plan/v1',
+    sourceFormUrl: 'https://example.test/apply',
+    fieldCount: 3,
+    planned: [
+      plannedField(0, 'Name', 'Zhang San', 'resume', 0.98, { required: true, sourceRef: 'contact.name' }),
+      plannedField(1, 'Email', 'zhangsan@example.com', 'resume', 0.97, { required: true, sourceRef: 'contact.email' }),
+      plannedField(3, 'Expected salary', null, 'none', 0.2, {
+        required: true,
+        needsUser: { question: 'What expected salary should I enter?', options: ['Negotiable', 'Market rate'] },
+      }),
+    ],
+    updatedAt: '2026-06-25T00:00:02.750Z',
+  },
+  fillLedgerSummary: {
+    schemaVersion: 'fill-ledger-summary/v1',
+    total: 3,
+    verified: 1,
+    failed: 0,
+    needsUser: 1,
+    skipped: 0,
+    pendingRequired: 1,
+    updatedAt: '2026-06-25T00:00:02.900Z',
+  },
+  answerSummary: '- field=Expected salary | answer=Negotiable | source=ask_user | at=2026-06-25T00:00:02.800Z',
   freshness: {
     pageStateUpdatedAt: '2026-06-25T00:00:00.000Z',
     formStateUpdatedAt: '2026-06-25T00:00:00.000Z',
@@ -106,6 +131,16 @@ assert.deepEqual(
   ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'RESUME_SUMMARY'],
   'WORKFLOW_STATE should render after TASK_STATE and before RESUME_SUMMARY',
 )
+assert.equal(
+  PROMPT_SECTION_ORDER.indexOf('FILL_PLAN'),
+  PROMPT_SECTION_ORDER.indexOf('CURRENT_FORM_STATE') + 1,
+  'FILL_PLAN should render immediately after CURRENT_FORM_STATE',
+)
+assert.equal(
+  PROMPT_SECTION_ORDER.indexOf('RECENT_ACTIONS'),
+  PROMPT_SECTION_ORDER.indexOf('FILL_PLAN') + 1,
+  'RECENT_ACTIONS should render after FILL_PLAN',
+)
 
 const rendered = renderPromptSections(sections)
 let previousIndex = -1
@@ -138,6 +173,25 @@ assert(workflowStateSection.content.includes('schemaVersion: workflow-state/v1')
 assert(workflowStateSection.content.includes('phase: reviewing'), 'WorkflowState phase should enter prompt')
 assert(workflowStateSection.content.includes('confidence: medium'), 'WorkflowState confidence should enter prompt')
 assert(workflowStateSection.content.includes('humanHandoffRequired: false'), 'WorkflowState handoff cue should enter prompt')
+
+const fillPlanSection = findSection(sections, 'FILL_PLAN')
+assert(fillPlanSection.content.includes('plannedFields:'), 'planned fields should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('Name'), 'planned field labels should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('suggestedValue="Zhang San"'), 'planned suggested values should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('source=resume'), 'planned value source should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('confidence=0.98'), 'planned confidence should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('needsUser="What expected salary should I enter?"'), 'needsUser question should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('pendingRequired=true'), 'pending required cue should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('fillLedgerSummary: total=3'), 'ledger summary should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('needsUser=1'), 'ledger needsUser count should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('pendingRequired=1'), 'ledger pendingRequired count should enter FILL_PLAN')
+assert(fillPlanSection.content.includes('answerSummary:'), 'answer summary should enter FILL_PLAN')
+
+const nextActionSection = findSection(sections, 'NEXT_ACTION_RULES')
+assert(nextActionSection.content.includes('plan_form_fill'), 'NEXT_ACTION_RULES should refresh missing or stale FieldPlan')
+assert(nextActionSection.content.includes('browser_set_field'), 'NEXT_ACTION_RULES should prefer browser_set_field')
+assert(nextActionSection.content.includes('resume_query'), 'NEXT_ACTION_RULES should direct resume detail lookups to resume_query')
+assert(nextActionSection.content.includes('ask_user'), 'NEXT_ACTION_RULES should direct missing user info to ask_user')
 
 const defaultTaskStateSection = findSection(buildPromptSections({ ...snapshot, taskState: undefined }), 'TASK_STATE')
 assert(defaultTaskStateSection.content.includes('phase: observing'), 'missing taskState should render a default observing state')
@@ -279,6 +333,20 @@ function field(index, label, value, required) {
     disabled: false,
     readonly: false,
     invalid: required && !value,
+  }
+}
+
+function plannedField(index, label, intendedValue, valueSource, confidence, overrides = {}) {
+  return {
+    fieldKey: `field-${index}`,
+    fieldIndex: index,
+    label,
+    controlKind: 'text',
+    required: false,
+    intendedValue,
+    valueSource,
+    confidence,
+    ...overrides,
   }
 }
 

@@ -24,12 +24,16 @@ const requiredLocal = [
   'browser_open',
   'browser_snapshot',
   'browser_form_snapshot',
+  'browser_form_audit',
+  'browser_inspect_options',
+  'plan_form_fill',
   'browser_click',
   'browser_click_text',
   'browser_type',
   'browser_fill_by_label',
   'browser_select',
   'browser_select_by_text',
+  'browser_set_field',
   'browser_wait',
   'browser_screenshot',
   'agent_done',
@@ -49,6 +53,10 @@ assertLocalParams('browser_wait', ['for', 'value', 'ms', 'timeoutMs'])
 assertLocalParams('browser_select', ['ref', 'value', 'timeoutMs'])
 assertLocalParams('browser_fill_by_label', ['label', 'text', 'exact', 'nth', 'clear', 'timeoutMs'])
 assertLocalParams('browser_select_by_text', ['option', 'label', 'ref', 'exact', 'nth', 'optionNth', 'timeoutMs'])
+assertLocalParams('browser_set_field', ['field', 'intendedValue', 'controlKind', 'label', 'ref', 'selector', 'fieldKey', 'fieldIndex', 'exact', 'nth', 'optionNth', 'clear', 'timeoutMs'])
+assertLocalParams('browser_form_audit', ['maxFields', 'waitMs'])
+assertLocalParams('browser_inspect_options', ['ref', 'label', 'exact', 'nth', 'maxOptions', 'open'])
+assertLocalParams('plan_form_fill', ['refresh'])
 
 const mcpNames = TOOL_DEFINITIONS.map((tool) => tool.name)
 for (const name of [
@@ -57,9 +65,12 @@ for (const name of [
   'browser_click',
   'browser_click_text',
   'browser_form_snapshot',
+  'browser_form_audit',
+  'browser_inspect_options',
   'browser_upload_file',
   'browser_fill_by_label',
   'browser_select_by_text',
+  'browser_set_field',
   'browser_type',
   'browser_select',
   'browser_wait',
@@ -71,8 +82,16 @@ for (const name of [
 assert(!mcpNames.includes('agent_done'), 'agent_done is local-only')
 assert.equal(mcp.length, TOOL_DEFINITIONS.length, 'MCP adapter should project every MCP-enabled catalog tool')
 assert.equal(getToolCategory('browser_snapshot'), 'observation')
+assert.equal(getToolCategory('browser_form_audit'), 'observation')
+assert.equal(getToolCategory('browser_inspect_options'), 'observation')
 assert.equal(getToolCategory('browser_click'), 'action')
 assert.equal(getToolCategory('agent_done'), 'human')
+
+assertToolRisk('browser_form_snapshot', 'L0')
+assertToolRisk('browser_form_audit', 'L0')
+assertToolRisk('browser_inspect_options', 'L0')
+assertToolRisk('plan_form_fill', 'L0')
+assertToolRisk('browser_set_field', 'L2')
 
 console.log('tool-catalog-test: PASS')
 
@@ -84,4 +103,10 @@ function assertLocalParams(name, params) {
   for (const param of params) {
     assert(Object.hasOwn(properties, param), `${name} local schema missing ${param}`)
   }
+}
+
+function assertToolRisk(name, risk) {
+  const tool = all.find((item) => item.name === name)
+  assert(tool, `catalog missing ${name}`)
+  assert.equal(tool.risk, risk, `${name} should be ${risk}`)
 }

@@ -43,6 +43,9 @@ export class ContextManager {
       form,
       ...(input.taskState ? { taskState: input.taskState } : {}),
       ...(input.workflowState ? { workflowState: input.workflowState } : {}),
+      ...(input.fieldPlan ? { fieldPlan: input.fieldPlan } : {}),
+      ...(input.fillLedgerSummary ? { fillLedgerSummary: input.fillLedgerSummary } : {}),
+      ...(input.answerSummary ? { answerSummary: input.answerSummary } : {}),
       freshness: buildContextFreshness({
         pageStateUpdatedAt: page?.updatedAt,
         formStateUpdatedAt: form?.updatedAt,

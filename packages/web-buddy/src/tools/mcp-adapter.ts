@@ -2,11 +2,14 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import { browserClick } from '../browser/click.js'
 import { browserClickText } from '../browser/click-text.js'
 import { browserFillByLabel } from '../browser/fill-by-label.js'
+import { browserFormAudit } from '../browser/form-audit.js'
 import { browserFormSnapshot } from '../browser/form-snapshot.js'
+import { browserInspectOptions } from '../browser/inspect-options.js'
 import { browserOpen } from '../browser/open.js'
 import { browserScreenshot } from '../browser/screenshot.js'
 import { browserSelect } from '../browser/select.js'
 import { browserSelectByText } from '../browser/select-by-text.js'
+import { browserSetField } from '../browser/set-field.js'
 import { browserSnapshot } from '../browser/snapshot.js'
 import { browserType } from '../browser/type.js'
 import { browserUploadFile } from '../browser/upload-file.js'
@@ -21,9 +24,12 @@ const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknow
   browser_click: (args) => browserClick(args as Parameters<typeof browserClick>[0]),
   browser_click_text: (args) => browserClickText(args as Parameters<typeof browserClickText>[0]),
   browser_form_snapshot: (args) => browserFormSnapshot(args as Parameters<typeof browserFormSnapshot>[0]),
+  browser_form_audit: (args) => browserFormAudit(args as Parameters<typeof browserFormAudit>[0]),
+  browser_inspect_options: (args) => browserInspectOptions(args as Parameters<typeof browserInspectOptions>[0]),
   browser_upload_file: (args) => browserUploadFile(args as Parameters<typeof browserUploadFile>[0]),
   browser_fill_by_label: (args) => browserFillByLabel(args as Parameters<typeof browserFillByLabel>[0]),
   browser_select_by_text: (args) => browserSelectByText(args as Parameters<typeof browserSelectByText>[0]),
+  browser_set_field: (args) => browserSetField(args as Parameters<typeof browserSetField>[0]),
   browser_type: (args) => browserType(args as Parameters<typeof browserType>[0]),
   browser_select: (args) => browserSelect(args as Parameters<typeof browserSelect>[0]),
   browser_wait: (args) => browserWait(args as Parameters<typeof browserWait>[0]),

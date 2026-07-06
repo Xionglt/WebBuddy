@@ -22,6 +22,7 @@ export class AgentRuntime {
     const kernelResult = await this.kernel.start({
       goal: input.goal,
       resume: input.resume,
+      resumeV2: input.resumeV2,
       llm: input.llm,
       registry,
       ctx: input.ctx,

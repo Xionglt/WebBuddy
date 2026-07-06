@@ -26,6 +26,8 @@ export interface ActionIntentInput {
 const OBSERVE_TOOLS = new Set([
   'browser_snapshot',
   'browser_form_snapshot',
+  'browser_form_audit',
+  'browser_inspect_options',
   'browser_screenshot',
   'browser_wait',
   'agent_done',

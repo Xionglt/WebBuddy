@@ -14,6 +14,16 @@ import {
 } from '../../context/compaction.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
 import type { ContextRecentAction, ContextSnapshot } from '../../context/types.js'
+import { AnswerStore, type UserAnswer } from '../../context/answer-store.js'
+import { ProfileStore } from '../../context/profile-store.js'
+import { createFieldPlanner } from '../../fill/field-planner.js'
+import type { FieldPlan } from '../../fill/field-plan.js'
+import {
+  createFillLedger,
+  type FillLedger,
+  type FillLedgerEntryStatus,
+  type FillLedgerSummary,
+} from '../../fill/fill-ledger.js'
 import { estimateTokenBudget, type TokenBudgetOptions, type TokenBudgetSnapshot } from '../../kernel/token-budget.js'
 import { ApprovalQueue } from '../../permission/approval-queue.js'
 import { PermissionEngine } from '../../permission/permission-engine.js'
@@ -54,7 +64,7 @@ import {
 import { abortReason } from '../../kernel/run-controller.js'
 import type { GateDecision, GateKind, HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
-import type { ResumeProfile } from '../../sdk/resume.js'
+import type { ResumeProfile, ResumeProfileV2 } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
 import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
@@ -80,6 +90,14 @@ export interface AgentLoopInput {
   /** The natural-language task, e.g. "fill the application form on this page with my resume". */
   goal: string
   resume: ResumeProfile
+  /** Optional full structured resume. This is read-only context until autofill is enabled. */
+  resumeV2?: ResumeProfileV2
+  /** Optional field plan to inject into FILL_PLAN prompt context. */
+  fieldPlan?: FieldPlan
+  /** Optional fill ledger summary to inject into FILL_PLAN prompt context. */
+  fillLedgerSummary?: FillLedgerSummary
+  /** True when the current task includes a concrete local resume file that should be uploaded. */
+  requiresCurrentResumeUpload?: boolean
   llm: LlmGateway
   registry: ToolRegistry
   ctx: ToolContext
@@ -162,7 +180,25 @@ const DEFAULT_KEEP_RECENT_MESSAGES = 6
  * is no hardcoded field mapping.
  */
 export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResult> {
-  const { llm, registry, ctx, gate, resume, goal, onEvent } = input
+  const { llm, registry, gate, resume, goal, onEvent } = input
+  const profileStore = new ProfileStore(resume, input.resumeV2)
+  const answerStore = new AnswerStore()
+  const fillLedger = createFillLedger({
+    fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
+    summary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary,
+  })
+  const requiresCurrentResumeUpload = input.requiresCurrentResumeUpload ?? hasCurrentResumePath(input.extraContext)
+  let currentResumeUploaded = false
+  const ctx: ToolContext = {
+    ...input.ctx,
+    profileStore: input.ctx.profileStore ?? profileStore,
+    answerStore: input.ctx.answerStore ?? answerStore,
+    fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
+    fillLedgerSummary: fillLedger.summary(),
+    humanInput: input.ctx.humanInput ?? gate,
+    llm,
+  }
+  const loopInput: AgentLoopInput = { ...input, ctx }
   const safetyMode = input.safetyMode ?? 'guarded'
   const maxSteps = input.maxSteps ?? DEFAULT_MAX_STEPS
   const emit = (level: AgentEvent['level'], message: string, step: number) =>
@@ -226,6 +262,32 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     sessionAction('workflow', () => session!.workflow(state))
   const sessionStatus = async (status: AgentSessionStatus, patch?: Parameters<SessionRecorder['updateStatus']>[1]) =>
     sessionAction('status', () => session!.updateStatus(status, patch))
+  const syncFillLedgerSummary = (snapshot?: ContextSnapshot): FillLedgerSummary => {
+    const summary = fillLedger.summary()
+    ctx.fillLedgerSummary = summary
+    const formCoverage = latestFormCoverage(snapshot)
+    workflowState = {
+      ...workflowState,
+      fillLedgerSummary: summary,
+      ...(formCoverage ? { formCoverage } : {}),
+      currentResumeUploaded,
+    }
+    return summary
+  }
+  const ensureFieldPlan = async (snapshot: ContextSnapshot): Promise<ContextSnapshot> => {
+    if (ctx.fieldPlan || !snapshot.form?.fields?.length) return snapshot
+    const planner = createFieldPlanner({ llm })
+    ctx.fieldPlan = await planner.plan({
+      fields: snapshot.form.fields,
+      profileStoreAvailable: Boolean(ctx.profileStore),
+      answerStoreAvailable: Boolean(ctx.answerStore),
+      profileStore: ctx.profileStore,
+      answerStore: ctx.answerStore,
+      llm,
+      sourceFormUrl: snapshot.form.url,
+    })
+    return buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+  }
   const addWorkflowEvidence = async (
     evidenceInput: AddWorkflowEvidenceInput,
     currentStep: number,
@@ -415,7 +477,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       approvalFacts: [...approvals],
       evidenceSnapshot: workflowEvidenceStore.snapshot(),
     })
-    workflowState = evaluation.state
+    workflowState = {
+      ...evaluation.state,
+      fillLedgerSummary: fillLedger.summary(),
+      ...(evaluationInput.form?.formCoverage ? { formCoverage: evaluationInput.form.formCoverage } : {}),
+      currentResumeUploaded,
+    }
+    evaluation.state = workflowState
     lastWorkflowEvaluation = evaluation
     await recordWorkflowEvaluation(evaluation, currentStep, reason)
     await recordWorkflowSnapshot(workflowState, currentStep, reason)
@@ -659,13 +727,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     // no page yet — the model can call browser_open itself
   }
 
-  let latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+  let latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+  latestContext = await ensureFieldPlan(latestContext)
   const refreshLatestContextForAgentDone = async (currentStep: number): Promise<ContextSnapshot> => {
     const page = sessionManager.get(ctx.sessionId)?.page
     await page?.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
     await browserSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
     await browserFormSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
-    latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    latestContext = await ensureFieldPlan(latestContext)
+    syncFillLedgerSummary(latestContext)
     ctx.trace.record({
       phase: 'agent_loop',
       action: 'Refreshed page and form state before evaluating agent_done.',
@@ -700,14 +771,17 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         status: 'ok',
       })
     }
-    latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    latestContext = await ensureFieldPlan(latestContext)
+    syncFillLedgerSummary(latestContext)
     const contextWorkflow = await evaluateWorkflow(currentStep, `Workflow handoff ${handoffKind} approved; refreshed page state.`, {
       currentUrl: page?.url(),
       page: latestContext.page,
       form: latestContext.form,
     })
     if (contextWorkflow.changed) {
-      latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+      latestContext = await ensureFieldPlan(latestContext)
     }
     return workflowHandoffSummary(workflowState)
   }
@@ -751,7 +825,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     form: latestContext.form,
   })
   if (initialWorkflow.changed) {
-    latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+    latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+    latestContext = await ensureFieldPlan(latestContext)
   }
   const initialHandoffSummary = workflowHandoffSummary(workflowState)
   if (initialHandoffSummary) {
@@ -764,6 +839,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
     firstView = ''
   }
+  syncFillLedgerSummary(latestContext)
   let messages: ChatMessage[] = [
     { role: 'system', content: renderSystemContext(latestContext) },
     { role: 'user', content: renderInitialUserContext(latestContext, firstView) },
@@ -897,6 +973,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           workflowEvaluation: lastWorkflowEvaluation,
           page: latestContext.page,
           form: latestContext.form,
+          formCoverage: latestFormCoverage(latestContext),
+          fillLedgerSummary: fillLedger.summary(),
+          requiresCurrentResumeUpload,
+          currentResumeUploaded,
           source: 'model_no_tool_calls',
         })
         await recordCompletionGateDecision(completionGateDecision, step)
@@ -1271,7 +1351,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             turnId,
             step,
             toolCallId: call.id,
-            local: ctx,
+            local: { ...ctx, ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}) },
             abortSignal: input.abortSignal,
             metadata: {
               step,
@@ -1330,6 +1410,30 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         throw error
       }
       const toolOk = execution?.ok ?? !result.observation.startsWith('FAILED')
+      if (call.name === 'plan_form_fill' && toolOk && isFieldPlan(result.data)) {
+        ctx.fieldPlan = result.data
+        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+        latestContext = await ensureFieldPlan(latestContext)
+        syncFillLedgerSummary(latestContext)
+      }
+      const fillLedgerUpdate = updateFillLedgerAfterTool(fillLedger, call.name, call.arguments, result, toolOk)
+      if (fillLedgerUpdate) {
+        syncFillLedgerSummary(latestContext)
+        await sessionEvent({
+          type: 'workflow_updated',
+          turnId,
+          toolCallId: call.id,
+          message: `FillLedger updated: ${fillLedgerUpdate.status}.`,
+          data: {
+            fillLedgerSummary: fillLedger.summary(),
+            entry: fillLedgerUpdate,
+          },
+        })
+      }
+      if (call.name === 'browser_upload_file' && toolOk) {
+        currentResumeUploaded = true
+        syncFillLedgerSummary(latestContext)
+      }
       const compactResult = compactToolResult(result)
       await sessionTranscript({
         type: 'tool_result',
@@ -1347,6 +1451,26 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         message: `${call.name} ${toolOk ? 'completed' : 'failed'}.`,
         data: { name: call.name, result: compactResult },
       })
+      const userAnswer = userAnswerFromToolResult(result)
+      if (call.name === 'ask_user' && userAnswer) {
+        await sessionTranscript({
+          type: 'user_answer',
+          turnId,
+          toolCallId: call.id,
+          field: userAnswer.field,
+          question: userAnswer.question,
+          answer: userAnswer.answer,
+          source: userAnswer.source,
+          data: userAnswer,
+        })
+        await sessionEvent({
+          type: 'user_answer_recorded',
+          turnId,
+          toolCallId: call.id,
+          message: `User answered ${userAnswer.field}.`,
+          data: { field: userAnswer.field, source: userAnswer.source },
+        })
+      }
       ctx.trace.record({
         phase: 'agent_loop',
         action: `${call.name}(${argBrief})`,
@@ -1374,6 +1498,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           workflowEvaluation: preAgentDoneWorkflowEvaluation,
           page: latestContext.page,
           form: latestContext.form,
+          formCoverage: latestFormCoverage(latestContext),
+          fillLedgerSummary: fillLedger.summary(),
+          requiresCurrentResumeUpload,
+          currentResumeUploaded,
           source: 'agent_done',
         })
 
@@ -1426,11 +1554,36 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             workflowEvaluation,
             page: latestContext.page,
             form: latestContext.form,
+            formCoverage: latestFormCoverage(latestContext),
+            fillLedgerSummary: fillLedger.summary(),
+            requiresCurrentResumeUpload,
+            currentResumeUploaded,
             source: 'agent_done',
           })
           await recordCompletionGateDecision(completionGateDecision, step, { toolCallId: call.id })
 
-          if (completionGateDecision.action === 'block') {
+          if (completionGateDecision.action === 'reject') {
+            rejectedPrematureAgentDone = true
+            done = false
+            blocked = false
+            summary = 'no summary'
+            completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+            rememberUniqueBlocker(blockers, completionGateBlockSummary)
+            emit('gate', completionGateBlockSummary, step)
+            ctx.trace.record({
+              phase: 'agent_loop',
+              action: completionGateBlockSummary,
+              url: sessionManager.get(ctx.sessionId)?.page.url(),
+              status: 'warn',
+              observation: completionGateDecision.reason.slice(0, 300),
+            })
+            result = {
+              observation: completionGateDecision.reason,
+              done: false,
+              data: { blocked: false, completionGateAction: 'reject' },
+              pageChanged: false,
+            }
+          } else if (completionGateDecision.action === 'block') {
             done = true
             blocked = true
             summary = completionGateDecision.reason
@@ -1481,14 +1634,18 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
 
     if (!done) {
-      latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+      latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+      latestContext = await ensureFieldPlan(latestContext)
+      syncFillLedgerSummary(latestContext)
       const contextWorkflow = await evaluateWorkflow(step, 'Context refresh updated workflow state.', {
         currentUrl: sessionManager.get(ctx.sessionId)?.page.url(),
         page: latestContext.page,
         form: latestContext.form,
       })
       if (contextWorkflow.changed) {
-        latestContext = await buildLoopContextWithWorkflow(input, workflowState, recentActions, blockers)
+        latestContext = await buildLoopContextWithWorkflow(loopInput, workflowState, recentActions, blockers)
+        latestContext = await ensureFieldPlan(latestContext)
+        syncFillLedgerSummary(latestContext)
       }
       const handoffSummary = workflowHandoffSummary(workflowState)
       if (handoffSummary) {
@@ -1648,6 +1805,91 @@ function isFinalSubmitBoundaryActive(
   )) === true
 }
 
+function latestFormCoverage(snapshot: ContextSnapshot | undefined) {
+  return snapshot?.form?.formCoverage ?? snapshot?.workflowState?.formCoverage
+}
+
+function isFieldPlan(value: unknown): value is FieldPlan {
+  const plan = objectValue(value)
+  return plan.schemaVersion === 'field-plan/v1' && Array.isArray(plan.planned)
+}
+
+function hasCurrentResumePath(extraContext: string | undefined): boolean {
+  return /Current task resume file path:\s*\S+/i.test(extraContext ?? '')
+}
+
+function updateFillLedgerAfterTool(
+  ledger: FillLedger,
+  toolName: string,
+  args: Record<string, unknown>,
+  result: LocalToolRunResult,
+  ok: boolean,
+): { fieldKey: string; fieldIndex: number; status: FillLedgerEntryStatus } | undefined {
+  if (toolName !== 'browser_set_field') return undefined
+  const data = normalizedSetFieldData(args, result)
+  const fieldIndex = numberValue(data.fieldIndex)
+  const fieldKey = stringValue(data.fieldKey) || (fieldIndex === undefined ? undefined : `field_${fieldIndex}`)
+  if (!fieldKey || fieldIndex === undefined) return undefined
+
+  const status: FillLedgerEntryStatus = ok ? 'verified' : 'failed'
+  ledger.upsert({
+    fieldKey,
+    fieldIndex,
+    label: stringValue(data.label) || stringValue(data.matchedLabel) || fieldKey,
+    intendedValue: intendedValueFrom(data.intendedValue),
+    status,
+    ...(!ok ? { lastError: stringValue(data.reason) || result.observation } : {}),
+  })
+  return { fieldKey, fieldIndex, status }
+}
+
+function normalizedSetFieldData(args: Record<string, unknown>, result: LocalToolRunResult): Record<string, unknown> {
+  const field = objectValue(args.field)
+  const resultData = objectValue(result.data)
+  const failureData = parseSetFieldFailureObservation(result.observation)
+  return mergeDefined(field, resultData, failureData, args)
+}
+
+function parseSetFieldFailureObservation(observation: string): Record<string, unknown> {
+  const start = observation.indexOf('{')
+  if (start < 0) return {}
+  try {
+    const parsed = JSON.parse(observation.slice(start))
+    return objectValue(parsed)
+  } catch {
+    return {}
+  }
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+function mergeDefined(...objects: Record<string, unknown>[]): Record<string, unknown> {
+  const merged: Record<string, unknown> = {}
+  for (const object of objects) {
+    for (const [key, value] of Object.entries(object)) {
+      if (value !== undefined) merged[key] = value
+    }
+  }
+  return merged
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function intendedValueFrom(value: unknown): string | string[] | null | undefined {
+  if (value === null) return null
+  if (typeof value === 'string') return value
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value
+  return undefined
+}
+
 function buildLoopContextWithWorkflow(
   input: AgentLoopInput,
   workflowState: WorkflowState,
@@ -1662,10 +1904,30 @@ function buildLoopContextWithWorkflow(
       extraContext: input.extraContext,
       safetyMode: input.safetyMode,
       workflowState,
+      fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
+      fillLedgerSummary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary ?? workflowState.fillLedgerSummary,
+      answerSummary: summarizeAnswerStore(input.ctx.answerStore),
     },
     recentActions,
     blockersWithWorkflow(blockers, workflowState),
   )
+}
+
+function summarizeAnswerStore(answerStore: ToolContext['answerStore']): string | undefined {
+  const answers = answerStore?.all() ?? []
+  if (answers.length === 0) return undefined
+  return answers
+    .slice(-12)
+    .map((answer) => {
+      const options = answer.options?.length ? ` | options=[${answer.options.map(compactAnswerText).join(', ')}]` : ''
+      return `- field=${compactAnswerText(answer.field)} | answer=${compactAnswerText(answer.answer)} | source=${answer.source}${options} | at=${answer.at}`
+    })
+    .join('\n')
+}
+
+function compactAnswerText(value: string): string {
+  const compact = value.replace(/\s+/g, ' ').trim()
+  return compact.length > 180 ? `${compact.slice(0, 177)}...` : compact
 }
 
 function blockersWithWorkflow(blockers: string[], workflowState: WorkflowState): string[] {
@@ -2092,6 +2354,30 @@ function workflowToolResultEvidenceData(result: NormalizedToolResult | LocalTool
     done: Boolean(result.done),
     ...(result.risk ? { risk: result.risk } : {}),
     ...(result.data !== undefined ? { data: compactWorkflowEvidenceData(result.data) } : {}),
+  }
+}
+
+function userAnswerFromToolResult(result: LocalToolRunResult): UserAnswer | undefined {
+  const data = result.data
+  if (!data || typeof data !== 'object') return undefined
+  const answer = (data as { userAnswer?: unknown }).userAnswer
+  if (!answer || typeof answer !== 'object') return undefined
+  const candidate = answer as Partial<UserAnswer>
+  if (
+    typeof candidate.field !== 'string' ||
+    typeof candidate.question !== 'string' ||
+    typeof candidate.answer !== 'string' ||
+    candidate.source !== 'ask_user'
+  ) {
+    return undefined
+  }
+  return {
+    field: candidate.field,
+    question: candidate.question,
+    answer: candidate.answer,
+    at: typeof candidate.at === 'string' ? candidate.at : new Date().toISOString(),
+    source: 'ask_user',
+    ...(Array.isArray(candidate.options) ? { options: candidate.options.map(String) } : {}),
   }
 }
 

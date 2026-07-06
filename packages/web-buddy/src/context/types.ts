@@ -2,6 +2,8 @@ import type { FormState } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
 import type { RiskLevel } from '../sdk/trace.js'
 import type { TaskState } from '../task/task-state.js'
+import type { FieldPlan } from '../fill/field-plan.js'
+import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 
 export type MaybePromise<T> = T | Promise<T>
@@ -41,6 +43,9 @@ export interface ContextSnapshot {
   form?: FormState
   taskState?: TaskState
   workflowState?: WorkflowState
+  fieldPlan?: FieldPlan
+  fillLedgerSummary?: FillLedgerSummary
+  answerSummary?: string
   freshness: ContextFreshness
   resumeSummary: string
   recentActions: ContextRecentAction[]
@@ -60,6 +65,9 @@ export interface ContextSnapshotInput {
   extraContext?: string
   taskState?: TaskState
   workflowState?: WorkflowState
+  fieldPlan?: FieldPlan
+  fillLedgerSummary?: FillLedgerSummary
+  answerSummary?: string
   updatedAt?: string
 }
 
@@ -72,6 +80,7 @@ export type PromptSectionId =
   | 'RESUME_SUMMARY'
   | 'CURRENT_PAGE_STATE'
   | 'CURRENT_FORM_STATE'
+  | 'FILL_PLAN'
   | 'RECENT_ACTIONS'
   | 'NEXT_ACTION_RULES'
 

@@ -1,16 +1,27 @@
 import { browserClick } from '../browser/click.js'
 import { browserClickText } from '../browser/click-text.js'
 import { browserFillByLabel } from '../browser/fill-by-label.js'
+import { browserFormAudit } from '../browser/form-audit.js'
 import { browserFormSnapshot } from '../browser/form-snapshot.js'
+import { browserInspectOptions } from '../browser/inspect-options.js'
 import { browserOpen } from '../browser/open.js'
 import { browserScreenshot } from '../browser/screenshot.js'
 import { browserSelect } from '../browser/select.js'
 import { browserSelectByText } from '../browser/select-by-text.js'
+import { browserSetField } from '../browser/set-field.js'
 import { browserSnapshot } from '../browser/snapshot.js'
 import { browserType } from '../browser/type.js'
 import { browserUploadFile } from '../browser/upload-file.js'
 import { browserWait } from '../browser/wait.js'
+import type { AnswerStore, UserAnswer } from '../context/answer-store.js'
+import { isProfileSection, type ProfileStore } from '../context/profile-store.js'
+import { createFieldPlanner } from '../fill/field-planner.js'
+import type { FieldPlan } from '../fill/field-plan.js'
+import type { FillLedgerSummary } from '../fill/fill-ledger.js'
+import { observationManager } from '../observation/observation-manager.js'
 import { sessionManager } from '../session/manager.js'
+import type { HumanInput } from '../sdk/human.js'
+import type { LlmGateway } from '../sdk/llm.js'
 import type { ToolSchema } from '../sdk/llm.js'
 import type { RiskLevel, TraceRecorder } from '../sdk/trace.js'
 import { pageView } from '../runtime/local/page-view.js'
@@ -21,6 +32,13 @@ export interface LocalToolContext {
   sessionId: string
   highlight: boolean
   trace: TraceRecorder
+  profileStore?: ProfileStore
+  answerStore?: AnswerStore
+  fieldPlan?: FieldPlan
+  fillLedgerSummary?: FillLedgerSummary
+  humanInput?: Partial<HumanInput>
+  llm?: Pick<LlmGateway, 'hasKey' | 'generateJson'>
+  abortSignal?: AbortSignal
 }
 
 export interface LocalToolRunResult {
@@ -95,6 +113,152 @@ const localHandlers: Record<string, LocalHandler> = {
     return toResult(r, r.ok ? r.data : undefined, false)
   },
 
+  async browser_form_audit(args, ctx) {
+    const r = await browserFormAudit({
+      sessionId: ctx.sessionId,
+      maxFields: args.maxFields as number | undefined,
+      waitMs: args.waitMs as number | undefined,
+    })
+    return toResult(r, r.ok ? r.data : undefined, false)
+  },
+
+  async browser_inspect_options(args, ctx) {
+    const r = await browserInspectOptions({
+      sessionId: ctx.sessionId,
+      ref: args.ref as string | undefined,
+      label: args.label as string | undefined,
+      exact: args.exact as boolean | undefined,
+      nth: args.nth as number | undefined,
+      maxOptions: args.maxOptions as number | undefined,
+      open: args.open as boolean | undefined,
+    })
+    return toResult(r, r.ok ? r.data : undefined, false)
+  },
+
+  async resume_query(args, ctx) {
+    if (!ctx.profileStore) {
+      return {
+        observation: 'FAILED (NO_PROFILE_STORE): resume_query is unavailable because no ProfileStore is attached.',
+        pageChanged: false,
+      }
+    }
+    const section = args.section
+    if (!isProfileSection(section)) {
+      return {
+        observation: `FAILED (INVALID_SECTION): section must be one of contact, summary, skills, experience, projects, education, targetRoles, all.`,
+        pageChanged: false,
+      }
+    }
+    const result = ctx.profileStore.query(section, typeof args.query === 'string' ? args.query : undefined)
+    return {
+      observation: `resume_query(${section}) returned:\n${JSON.stringify(result.data, null, 2)}`,
+      data: result,
+      pageChanged: false,
+    }
+  },
+
+  async plan_form_fill(args, ctx) {
+    if (!ctx.profileStore) {
+      return {
+        observation: 'FAILED (NO_PROFILE_STORE): plan_form_fill requires a ProfileStore.',
+        pageChanged: false,
+      }
+    }
+    let formState = observationManager.getFormState(ctx.sessionId)
+    if (!formState) {
+      const snapshot = await browserFormSnapshot({ sessionId: ctx.sessionId })
+      if (!snapshot.ok) return toResult(snapshot, undefined, false)
+      formState = observationManager.getFormState(ctx.sessionId)
+    }
+    if (!formState) {
+      return {
+        observation: 'FAILED (NO_FORM_STATE): plan_form_fill could not find or create a FormState.',
+        pageChanged: false,
+      }
+    }
+    const refresh = args.refresh !== false
+    if (!refresh && ctx.fieldPlan) {
+      return {
+        observation: `plan_form_fill reused existing FieldPlan with ${ctx.fieldPlan.planned.length} planned fields.`,
+        data: ctx.fieldPlan,
+        pageChanged: false,
+      }
+    }
+    const planner = createFieldPlanner({ llm: ctx.llm })
+    const plan = await planner.plan({
+      fields: formState.fields,
+      profileStoreAvailable: true,
+      answerStoreAvailable: Boolean(ctx.answerStore),
+      profileStore: ctx.profileStore,
+      answerStore: ctx.answerStore,
+      llm: ctx.llm,
+      existingPlan: ctx.fieldPlan,
+      sourceFormUrl: formState.url,
+    })
+    ctx.fieldPlan = plan
+    return {
+      observation: `plan_form_fill created FieldPlan for ${plan.planned.length} fields:\n${JSON.stringify(plan, null, 2)}`,
+      data: plan,
+      pageChanged: false,
+    }
+  },
+
+  async ask_user(args, ctx) {
+    const field = String(args.field ?? '').trim()
+    const question = String(args.question ?? '').trim()
+    const options = Array.isArray(args.options) ? args.options.map(String).filter(Boolean) : undefined
+    if (!field || !question) {
+      return {
+        observation: 'FAILED (INVALID_INFO_REQUEST): ask_user requires non-empty field and question.',
+        pageChanged: false,
+      }
+    }
+
+    const existing = ctx.answerStore?.get(field)
+    if (existing) {
+      return {
+        observation: `ask_user reused saved answer for "${field}": ${existing.answer}`,
+        data: { userAnswer: existing, reused: true },
+        pageChanged: false,
+      }
+    }
+
+    if (!ctx.humanInput?.requestInfo) {
+      return {
+        observation: 'FAILED (NO_HUMAN_INPUT): ask_user requires a HumanInput.requestInfo implementation.',
+        pageChanged: false,
+      }
+    }
+
+    const response = await ctx.humanInput.requestInfo({
+      field,
+      question,
+      ...(options?.length ? { options } : {}),
+      ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
+    })
+    const answer = response.answer.trim()
+    if (!answer) {
+      return {
+        observation: `FAILED (EMPTY_USER_ANSWER): user did not provide an answer for "${field}".`,
+        pageChanged: false,
+      }
+    }
+    const userAnswer: UserAnswer = {
+      field,
+      question,
+      answer,
+      at: new Date().toISOString(),
+      source: 'ask_user',
+      ...(options?.length ? { options } : {}),
+    }
+    ctx.answerStore?.put(userAnswer)
+    return {
+      observation: `ask_user received answer for "${field}": ${answer}`,
+      data: { userAnswer, reused: false },
+      pageChanged: false,
+    }
+  },
+
   async browser_click(args, ctx) {
     const r = await browserClick({
       ref: String(args.ref),
@@ -164,6 +328,26 @@ const localHandlers: Record<string, LocalHandler> = {
       exact: args.exact as boolean | undefined,
       nth: args.nth as number | undefined,
       optionNth: args.optionNth as number | undefined,
+      timeoutMs: args.timeoutMs as number | undefined,
+    })
+    return toResult(r, r.ok ? r.data : undefined, r.ok)
+  },
+
+  async browser_set_field(args, ctx) {
+    const r = await browserSetField({
+      field: args.field as never,
+      ref: args.ref as string | undefined,
+      selector: args.selector as string | undefined,
+      label: args.label as string | undefined,
+      fieldKey: args.fieldKey as string | undefined,
+      fieldIndex: args.fieldIndex as number | undefined,
+      controlKind: args.controlKind as never,
+      intendedValue: args.intendedValue as never,
+      sessionId: ctx.sessionId,
+      exact: args.exact as boolean | undefined,
+      nth: args.nth as number | undefined,
+      optionNth: args.optionNth as number | undefined,
+      clear: args.clear !== false,
       timeoutMs: args.timeoutMs as number | undefined,
     })
     return toResult(r, r.ok ? r.data : undefined, r.ok)

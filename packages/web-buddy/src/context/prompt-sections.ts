@@ -15,6 +15,7 @@ export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'RESUME_SUMMARY',
   'CURRENT_PAGE_STATE',
   'CURRENT_FORM_STATE',
+  'FILL_PLAN',
   'RECENT_ACTIONS',
   'NEXT_ACTION_RULES',
 ]
@@ -38,6 +39,7 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   RESUME_SUMMARY: 2200,
   CURRENT_PAGE_STATE: 1800,
   CURRENT_FORM_STATE: 2800,
+  FILL_PLAN: 1800,
   RECENT_ACTIONS: 1800,
   NEXT_ACTION_RULES: 1200,
 }
@@ -51,6 +53,7 @@ const SECTION_TITLES: Record<PromptSectionId, string> = {
   RESUME_SUMMARY: 'RESUME_SUMMARY',
   CURRENT_PAGE_STATE: 'CURRENT_PAGE_STATE',
   CURRENT_FORM_STATE: 'CURRENT_FORM_STATE',
+  FILL_PLAN: 'FILL_PLAN',
   RECENT_ACTIONS: 'RECENT_ACTIONS',
   NEXT_ACTION_RULES: 'NEXT_ACTION_RULES',
 }
@@ -114,6 +117,8 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
       return renderPageState(snapshot.page, snapshot.freshness)
     case 'CURRENT_FORM_STATE':
       return renderFormState(snapshot.form, snapshot.freshness)
+    case 'FILL_PLAN':
+      return renderFillPlan(snapshot)
     case 'RECENT_ACTIONS':
       return renderRecentActions(snapshot.recentActions)
     case 'NEXT_ACTION_RULES':
@@ -121,11 +126,81 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
         'Read the current context and choose exactly one next tool call.',
         'Use browser_snapshot when page refs may be stale or missing.',
         'Use browser_form_snapshot when labels, required fields, selected options, upload hints, or submit candidates are unclear.',
-        'Fill only fields that can be mapped confidently from the resume and visible page information.',
+        'If FILL_PLAN is missing or stale on a fillable form, call plan_form_fill before setting fields.',
+        'When FILL_PLAN has a fillable intendedValue, write it into the matching field first; prefer browser_set_field when available, otherwise use browser_fill_by_label, browser_type, browser_select, or browser_select_by_text as appropriate.',
+        'If a field lacks resume details beyond RESUME_SUMMARY, call resume_query for the relevant full resume section before leaving it blank.',
+        'If a field needs information that is not in the resume and cannot be inferred from the page, call ask_user with the planned question before filling it.',
+        'Do not call agent_done while FillLedger shows pendingRequired fields unless you are blocked and explain exactly which required fields remain.',
         'Follow SAFETY_RULES before any click, submit-like action, credential flow, captcha, payment, or identity-proof step.',
         'Call agent_done when the task is complete or blocked.',
       ].join('\n')
   }
+}
+
+function renderFillPlan(snapshot: ContextSnapshot): string {
+  if (!snapshot.fieldPlan && !snapshot.fillLedgerSummary && !snapshot.answerSummary) {
+    return '(no FieldPlan, FillLedgerSummary, or AnswerSummary in runtime context yet)'
+  }
+
+  return normalizeLines([
+    snapshot.fieldPlan
+      ? [
+          `fieldPlan: ${snapshot.fieldPlan.planned.length} planned field(s), updatedAt=${snapshot.fieldPlan.updatedAt}`,
+          snapshot.fieldPlan.sourceFormUrl ? `sourceFormUrl: ${snapshot.fieldPlan.sourceFormUrl}` : undefined,
+          snapshot.fieldPlan.fieldCount === undefined ? undefined : `fieldCount: ${snapshot.fieldPlan.fieldCount}`,
+          'plannedFields:',
+          renderPlannedFields(snapshot.fieldPlan.planned),
+        ].filter(Boolean).join('\n')
+      : 'fieldPlan: (not available)',
+    snapshot.fillLedgerSummary
+      ? [
+          `fillLedgerSummary: total=${snapshot.fillLedgerSummary.total}`,
+          `verified=${snapshot.fillLedgerSummary.verified}`,
+          `failed=${snapshot.fillLedgerSummary.failed}`,
+          `needsUser=${snapshot.fillLedgerSummary.needsUser}`,
+          `skipped=${snapshot.fillLedgerSummary.skipped}`,
+          `pendingRequired=${snapshot.fillLedgerSummary.pendingRequired}`,
+          `updatedAt=${snapshot.fillLedgerSummary.updatedAt}`,
+        ].join(', ')
+      : 'fillLedgerSummary: (not available)',
+    snapshot.answerSummary ? `answerSummary:\n${snapshot.answerSummary}` : undefined,
+  ])
+}
+
+function renderPlannedFields(fields: NonNullable<ContextSnapshot['fieldPlan']>['planned']): string {
+  if (fields.length === 0) return '- (none)'
+  const shown = fields.slice(0, 24)
+  const lines = shown.map((field) => {
+    const needsUser = field.needsUser
+      ? `needsUser="${oneLine(field.needsUser.question, 140)}"${field.needsUser.options?.length ? ` options=[${field.needsUser.options.map((option) => oneLine(option, 40)).join(', ')}]` : ''}`
+      : 'needsUser=false'
+    const pendingRequired = Boolean(field.required && (field.needsUser || field.intendedValue === null || field.intendedValue === ''))
+    const parts = [
+      `#${field.fieldIndex}`,
+      oneLine(field.label || field.fieldKey || '(unlabeled)', 100),
+      `fieldKey=${field.fieldKey}`,
+      `control=${field.controlKind}`,
+      field.required === undefined ? '' : `required=${field.required}`,
+      `suggestedValue=${formatPlannedValue(field.intendedValue)}`,
+      `source=${field.valueSource}`,
+      field.sourceRef ? `sourceRef=${oneLine(field.sourceRef, 80)}` : '',
+      field.normalization ? `normalization=${oneLine(field.normalization, 80)}` : '',
+      `confidence=${field.confidence}`,
+      needsUser,
+      `pendingRequired=${pendingRequired}`,
+      field.optionMatched ? `optionMatched="${oneLine(field.optionMatched.optionLabel || field.optionMatched.optionValue, 80)}" score=${field.optionMatched.score}` : '',
+      field.skipReason ? `skipReason="${oneLine(field.skipReason, 120)}"` : '',
+    ].filter(Boolean)
+    return `- ${parts.join(' | ')}`
+  })
+  if (fields.length > shown.length) lines.push(`- ... (${fields.length - shown.length} more planned fields)`)
+  return lines.join('\n')
+}
+
+function formatPlannedValue(value: string | string[] | null): string {
+  if (value === null) return '(none)'
+  if (Array.isArray(value)) return `[${value.map((item) => `"${oneLine(item, 80)}"`).join(', ')}]`
+  return `"${oneLine(value, 140)}"`
 }
 
 function renderSafetyRules(notes: string[], blockers: string[]): string {
@@ -166,6 +241,13 @@ function renderWorkflowState(workflowState: WorkflowState | undefined): string {
     workflowState.lastTransition
       ? `lastTransition: ${workflowState.lastTransition.from} -> ${workflowState.lastTransition.to} at ${workflowState.lastTransition.at}; reason=${workflowState.lastTransition.reason}`
       : undefined,
+    workflowState.formCoverage
+      ? `formCoverage: scrolledBottom=${workflowState.formCoverage.scrolledBottom}, segments=${workflowState.formCoverage.segments}, totalFieldsSeen=${workflowState.formCoverage.totalFieldsSeen}, updatedAt=${workflowState.formCoverage.updatedAt}`
+      : undefined,
+    workflowState.fillLedgerSummary
+      ? `fillLedgerSummary: pendingRequired=${workflowState.fillLedgerSummary.pendingRequired}, verified=${workflowState.fillLedgerSummary.verified}, failed=${workflowState.fillLedgerSummary.failed}, needsUser=${workflowState.fillLedgerSummary.needsUser}, skipped=${workflowState.fillLedgerSummary.skipped}, total=${workflowState.fillLedgerSummary.total}`
+      : undefined,
+    workflowState.currentResumeUploaded === undefined ? undefined : `currentResumeUploaded: ${workflowState.currentResumeUploaded}`,
     `updatedAt: ${workflowState.updatedAt}`,
   ])
 }
@@ -389,6 +471,7 @@ function fitSectionsToTotal(sections: PromptSection[], totalMaxChars?: number): 
 
   const shrinkOrder: PromptSectionId[] = [
     'RECENT_ACTIONS',
+    'FILL_PLAN',
     'CURRENT_PAGE_STATE',
     'CURRENT_FORM_STATE',
     'RESUME_SUMMARY',

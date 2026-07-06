@@ -1,9 +1,11 @@
 import type { ContextRecentAction } from '../context/types.js'
+import type { FieldPlan } from '../fill/field-plan.js'
+import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { KernelEvent } from '../kernel/kernel-events.js'
 import type { AgentRunController } from '../kernel/run-controller.js'
 import type { HumanGate } from '../sdk/human.js'
 import type { ChatCompletion, ChatMessage, ChatOptions } from '../sdk/llm.js'
-import type { ResumeProfile } from '../sdk/resume.js'
+import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
 import type { SessionRecorder } from '../session/index.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
 import type { TaskState } from '../task/task-state.js'
@@ -30,6 +32,7 @@ export interface AgentRuntimeInput {
   /** The natural-language task, e.g. "fill the application form on this page with my resume". */
   goal: string
   resume: ResumeProfile
+  resumeV2?: ResumeProfileV2
   llm: AgentRuntimeLlm
   registry?: ToolRegistry
   ctx: ToolContext
@@ -66,6 +69,9 @@ export interface PromptAssemblerInput {
   extraContext?: string
   taskState?: TaskState
   workflowState?: WorkflowState
+  fieldPlan?: FieldPlan
+  fillLedgerSummary?: FillLedgerSummary
+  answerSummary?: string
   safetyMode?: AgentSafetyMode
 }
 

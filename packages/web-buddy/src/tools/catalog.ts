@@ -114,6 +114,115 @@ export const TOOL_CATALOG: ToolDef[] = [
     metadata: { produces: ['FormSnapshot', 'FormState'] },
   },
   {
+    name: 'browser_form_audit',
+    mcpName: 'browser_form_audit',
+    description:
+      'Scroll the whole page, merge visible form fields across segments, and return formCoverage evidence. Read-only observation; restores scroll position when done.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        maxFields: { type: 'number', description: 'Maximum unique fields to include. Default: 240.' },
+        waitMs: { type: 'number', description: 'Delay after each scroll segment in milliseconds. Default: 120.' },
+      },
+    },
+    local: { enabled: true },
+    mcp: { enabled: true },
+    metadata: { produces: ['FormSnapshot', 'FormState', 'FormCoverage'], readOnly: true },
+  },
+  {
+    name: 'browser_inspect_options',
+    mcpName: 'browser_inspect_options',
+    description:
+      'Inspect options for a native select or custom dropdown/listbox by ref or label. Opens the popup if needed, reads visible options, then presses Escape.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        ref: { type: 'string', description: 'Optional ref from browser_snapshot for the select/combobox control.' },
+        label: { type: 'string', description: 'Optional field label or nearby text for the dropdown.' },
+        exact: { type: 'boolean', description: 'Require exact label match. Default: false.' },
+        nth: { type: 'number', description: 'Zero-based control match index when multiple labels match. Default: 0.' },
+        maxOptions: { type: 'number', description: 'Maximum options to return. Default: 120.' },
+        open: { type: 'boolean', description: 'When false, only inspect already-visible option panels. Default: true.' },
+      },
+    },
+    local: { enabled: true },
+    mcp: { enabled: true },
+    metadata: { produces: ['FormOptions'], readOnly: true },
+  },
+  {
+    name: 'resume_query',
+    description:
+      'Query the candidate resume by section. Use this when application fields need details beyond RESUME_SUMMARY, such as projects, responsibilities, education, skills, or target roles.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        section: {
+          type: 'string',
+          enum: ['contact', 'summary', 'skills', 'experience', 'projects', 'education', 'targetRoles', 'all'],
+          description: 'Resume section to return.',
+        },
+        query: {
+          type: 'string',
+          description: 'Optional natural-language hint for what you are looking for in the section.',
+        },
+      },
+      required: ['section'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { produces: ['ResumeProfileV2'], readOnly: true },
+  },
+  {
+    name: 'plan_form_fill',
+    description:
+      'Create or refresh a deterministic FieldPlan for the current form using the full resume profile and saved user answers. Read-only planning tool; use before browser_set_field on application forms.',
+    category: 'observation',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        refresh: {
+          type: 'boolean',
+          description: 'When true, recompute even if an existing FieldPlan is attached. Default: true.',
+        },
+      },
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { produces: ['FieldPlan'], readOnly: true },
+  },
+  {
+    name: 'ask_user',
+    description:
+      'Ask the user for a short missing piece of information needed to fill a form field. Use only when the answer is not in the resume and cannot be inferred from the page. Do not use for dangerous-action confirmation.',
+    category: 'human',
+    risk: 'L0',
+    parameters: {
+      type: 'object',
+      properties: {
+        field: { type: 'string', description: 'The form field this answer will fill, e.g. expected salary.' },
+        question: { type: 'string', description: 'A concise one-sentence question shown to the user.' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional answer choices visible to the user.',
+        },
+      },
+      required: ['field', 'question'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: false },
+    metadata: { requiresHumanInput: true, readOnly: true },
+  },
+  {
     name: 'browser_upload_file',
     mcpName: 'browser_upload_file',
     description:
@@ -191,6 +300,52 @@ export const TOOL_CATALOG: ToolDef[] = [
     local: { enabled: true },
     mcp: { enabled: true },
     metadata: { writesFormField: true, riskResolver: 'refOrDefault' },
+  },
+  {
+    name: 'browser_set_field',
+    mcpName: 'browser_set_field',
+    description:
+      'Set one form field from a planned field or explicit label/ref/selector, then immediately read it back and compare with intendedValue. Supports text, textarea, native/custom select, cascader, date, radio, and checkbox. Does not submit or upload files.',
+    category: 'action',
+    risk: 'L2',
+    parameters: {
+      type: 'object',
+      properties: {
+        field: {
+          type: 'object',
+          description: 'Optional PlannedField from FieldPlan. field.label, field.controlKind, field.fieldKey, field.fieldIndex, and field.intendedValue are used when present.',
+        },
+        intendedValue: {
+          description: 'Value to set and verify. Use string for text/select/date/radio, string[] for cascader path, boolean for checkbox.',
+          oneOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } },
+            { type: 'boolean' },
+            { type: 'null' },
+          ],
+        },
+        controlKind: {
+          type: 'string',
+          enum: ['text', 'textarea', 'select_native', 'select_custom', 'cascader', 'date', 'radio', 'checkbox', 'file', 'unknown'],
+          description: 'Expected control kind. file is rejected; use browser_upload_file.',
+        },
+        label: { type: 'string', description: 'Field label or nearby text.' },
+        ref: { type: 'string', description: 'Optional ref from browser_snapshot.' },
+        selector: { type: 'string', description: 'Optional CSS selector for the field/control.' },
+        fieldKey: { type: 'string', description: 'Optional fieldKey from browser_form_snapshot/FormFieldState.' },
+        fieldIndex: { type: 'number', description: 'Optional field index from browser_form_snapshot/FormFieldState.' },
+        sessionId: { type: 'string' },
+        exact: { type: 'boolean', description: 'Require exact label/option match where applicable. Default: false.' },
+        nth: { type: 'number', description: 'Zero-based field match index when multiple labels match. Default: 0.' },
+        optionNth: { type: 'number', description: 'Zero-based option match index for dropdowns. Default: 0.' },
+        clear: { type: 'boolean', description: 'Clear existing value before typing where applicable. Default: true.' },
+        timeoutMs: { type: 'number' },
+      },
+      required: ['intendedValue'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: true },
+    metadata: { writesFormField: true, verifiesReadback: true },
   },
   {
     name: 'browser_type',
