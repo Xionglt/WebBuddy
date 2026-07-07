@@ -29,7 +29,8 @@ try {
 
   const oldWorkflowState = {
     schemaVersion: 'workflow-state/v1',
-    phase: 'reviewing',
+    phase: 'in_target_flow',
+    observationPhase: 'in_target_flow',
     confidence: 'medium',
     reason: 'Reviewing the application.',
     updatedAt: '2026-06-30T00:00:02.000Z',
@@ -37,6 +38,7 @@ try {
   const latestWorkflowState = {
     schemaVersion: 'workflow-state/v1',
     phase: 'done',
+    observationPhase: 'done',
     confidence: 'high',
     reason: 'Agent reported completion.',
     updatedAt: '2026-06-30T00:00:06.000Z',
@@ -49,7 +51,7 @@ try {
     source: 'session-restore-test',
     confidence: 'high',
     ts: '2026-06-30T00:00:03.000Z',
-    phase: 'reviewing',
+    phase: 'in_target_flow',
   }
   const toolEvidence = {
     schemaVersion: 'workflow-evidence/v1',
@@ -65,7 +67,7 @@ try {
     id: 'old-missing-form-evidence',
     kind: 'evidence_required',
     description: 'Old evaluation should be replaced by the latest one.',
-    phase: 'reviewing',
+    phase: 'in_target_flow',
     evidenceKinds: ['form'],
     missingEvidenceKinds: ['form'],
     evidenceIds: [],
@@ -132,7 +134,7 @@ try {
       reason: 'Old gate decision.',
       missingCriteria: [oldMissingCriterion],
       blockers: [],
-      workflowPhase: 'reviewing',
+      workflowPhase: 'in_target_flow',
       evidenceIds: ['restore-page-evidence'],
     },
   })
@@ -160,6 +162,7 @@ try {
       missingCriteria: [gateFallbackCriterion],
       blockers: [gateFallbackBlocker],
       workflowPhase: 'done',
+      observationPhase: 'done',
       evidenceIds: ['restore-tool-evidence'],
     },
   })
@@ -186,6 +189,9 @@ try {
   assert.equal(restored.transcriptCount, 10)
   assert.equal(restored.restoredAt, '2026-06-30T00:01:00.000Z')
   assert.equal(restored.latestWorkflowState?.phase, 'done')
+  assert.equal(restored.latestWorkflowState?.observationPhase, 'done')
+  assert.equal(restored.latestWorkflowEvaluation?.state.observationPhase, 'done')
+  assert.equal(restored.latestCompletionGate?.observationPhase, 'done')
   assert.equal(restored.latestWorkflowEvaluation?.reason, 'Latest evaluation.')
   assert.equal(restored.latestCompletionGate?.reason, 'Latest gate decision.')
   assert.equal(restored.latestFinalResult?.status, 'blocked')
@@ -206,6 +212,7 @@ try {
   const restoredFromDirectSession = await restoreSessionState(blockedSession)
   assert.equal(restoredFromDirectSession.session.sessionId, session.sessionId)
   assert.equal(restoredFromDirectSession.latestWorkflowState?.phase, 'done')
+  assert.equal(restoredFromDirectSession.latestWorkflowState?.observationPhase, 'done')
 
   const savedAfterRestore = readFileSync(join(blockedSession.outputDir, 'session.json'), 'utf8')
   assert.equal(savedAfterRestore, savedBeforeRestore, 'restoreSessionState should not write or mutate the session')

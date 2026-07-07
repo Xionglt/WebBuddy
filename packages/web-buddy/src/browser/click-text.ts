@@ -1,6 +1,7 @@
 import { toolFailure, toolSuccess } from '../errors.js'
 import { sessionManager } from '../session/manager.js'
 import { clearHighlight, visualizeBeforeAction } from '../sdk/highlight.js'
+import { detectModalInterception } from './modal-guard.js'
 
 const HIGH_RISK_TEXT = [
   /submit/i,
@@ -154,6 +155,22 @@ export async function browserClickText(input: {
     }
 
     const locator = session.page.locator(`[data-mfa-click-text-target="${marker}"]`).first()
+    const modal = await detectModalInterception(locator)
+    if (modal.present) {
+      return toolFailure(
+        'ACTIONABLE_DIALOG_PRESENT',
+        [
+          `A visible dialog is blocking "${text}"; handle the dialog before clicking background page controls.`,
+          modal.text ? `Dialog text: ${modal.text}` : undefined,
+          modal.controls.length ? `Dialog controls: ${modal.controls.join(', ')}` : undefined,
+        ].filter(Boolean).join(' '),
+        {
+          recoverable: true,
+          data: { dialogText: modal.text, controls: modal.controls, reason: modal.reason },
+          suggestedNextActions: ['browser_snapshot', 'browser_click_text on a visible dialog control'],
+        },
+      )
+    }
     if (input.highlight && isHeadful()) {
       await visualizeBeforeAction(session.page, locator, risk === 'L3' ? 'click_risky' : 'click_safe')
     }

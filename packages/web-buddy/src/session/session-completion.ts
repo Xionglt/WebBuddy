@@ -164,12 +164,21 @@ function restoredWorkflowPhase(restored: RestoredSessionState): string | undefin
   )
 }
 
+function restoredObservationPhase(restored: RestoredSessionState): string | undefined {
+  return (
+    restored.latestWorkflowEvaluation?.state.observationPhase ??
+    restored.latestWorkflowState?.observationPhase ??
+    restored.latestCompletionGate?.observationPhase
+  )
+}
+
 function restoredSessionMetadata(restored: RestoredSessionState): Record<string, unknown> {
   return {
     restoredAt: restored.restoredAt,
     transcriptCount: restored.transcriptCount,
     sessionStatus: restored.session.status,
     workflowPhase: restoredWorkflowPhase(restored),
+    observationPhase: restoredObservationPhase(restored),
     workflowEvidenceCount: restored.workflowEvidence.length,
     latestFinalResultStatus: restored.latestFinalResult?.status,
     missingCriteria: restored.missingCriteria,
@@ -194,6 +203,7 @@ function completionRecheckedMetadata(
     evidenceIds: completion.completionGateDecision.evidenceIds,
     missingCriteria: completion.completionGateDecision.missingCriteria,
     blockers: completion.completionGateDecision.blockers,
+    observationPhase: completion.workflowEvaluation.state.observationPhase ?? completion.completionGateDecision.observationPhase,
   }
 }
 
@@ -213,12 +223,14 @@ function finalResultPayload(
       action: completion.completionGateDecision.action,
       recommendedStatus: completion.completionGateDecision.recommendedStatus,
       workflowPhase: completion.completionGateDecision.workflowPhase,
+      observationPhase: completion.workflowEvaluation.state.observationPhase ?? completion.completionGateDecision.observationPhase,
       evidenceIds: completion.completionGateDecision.evidenceIds,
       missingCriteria: completion.completionGateDecision.missingCriteria,
       blockers: completion.completionGateDecision.blockers,
     },
     workflowEvaluation: {
       phase: completion.workflowEvaluation.state.phase,
+      observationPhase: completion.workflowEvaluation.state.observationPhase,
       changed: completion.workflowEvaluation.changed,
       evidenceIds: completion.workflowEvaluation.evidenceIds,
       missingCriteria: completion.workflowEvaluation.missingCriteria,

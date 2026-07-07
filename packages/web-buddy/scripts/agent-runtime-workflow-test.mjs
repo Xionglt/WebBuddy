@@ -52,7 +52,6 @@ class FinalSubmitLlm {
     const rendered = JSON.stringify(messages)
     assert(rendered.includes('## WORKFLOW_STATE'), 'runtime prompt should include workflow state')
     if (this.calls > 1) {
-      assert(rendered.includes('FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY'), 'runtime should return final-submit gate observation to the model')
       return {
         content: 'Final submit is a manual boundary; stopping for the human.',
         toolCalls: [{ id: 'done-after-final-submit-gate', name: 'agent_done', arguments: { summary: 'Stopped before final submit for human review.', blocked: true } }],
@@ -86,6 +85,13 @@ class ContinueAfterLoginLlm {
       rendered.includes('PREMATURE_AGENT_DONE_REJECTED') && rendered.includes('login/captcha handoff has cleared'),
       'runtime should reject premature blocked=true after login handoff returns to the application flow',
     )
+    if (this.calls === 2) {
+      return {
+        content: 'Login is cleared; I will audit the form before finishing.',
+        toolCalls: [{ id: 'audit-after-login', name: 'browser_form_audit', arguments: {} }],
+      }
+    }
+    assert(rendered.includes('Form audit scanned'), 'runtime should return form audit evidence before final agent_done')
     return {
       content: 'Login is cleared and the workflow can continue.',
       toolCalls: [{ id: 'done-after-login', name: 'agent_done', arguments: { summary: 'continued after login', blocked: false } }],
@@ -93,10 +99,10 @@ class ContinueAfterLoginLlm {
   }
 }
 
-class AlibabaConfirmationDoneLlm {
+class ActionableDialogDoneLlm {
   constructor() {
     this.hasKey = true
-    this.label = 'alibaba-confirmation-done-llm'
+    this.label = 'actionable-dialog-done-llm'
     this.calls = 0
   }
 
@@ -105,23 +111,23 @@ class AlibabaConfirmationDoneLlm {
     const rendered = JSON.stringify(messages)
     if (this.calls === 1) {
       return {
-        content: 'The Alibaba confirmation dialog looks final; I will stop.',
-        toolCalls: [{ id: 'premature-done', name: 'agent_done', arguments: { summary: 'Blocked at Alibaba confirmation dialog.', blocked: true } }],
+        content: 'The confirmation dialog looks final; I will stop.',
+        toolCalls: [{ id: 'premature-done', name: 'agent_done', arguments: { summary: 'Blocked at confirmation dialog.', blocked: true } }],
       }
     }
     assert(
-      rendered.includes('ALIBABA_APPLICATION_CONFIRMATION_STILL_OPEN'),
-      'runtime should reject premature agent_done while Alibaba confirmation dialog is still open',
+      rendered.includes('PREMATURE_AGENT_DONE_REJECTED'),
+      'runtime should reject premature agent_done while actionable dialog controls are still open',
     )
     if (this.calls === 2) {
       return {
         content: 'I will cancel the dialog instead of ending the run.',
-        toolCalls: [{ id: 'cancel-dialog', name: 'browser_click_text', arguments: { text: '取消', exact: true } }],
+        toolCalls: [{ id: 'cancel-dialog', name: 'browser_click_text', arguments: { text: 'Cancel', exact: true } }],
       }
     }
     return {
       content: 'Dialog resolved.',
-      toolCalls: [{ id: 'done-after-dialog', name: 'agent_done', arguments: { summary: 'Stopped after resolving Alibaba confirmation dialog.', blocked: true } }],
+      toolCalls: [{ id: 'done-after-dialog', name: 'agent_done', arguments: { summary: 'Continued after resolving confirmation dialog.', blocked: false } }],
     }
   }
 }
@@ -145,7 +151,7 @@ class PrematureFillDoneLlm {
     }
     if (this.calls === 2) {
       assert(
-        rendered.includes('fill_form_coverage_scrolled_bottom') && rendered.includes('fill_pending_required_zero'),
+        rendered.includes('PREMATURE_AGENT_DONE_REJECTED') && rendered.includes('Form coverage must show scrolledBottom=true'),
         'runtime should return executable fill-completeness gaps to the model',
       )
       return {
@@ -169,6 +175,13 @@ class PrematureFillDoneLlm {
         }],
       }
     }
+    if (this.calls === 4) {
+      assert(rendered.includes('pendingRequired=0'), 'FillLedger should show no pending required fields after browser_set_field')
+      return {
+        content: 'I will audit once more after filling.',
+        toolCalls: [{ id: 'audit-after-fill', name: 'browser_form_audit', arguments: {} }],
+      }
+    }
     assert(rendered.includes('pendingRequired=0'), 'FillLedger should show no pending required fields after browser_set_field')
     return {
       content: 'The required field is filled and audited.',
@@ -184,8 +197,11 @@ class LoginClearingGate {
     assert(page, 'test page should exist')
     await page.setContent(`<!doctype html><html><head><title>Application form</title></head><body>
       <h1>Application form</h1>
-      <label for="name">Name</label><input id="name" value="Zhang San" />
-      <label for="email">Email</label><input id="email" value="zhangsan@example.com" />
+      <form>
+        <label for="name">Name</label><input id="name" required value="Zhang San" />
+        <label for="email">Email</label><input id="email" required value="zhangsan@example.com" />
+        <button type="button">Save draft</button>
+      </form>
     </body></html>`)
     return 'approve'
   }
@@ -215,7 +231,7 @@ try {
   assert.equal(loginResult.done, true)
   assert.equal(loginResult.blocked, true)
   assert.equal(loginResult.stopReason, 'blocked')
-  assert.equal(loginResult.workflowState?.phase, 'login_required')
+  assert.equal(loginResult.workflowState?.phase, 'external_blocker')
   assert.match(loginResult.summary, /Human login required/i)
   assert.equal(loginResult.workflowState?.humanHandoffRequired, true)
 
@@ -254,7 +270,7 @@ try {
   })
   assert.equal(captchaResult.done, true)
   assert.equal(captchaResult.blocked, true)
-  assert.equal(captchaResult.workflowState?.phase, 'captcha_required')
+  assert.equal(captchaResult.workflowState?.phase, 'external_blocker')
   assert.match(captchaResult.summary, /Human verification required/i)
 
   await openHtml('workflow-final-submit', `<!doctype html><html><head><title>Application Review</title></head><body>
@@ -273,42 +289,37 @@ try {
     gate: new ApprovingFinalSubmitGate(),
     maxSteps: 4,
   })
-  assert.equal(finalLlm.calls >= 2, true, 'runtime should continue after final-submit gate instead of stopping immediately')
+  assert.equal(finalLlm.calls, 0, 'runtime should stop at initial final-submit boundary before asking the model to click')
   assert.equal(finalResult.done, true)
   assert.equal(finalResult.blocked, true)
   assert.equal(finalResult.stopReason, 'blocked')
-  assert.equal(finalResult.workflowState?.phase, 'blocked')
+  assert.equal(finalResult.workflowState?.phase, 'final_submit_boundary')
   assert.match(finalResult.workflowState?.blocker ?? '', /Final submit/i)
-  assert.match(finalResult.summary, /Stopped before final submit/i)
+  assert.match(finalResult.summary, /Final submit requires human takeover/i)
 
-  await openHtml('workflow-alibaba-confirmation', `<!doctype html><html><head><title>Application Shell</title></head><body></body></html>`)
-  const alibabaPage = sessionManager.get('workflow-alibaba-confirmation')?.page
-  assert(alibabaPage, 'Alibaba confirmation test page should exist')
-  await alibabaPage.route('https://talent-holding.alibaba.com/off-campus/position-detail?*', (route) => route.fulfill({
-    status: 200,
-    contentType: 'text/html; charset=utf-8',
-    body: `<!doctype html><html lang="zh"><head><title>阿里岗位详情</title></head><body>
-      <h1>集团安全部-大模型训练算法工程师/专家-数据安全</h1>
-      <div role="dialog" aria-label="温馨提示">
-        <p>温馨提示：你暂未申请职位，本月能申请5个职位，请慎重选择！</p>
-        <button onclick="document.querySelector('[role=dialog]').remove()">取消</button>
-        <button>投递</button>
-      </div>
-    </body></html>`,
-  }))
-  await alibabaPage.goto('https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=fixture')
-  const alibabaDoneLlm = new AlibabaConfirmationDoneLlm()
-  const alibabaDoneResult = await runtime.run({
-    goal: 'Continue the Alibaba application flow.',
+  await openHtml('workflow-actionable-dialog', `<!doctype html><html><head><title>Application Dialog</title></head><body>
+    <h1>Application confirmation</h1>
+    <div role="dialog" aria-label="Application confirmation">
+      <p>Please confirm whether to continue this application step.</p>
+      <button onclick="document.querySelector('[role=dialog]').remove()">Cancel</button>
+      <button>Continue</button>
+    </div>
+  </body></html>`)
+  const dialogPage = sessionManager.get('workflow-actionable-dialog')?.page
+  assert(dialogPage, 'actionable dialog test page should exist')
+  const dialogDoneLlm = new ActionableDialogDoneLlm()
+  const dialogDoneResult = await runtime.run({
+    goal: 'Continue the application flow.',
     resume: profile,
-    llm: alibabaDoneLlm,
-    ctx: { sessionId: 'workflow-alibaba-confirmation', highlight: false, trace },
+    llm: dialogDoneLlm,
+    ctx: { sessionId: 'workflow-actionable-dialog', highlight: false, trace },
     gate: new AutoHumanGate(),
+    taskType: 'apply_entry',
     maxSteps: 5,
   })
-  assert.equal(alibabaDoneLlm.calls >= 2, true, 'runtime should continue after premature Alibaba dialog agent_done')
-  assert.equal(await alibabaPage.locator('[role="dialog"]').count(), 0, 'test model should get a chance to resolve the dialog')
-  assert.equal(alibabaDoneResult.done, true)
+  assert.equal(dialogDoneLlm.calls >= 2, true, 'runtime should continue after premature dialog agent_done')
+  assert.equal(await dialogPage.locator('[role="dialog"]').count(), 0, 'test model should get a chance to resolve the dialog')
+  assert.equal(dialogDoneResult.done, true)
 
   await openHtml('workflow-premature-fill-done', `<!doctype html><html><head><title>Application Form</title></head><body>
     <h1>Application form</h1>
@@ -341,12 +352,12 @@ try {
       },
     },
     gate: new AutoHumanGate(),
-    maxSteps: 6,
+    maxSteps: 7,
   })
   assert.equal(prematureFillLlm.calls >= 4, true, 'runtime should continue after premature fill agent_done')
   assert.equal(prematureFillResult.done, true)
-  assert.equal(prematureFillResult.blocked, true)
-  assert.match(prematureFillResult.summary, /required workflow evidence is missing/i)
+  assert.equal(prematureFillResult.blocked, false)
+  assert.match(prematureFillResult.summary, /Filled required fields/i)
   assert.equal(await sessionManager.get('workflow-premature-fill-done')?.page.locator('#name').inputValue(), 'Zhang San')
 
   console.log('agent-runtime-workflow-test: PASS')

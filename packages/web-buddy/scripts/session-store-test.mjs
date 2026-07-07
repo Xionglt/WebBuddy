@@ -26,7 +26,7 @@ try {
     reason: 'Workflow evidence is sufficient for completion.',
     missingCriteria: [],
     blockers: [],
-    workflowPhase: 'observing',
+    workflowPhase: 'in_target_flow',
     evidenceIds: ['store-workflow-evidence'],
   }
 
@@ -49,14 +49,14 @@ try {
       source: 'session-store-test',
       confidence: 'high',
       ts: '2026-06-28T00:00:01.000Z',
-      phase: 'observing',
+      phase: 'in_target_flow',
     },
   })
   await recorder.transcript({
     type: 'workflow_evaluation',
     turnId: 'turn-additive',
     evaluation: {
-      state: { schemaVersion: 'workflow-state/v1', phase: 'observing' },
+      state: { schemaVersion: 'workflow-state/v1', phase: 'in_target_flow' },
       evidenceIds: ['store-workflow-evidence'],
       missingCriteria: [],
       matchedCriteria: [],
@@ -108,7 +108,7 @@ try {
     message: 'Context compacted.',
     data: { summaryId: 'store-context-compaction' },
   })
-  await recorder.workflow({ schemaVersion: 'workflow-state/v1', phase: 'observing' })
+  await recorder.workflow({ schemaVersion: 'workflow-state/v1', phase: 'in_target_flow' })
   await recorder.updateStatus('completed')
 
   const saved = JSON.parse(readFileSync(join(session.outputDir, 'session.json'), 'utf8'))
@@ -150,7 +150,7 @@ try {
   assert(events.some((event) => event.type === 'context_compacted'), 'events should include context_compacted')
 
   const workflow = JSON.parse(readFileSync(session.workflowPath, 'utf8'))
-  assert.equal(workflow.workflowState.phase, 'observing')
+  assert.equal(workflow.workflowState.phase, 'in_target_flow')
 
   const listed = await store.list({ status: 'completed' })
   assert.equal(listed.length, 1)

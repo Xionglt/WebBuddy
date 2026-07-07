@@ -108,7 +108,7 @@ const finalSubmit = completionResumeService.evaluate({
     confirmedBy: 'user',
     scope: 'completion',
     message: 'I confirm the form is ready.',
-    workflowPhase: 'ready_for_final_submit',
+    workflowPhase: 'final_submit_boundary',
     ts: now,
   }),
   now,
@@ -116,7 +116,7 @@ const finalSubmit = completionResumeService.evaluate({
 
 assert.equal(finalSubmit.status, 'blocked')
 assert.equal(finalSubmit.completionGateDecision.action, 'block')
-assert.equal(finalSubmit.completionGateDecision.workflowPhase, 'ready_for_final_submit')
+assert.equal(finalSubmit.completionGateDecision.workflowPhase, 'final_submit_boundary')
 assert.match(finalSubmit.reason, /final submit/i)
 assert(
   finalSubmit.completionGateDecision.blockers.some((blocker) => blocker.gateKind === 'final_submit'),
@@ -162,7 +162,7 @@ function restoredReadyForFinalSubmit() {
     id: 'human-handoff-final-submit',
     kind: 'human_handoff',
     message: 'Final submit requires human takeover before completion.',
-    phase: 'ready_for_final_submit',
+    phase: 'final_submit_boundary',
     gateKind: 'final_submit',
     evidenceIds: ['ev-policy-final-submit'],
   }
@@ -173,7 +173,7 @@ function restoredReadyForFinalSubmit() {
     transcriptCount: 6,
     restoredAt: now,
     latestWorkflowState: {
-      ...workflowState('ready_for_final_submit', 'Policy identified a final-submit gate.'),
+      ...workflowState('final_submit_boundary', 'Policy identified a final-submit gate.'),
       humanHandoffRequired: true,
       blocker: 'Final submit requires human takeover before completion.',
     },
@@ -186,7 +186,7 @@ function restoredReadyForFinalSubmit() {
         source: 'runtime_context',
         confidence: 'high',
         ts: now,
-        phase: 'ready_for_final_submit',
+        phase: 'final_submit_boundary',
       },
       {
         schemaVersion: 'workflow-evidence/v1',
@@ -196,7 +196,7 @@ function restoredReadyForFinalSubmit() {
         source: 'policy_engine',
         confidence: 'high',
         ts: now,
-        phase: 'ready_for_final_submit',
+        phase: 'final_submit_boundary',
         data: {
           action: 'gate',
           riskLevel: 'high',
@@ -207,7 +207,7 @@ function restoredReadyForFinalSubmit() {
       },
     ],
     latestWorkflowEvaluation: {
-      state: workflowState('ready_for_final_submit', 'Policy identified a final-submit gate.'),
+      state: workflowState('final_submit_boundary', 'Policy identified a final-submit gate.'),
       changed: true,
       matchedCriteria: [],
       missingCriteria: [],
@@ -222,7 +222,7 @@ function restoredReadyForFinalSubmit() {
       reason: 'Completion gate blocked final submit.',
       missingCriteria: [],
       blockers: [finalSubmitBlocker],
-      workflowPhase: 'ready_for_final_submit',
+      workflowPhase: 'final_submit_boundary',
       evidenceIds: ['ev-form-ready', 'ev-policy-final-submit'],
     },
     latestFinalResult: {

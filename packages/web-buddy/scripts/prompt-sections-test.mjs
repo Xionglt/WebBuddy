@@ -48,14 +48,14 @@ const snapshot = {
   taskState: {
     schemaVersion: 'task-state/v1',
     goal: 'Fill the application draft.',
-    phase: 'reviewing',
+    phase: 'in_target_flow',
     knownBlockers: ['Final submit requires human approval'],
     completionCriteria: ['Name and email are filled', 'Draft is ready for review'],
     updatedAt: '2026-06-25T00:00:02.000Z',
   },
   workflowState: {
     schemaVersion: 'workflow-state/v1',
-    phase: 'reviewing',
+    phase: 'in_target_flow',
     confidence: 'medium',
     reason: 'All required fields appear filled and submit candidates are visible.',
     updatedAt: '2026-06-25T00:00:02.500Z',
@@ -163,14 +163,14 @@ assert(formSection.content.includes('freshness: ageMs=3000 stale=false'), 'form 
 const taskStateSection = sections.find((section) => section.id === 'TASK_STATE')
 assert(taskStateSection, 'TASK_STATE should exist')
 assert(taskStateSection.content.includes('schemaVersion: task-state/v1'), 'TaskState schema should enter prompt')
-assert(taskStateSection.content.includes('phase: reviewing'), 'TaskState phase should enter prompt')
+assert(taskStateSection.content.includes('phase: in_target_flow'), 'TaskState phase should enter prompt')
 assert(taskStateSection.content.includes('Final submit requires human approval'), 'TaskState blockers should enter prompt')
 assert(taskStateSection.content.includes('Draft is ready for review'), 'TaskState completion criteria should enter prompt')
 
 const workflowStateSection = sections.find((section) => section.id === 'WORKFLOW_STATE')
 assert(workflowStateSection, 'WORKFLOW_STATE should exist')
 assert(workflowStateSection.content.includes('schemaVersion: workflow-state/v1'), 'WorkflowState schema should enter prompt')
-assert(workflowStateSection.content.includes('phase: reviewing'), 'WorkflowState phase should enter prompt')
+assert(workflowStateSection.content.includes('phase: in_target_flow'), 'WorkflowState phase should enter prompt')
 assert(workflowStateSection.content.includes('confidence: medium'), 'WorkflowState confidence should enter prompt')
 assert(workflowStateSection.content.includes('humanHandoffRequired: false'), 'WorkflowState handoff cue should enter prompt')
 
@@ -192,9 +192,11 @@ assert(nextActionSection.content.includes('plan_form_fill'), 'NEXT_ACTION_RULES 
 assert(nextActionSection.content.includes('browser_set_field'), 'NEXT_ACTION_RULES should prefer browser_set_field')
 assert(nextActionSection.content.includes('resume_query'), 'NEXT_ACTION_RULES should direct resume detail lookups to resume_query')
 assert(nextActionSection.content.includes('ask_user'), 'NEXT_ACTION_RULES should direct missing user info to ask_user')
+assert(nextActionSection.content.includes('current resume has not been uploaded'), 'NEXT_ACTION_RULES should prioritize current resume upload')
+assert(nextActionSection.content.includes('application-entry button'), 'NEXT_ACTION_RULES should distinguish application entry buttons from completion')
 
 const defaultTaskStateSection = findSection(buildPromptSections({ ...snapshot, taskState: undefined }), 'TASK_STATE')
-assert(defaultTaskStateSection.content.includes('phase: observing'), 'missing taskState should render a default observing state')
+assert(defaultTaskStateSection.content.includes('phase: observing'), 'missing taskState should render the legacy task-state default')
 
 const pageSection = sections.find((section) => section.id === 'CURRENT_PAGE_STATE')
 assert(pageSection, 'CURRENT_PAGE_STATE should exist')

@@ -12,312 +12,184 @@ assert.equal(ignoredNotDone.schemaVersion, 'completion-gate-decision/v1')
 assert.equal(ignoredNotDone.action, 'ignore')
 assert.equal(ignoredNotDone.recommendedStatus, 'unchanged')
 
-const blockedRuntime = CompletionGate.evaluate({
+const blockedLogin = CompletionGate.evaluate({
   done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({ phase: 'done' }),
-  source: 'agent_done',
-})
-assert.equal(blockedRuntime.action, 'block')
-assert.equal(blockedRuntime.recommendedStatus, 'blocked')
-
-const blockedExploreAtLogin = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({ phase: 'login_required' }),
-  taskType: 'explore',
-  source: 'agent_done',
-})
-assert.equal(blockedExploreAtLogin.action, 'block')
-assert.equal(blockedExploreAtLogin.recommendedStatus, 'blocked')
-assert.equal(blockedExploreAtLogin.workflowPhase, 'login_required')
-
-const rejectedAlibabaConfirmation = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({ phase: 'job_detail' }),
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'external_blocker' }),
   page: pageState({
-    url: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=fixture',
-    pageType: 'detail',
-    textSummary: '温馨提示：你暂未申请职位，本月能申请5个职位，请慎重选择！ 取消 投递',
-  }),
-  form: formState({
-    submitCandidates: [
-      submitCandidate('取消'),
-      submitCandidate('投递'),
-    ],
-  }),
-  source: 'agent_done',
-})
-assert.equal(rejectedAlibabaConfirmation.action, 'reject')
-assert.equal(rejectedAlibabaConfirmation.recommendedStatus, 'unchanged')
-assert.match(rejectedAlibabaConfirmation.reason, /ALIBABA_APPLICATION_CONFIRMATION_STILL_OPEN/)
-assert.match(rejectedAlibabaConfirmation.reason, /投递/)
-assert.match(rejectedAlibabaConfirmation.reason, /取消/)
-
-const blockedExploreAtApplyEntry = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({ phase: 'entering_application' }),
-  page: pageState({
-    url: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh&positionId=fixture',
-    pageType: 'detail',
-    textSummary: '温馨提示：你暂未申请职位，本月能申请5个职位，请慎重选择！ 取消 投递',
-  }),
-  form: formState({
-    submitCandidates: [
-      submitCandidate('取消'),
-      submitCandidate('投递'),
-    ],
-  }),
-  requiresCurrentResumeUpload: true,
-  currentResumeUploaded: false,
-  taskType: 'explore',
-  source: 'agent_done',
-})
-assert.equal(blockedExploreAtApplyEntry.action, 'block')
-assert.equal(blockedExploreAtApplyEntry.recommendedStatus, 'blocked')
-assert.match(blockedExploreAtApplyEntry.reason, /runtime already marked the attempt as blocked/)
-
-const rejectedUploadEntry = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({ phase: 'editing_resume' }),
-  page: pageState({ pageType: 'form', textSummary: 'Application form 上传附件简历' }),
-  form: formState({
-    uploadHints: [{ tag: 'input', type: 'file', text: '上传附件简历', visible: true, accept: '.pdf' }],
-  }),
-  source: 'agent_done',
-})
-assert.equal(rejectedUploadEntry.action, 'reject')
-assert.match(rejectedUploadEntry.reason, /upload entry/i)
-
-const blockedApplyEntryAtUpload = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({
-    phase: 'filling_application',
-    blockers: [{
-      kind: 'human_handoff',
-      gateKind: 'upload_resume',
-      message: 'Resume upload requires human takeover.',
-      evidenceIds: ['ev-policy-upload'],
-    }],
-  }),
-  page: pageState({ pageType: 'form', textSummary: 'Application form 上传附件简历' }),
-  form: formState({
-    uploadHints: [{ tag: 'input', type: 'file', text: '上传附件简历', visible: true, accept: '.pdf' }],
+    pageType: 'login',
+    title: 'Sign in',
+    formCount: 0,
+    inputCount: 0,
+    textSummary: 'Sign in is required before continuing.',
   }),
   taskType: 'apply_entry',
   source: 'agent_done',
 })
-assert.equal(blockedApplyEntryAtUpload.action, 'block')
-assert.equal(blockedApplyEntryAtUpload.recommendedStatus, 'blocked')
-
-const rejectedMissingRequired = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({ phase: 'filling_application' }),
-  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
-  form: formState({
-    fields: [requiredField('姓名')],
-    missingRequired: [requiredField('姓名')],
-  }),
-  source: 'agent_done',
-})
-assert.equal(rejectedMissingRequired.action, 'reject')
-assert.match(rejectedMissingRequired.reason, /required form field/i)
-assert.match(rejectedMissingRequired.reason, /姓名/)
-
-const rejectedAfterLoginCleared = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({
-    phase: 'filling_application',
-    state: workflowState('filling_application', {
-      lastTransition: {
-        from: 'login_required',
-        to: 'filling_application',
-        reason: 'Human handoff appears cleared and the current page has application form fields.',
-        at: '2026-06-30T00:00:01.000Z',
-      },
-    }),
-  }),
-  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
-  form: formState({ fields: [filledField('姓名', 'Zhang San')] }),
-  source: 'agent_done',
-})
-assert.equal(rejectedAfterLoginCleared.action, 'reject')
-assert.match(rejectedAfterLoginCleared.reason, /login\/captcha handoff has cleared/i)
-
-const rejectedAfterCaptchaCleared = CompletionGate.evaluate({
-  done: true,
-  blocked: true,
-  workflowEvaluation: evaluation({
-    phase: 'job_detail',
-    state: workflowState('job_detail', {
-      lastTransition: {
-        from: 'captcha_required',
-        to: 'job_detail',
-        reason: 'Human handoff appears cleared and the current page is a job detail page.',
-        at: '2026-06-30T00:00:01.000Z',
-      },
-    }),
-  }),
-  page: pageState({ pageType: 'detail', textSummary: '岗位详情 立即投递', interactiveCount: 1, buttonCount: 1 }),
-  form: formState({ submitCandidates: [submitCandidate('立即投递')] }),
-  source: 'agent_done',
-})
-assert.equal(rejectedAfterCaptchaCleared.action, 'reject')
-assert.match(rejectedAfterCaptchaCleared.reason, /business workflow/i)
-
-const ignoredWithoutEvaluation = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  source: 'agent_done',
-})
-assert.equal(ignoredWithoutEvaluation.action, 'ignore')
-assert.equal(ignoredWithoutEvaluation.recommendedStatus, 'unchanged')
-
-const blockedReadyForFinalSubmit = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'ready_for_final_submit' }),
-  source: 'agent_done',
-})
-assert.equal(blockedReadyForFinalSubmit.action, 'block')
-assert.equal(blockedReadyForFinalSubmit.recommendedStatus, 'blocked')
-assert.equal(blockedReadyForFinalSubmit.workflowPhase, 'ready_for_final_submit')
-assert.match(blockedReadyForFinalSubmit.reason, /final submit/i)
-
-const blockedDirectSubmitReview = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'direct_submit_review' }),
-  source: 'agent_done',
-})
-assert.equal(blockedDirectSubmitReview.action, 'block')
-assert.equal(blockedDirectSubmitReview.recommendedStatus, 'blocked')
-assert.equal(blockedDirectSubmitReview.workflowPhase, 'direct_submit_review')
-assert.match(blockedDirectSubmitReview.reason, /direct-submit review/i)
+assert.equal(blockedLogin.action, 'block')
+assert.equal(blockedLogin.recommendedStatus, 'blocked')
+assert.equal(blockedLogin.workflowPhase, 'external_blocker')
+assert.match(blockedLogin.reason, /external blocker/i)
 
 const blockedByFinalSubmitBlocker = CompletionGate.evaluate({
   done: true,
   blocked: false,
   workflowEvaluation: evaluation({
-    phase: 'done',
+    phase: 'in_target_flow',
     blockers: [finalSubmitBlocker()],
   }),
+  taskType: 'final_review',
   source: 'agent_done',
 })
 assert.equal(blockedByFinalSubmitBlocker.action, 'block')
 assert.equal(blockedByFinalSubmitBlocker.recommendedStatus, 'blocked')
 assert.equal(blockedByFinalSubmitBlocker.blockers[0].gateKind, 'final_submit')
-assert.match(blockedByFinalSubmitBlocker.reason, /final-submit blocker/i)
 
-const blockedMissingUserConfirm = CompletionGate.evaluate({
+const allowedFillForm = CompletionGate.evaluate({
   done: true,
   blocked: false,
   workflowEvaluation: evaluation({
-    phase: 'done',
+    phase: 'in_target_flow',
+    evidenceIds: ['ev-tool-fill', 'ev-form-audit'],
+  }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 2, verified: 2 }),
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: true,
+  taskType: 'fill_form',
+  source: 'agent_done',
+})
+assert.equal(allowedFillForm.action, 'allow')
+assert.equal(allowedFillForm.recommendedStatus, 'completed')
+assert.equal(allowedFillForm.workflowPhase, 'in_target_flow')
+assert.deepEqual(allowedFillForm.evidenceIds, ['ev-tool-fill', 'ev-form-audit'])
+assert.match(allowedFillForm.reason, /fill_form target state reached/i)
+
+const allowedDespiteDonePhaseNotPresent = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  form: formState({ formCoverage: scrolledBottomCoverage() }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  taskType: 'fill_form',
+  source: 'agent_done',
+})
+assert.equal(allowedDespiteDonePhaseNotPresent.action, 'allow')
+assert.equal(allowedDespiteDonePhaseNotPresent.workflowPhase, 'in_target_flow')
+
+const allowedExploreFromTaskEvidence = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({
+    phase: 'in_target_flow',
     missingCriteria: [missingUserConfirmCriterion()],
+  }),
+  page: pageState({
+    pageType: 'detail',
+    title: 'Role detail',
+    textSummary: 'Role detail, company, location, and requirements are visible.',
+  }),
+  summary: 'Candidate detail: Role title, company, location, and requirements were captured.',
+  taskType: 'explore',
+  source: 'agent_done',
+})
+assert.equal(allowedExploreFromTaskEvidence.action, 'allow')
+assert.equal(allowedExploreFromTaskEvidence.recommendedStatus, 'completed')
+assert.equal(allowedExploreFromTaskEvidence.missingCriteria[0].id, 'done-requires-explicit-completion-evidence')
+
+const allowedApplyEntryFromUploadSurface = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  page: pageState({
+    pageType: 'form',
+    title: 'Application',
+    textSummary: 'Application profile and resume upload controls are visible.',
+  }),
+  form: formState({
+    uploadHints: [{ tag: 'input', type: 'file', text: 'Resume upload', visible: true, accept: '.pdf' }],
+  }),
+  taskType: 'apply_entry',
+  source: 'agent_done',
+})
+assert.equal(allowedApplyEntryFromUploadSurface.action, 'allow')
+assert.equal(allowedApplyEntryFromUploadSurface.recommendedStatus, 'completed')
+
+const rejectedActionableDialog = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  page: pageState({
+    pageType: 'detail',
+    textSummary: 'Please confirm whether to continue. Cancel Apply',
+  }),
+  form: formState({
+    submitCandidates: [
+      submitCandidate('Cancel'),
+      submitCandidate('Apply'),
+    ],
   }),
   source: 'agent_done',
 })
-assert.equal(blockedMissingUserConfirm.action, 'block')
-assert.equal(blockedMissingUserConfirm.recommendedStatus, 'blocked')
-assert.deepEqual(blockedMissingUserConfirm.missingCriteria[0].missingEvidenceKinds, ['user_confirm'])
-assert.match(blockedMissingUserConfirm.reason, /required workflow evidence is missing/i)
+assert.equal(rejectedActionableDialog.action, 'reject')
+assert.equal(rejectedActionableDialog.recommendedStatus, 'unchanged')
+assert.match(rejectedActionableDialog.reason, /PREMATURE_AGENT_DONE_REJECTED/)
+assert.match(rejectedActionableDialog.reason, /Apply/)
+assert.match(rejectedActionableDialog.reason, /Cancel/)
 
-const rejectedNoAudit = CompletionGate.evaluate({
+const rejectedRuntimeBlockedWithoutExternalBlocker = CompletionGate.evaluate({
+  done: true,
+  blocked: true,
+  workflowEvaluation: evaluation({ phase: 'done' }),
+  source: 'agent_done',
+})
+assert.equal(rejectedRuntimeBlockedWithoutExternalBlocker.action, 'reject')
+assert.equal(rejectedRuntimeBlockedWithoutExternalBlocker.recommendedStatus, 'unchanged')
+assert.equal(rejectedRuntimeBlockedWithoutExternalBlocker.missingCriteria.at(-1).id, 'task_completion_missing_evidence')
+assert.match(rejectedRuntimeBlockedWithoutExternalBlocker.reason, /PREMATURE_AGENT_DONE_REJECTED/)
+
+const rejectedDonePhaseWithoutTaskEvidence = CompletionGate.evaluate({
   done: true,
   blocked: false,
   workflowEvaluation: evaluation({ phase: 'done' }),
-  form: formState({ fields: [filledField('姓名', 'Zhang San')] }),
-  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
   source: 'agent_done',
 })
-assert.equal(rejectedNoAudit.action, 'reject')
-assert.match(rejectedNoAudit.reason, /fill_form_coverage_scrolled_bottom/)
-assert.match(rejectedNoAudit.reason, /browser_form_audit/)
+assert.equal(rejectedDonePhaseWithoutTaskEvidence.action, 'reject')
+assert.equal(rejectedDonePhaseWithoutTaskEvidence.workflowPhase, 'done')
+assert.match(rejectedDonePhaseWithoutTaskEvidence.reason, /task completion evidence is missing/i)
 
-const rejectedLedgerPendingRequired = CompletionGate.evaluate({
+const rejectedReadyForFinalSubmitWithoutEvidenceBlocker = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'final_submit_boundary' }),
+  source: 'agent_done',
+})
+assert.equal(rejectedReadyForFinalSubmitWithoutEvidenceBlocker.action, 'reject')
+assert.equal(rejectedReadyForFinalSubmitWithoutEvidenceBlocker.recommendedStatus, 'unchanged')
+assert.equal(rejectedReadyForFinalSubmitWithoutEvidenceBlocker.workflowPhase, 'final_submit_boundary')
+
+const rejectedDirectSubmitReviewWithoutEvidenceBlocker = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'final_submit_boundary' }),
+  source: 'agent_done',
+})
+assert.equal(rejectedDirectSubmitReviewWithoutEvidenceBlocker.action, 'reject')
+assert.equal(rejectedDirectSubmitReviewWithoutEvidenceBlocker.recommendedStatus, 'unchanged')
+assert.equal(rejectedDirectSubmitReviewWithoutEvidenceBlocker.workflowPhase, 'final_submit_boundary')
+
+const rejectedFinalReviewWithoutExternalBlocker = CompletionGate.evaluate({
   done: true,
   blocked: false,
   workflowEvaluation: evaluation({ phase: 'done' }),
-  form: formState({ formCoverage: scrolledBottomCoverage() }),
-  fillLedgerSummary: ledgerSummary({ total: 2, verified: 1, pendingRequired: 1 }),
+  taskType: 'final_review',
   source: 'agent_done',
 })
-assert.equal(rejectedLedgerPendingRequired.action, 'reject')
-assert.match(rejectedLedgerPendingRequired.reason, /fill_pending_required_zero/)
-
-const rejectedLedgerNeedsUser = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'done' }),
-  form: formState({ formCoverage: scrolledBottomCoverage() }),
-  fillLedgerSummary: ledgerSummary({ total: 2, verified: 1, needsUser: 1 }),
-  source: 'agent_done',
-})
-assert.equal(rejectedLedgerNeedsUser.action, 'reject')
-assert.match(rejectedLedgerNeedsUser.reason, /ask_user/)
-
-const rejectedLedgerFailed = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'done' }),
-  form: formState({ formCoverage: scrolledBottomCoverage() }),
-  fillLedgerSummary: ledgerSummary({ total: 2, verified: 1, failed: 1 }),
-  source: 'agent_done',
-})
-assert.equal(rejectedLedgerFailed.action, 'reject')
-assert.match(rejectedLedgerFailed.reason, /fill_failed_zero/)
+assert.equal(rejectedFinalReviewWithoutExternalBlocker.action, 'reject')
+assert.equal(rejectedFinalReviewWithoutExternalBlocker.recommendedStatus, 'unchanged')
+assert.match(rejectedFinalReviewWithoutExternalBlocker.reason, /final_review never auto-completes/i)
 
 const rejectedResumeNotUploaded = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'done' }),
-  form: formState({ formCoverage: scrolledBottomCoverage() }),
-  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
-  requiresCurrentResumeUpload: true,
-  currentResumeUploaded: false,
-  source: 'agent_done',
-})
-assert.equal(rejectedResumeNotUploaded.action, 'reject')
-assert.match(rejectedResumeNotUploaded.reason, /fill_current_resume_uploaded/)
-
-const allowedExploreDoesNotRequireResumeUpload = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'job_detail' }),
-  form: formState({ formCoverage: scrolledBottomCoverage() }),
-  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
-  requiresCurrentResumeUpload: true,
-  currentResumeUploaded: false,
-  taskType: 'explore',
-  source: 'agent_done',
-})
-assert.equal(allowedExploreDoesNotRequireResumeUpload.action, 'allow')
-assert.equal(allowedExploreDoesNotRequireResumeUpload.recommendedStatus, 'completed')
-assert.match(allowedExploreDoesNotRequireResumeUpload.reason, /allowed explore completion/)
-
-const allowedExploreSummaryWithMissingWorkflowEvidence = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({
-    phase: 'observing',
-    missingCriteria: [missingUserConfirmCriterion()],
-  }),
-  summary: 'Candidate summary: ATH-AI Agent role looks relevant; login is required before applying.',
-  taskType: 'explore',
-  source: 'agent_done',
-})
-assert.equal(allowedExploreSummaryWithMissingWorkflowEvidence.action, 'allow')
-assert.equal(allowedExploreSummaryWithMissingWorkflowEvidence.recommendedStatus, 'completed')
-assert.match(allowedExploreSummaryWithMissingWorkflowEvidence.reason, /candidate summary/i)
-
-const rejectedFillFormStillRequiresResumeUpload = CompletionGate.evaluate({
   done: true,
   blocked: false,
   workflowEvaluation: evaluation({ phase: 'done' }),
@@ -328,39 +200,9 @@ const rejectedFillFormStillRequiresResumeUpload = CompletionGate.evaluate({
   taskType: 'fill_form',
   source: 'agent_done',
 })
-assert.equal(rejectedFillFormStillRequiresResumeUpload.action, 'reject')
-assert.match(rejectedFillFormStillRequiresResumeUpload.reason, /fill_current_resume_uploaded/)
-
-const blockedFinalReviewRequiresHumanTakeover = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({ phase: 'done' }),
-  taskType: 'final_review',
-  source: 'agent_done',
-})
-assert.equal(blockedFinalReviewRequiresHumanTakeover.action, 'block')
-assert.equal(blockedFinalReviewRequiresHumanTakeover.recommendedStatus, 'blocked')
-assert.match(blockedFinalReviewRequiresHumanTakeover.reason, /human takeover/i)
-
-const allowedDone = CompletionGate.evaluate({
-  done: true,
-  blocked: false,
-  workflowEvaluation: evaluation({
-    phase: 'done',
-    evidenceIds: ['ev-tool-done', 'ev-user-confirm'],
-  }),
-  form: formState({ formCoverage: scrolledBottomCoverage() }),
-  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
-  requiresCurrentResumeUpload: true,
-  currentResumeUploaded: true,
-  source: 'agent_done',
-})
-assert.equal(allowedDone.action, 'allow')
-assert.equal(allowedDone.recommendedStatus, 'completed')
-assert.equal(allowedDone.workflowPhase, 'done')
-assert.deepEqual(allowedDone.missingCriteria, [])
-assert.deepEqual(allowedDone.blockers, [])
-assert.deepEqual(allowedDone.evidenceIds, ['ev-tool-done', 'ev-user-confirm'])
+assert.equal(rejectedResumeNotUploaded.action, 'reject')
+assert.equal(rejectedResumeNotUploaded.missingCriteria.at(-1).id, 'task_completion_missing_evidence')
+assert.match(rejectedResumeNotUploaded.reason, /Current resume upload must be verified/)
 
 console.log('completion-gate-test: PASS')
 
@@ -391,7 +233,7 @@ function workflowState(phase, overrides = {}) {
 function pageState(overrides = {}) {
   return {
     schemaVersion: 'page-state/v1',
-    url: 'https://example.test/apply',
+    url: 'about:blank',
     title: 'Application',
     pageType: 'form',
     interactiveCount: 2,
@@ -408,7 +250,7 @@ function pageState(overrides = {}) {
 function formState(overrides = {}) {
   return {
     schemaVersion: 'form-state/v1',
-    url: 'https://example.test/apply',
+    url: 'about:blank',
     fields: [],
     missingRequired: [],
     filledFields: [],
@@ -449,28 +291,6 @@ function ledgerSummary(overrides = {}) {
 
 function submitCandidate(text) {
   return { tag: 'button', text, visible: true, risk: 'L1' }
-}
-
-function requiredField(label) {
-  return {
-    index: 0,
-    label,
-    tag: 'input',
-    type: 'text',
-    required: true,
-    filled: false,
-    disabled: false,
-    readonly: false,
-    invalid: false,
-  }
-}
-
-function filledField(label, value) {
-  return {
-    ...requiredField(label),
-    value,
-    filled: true,
-  }
 }
 
 function missingUserConfirmCriterion() {

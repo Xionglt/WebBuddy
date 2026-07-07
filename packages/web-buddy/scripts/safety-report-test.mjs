@@ -44,10 +44,9 @@ try {
       action: 'gate',
       riskLevel: 'high',
       gateKind: 'login',
-      policyCode: 'policy.workflow.login_required',
-      ruleId: 'policy.workflow.login_required.v1',
-      reason: 'Workflow is in login_required; route this step through the login human gate.',
-      workflowPhase: 'login_required',
+      policyCode: 'policy.workflow.external_blocker',
+      ruleId: 'policy.workflow.external_blocker.v1',
+      reason: 'Workflow is in external_blocker; route this step through the login human gate.',
       requiresFreshContext: true,
     })),
     traceEvent(policyEvent({
@@ -56,10 +55,9 @@ try {
       action: 'gate',
       riskLevel: 'high',
       gateKind: 'captcha',
-      policyCode: 'policy.workflow.captcha_required',
-      ruleId: 'policy.workflow.captcha_required.v1',
-      reason: 'Workflow is in captcha_required; route this step through the captcha human gate.',
-      workflowPhase: 'captcha_required',
+      policyCode: 'policy.workflow.external_blocker',
+      ruleId: 'policy.workflow.external_blocker.v1',
+      reason: 'Workflow is in external_blocker; route this step through the captcha human gate.',
       requiresFreshContext: true,
     })),
     traceEvent(policyEvent({
@@ -72,7 +70,7 @@ try {
       policyCode: 'policy.workflow.apply_entry',
       ruleId: 'policy.workflow.apply_entry.v1',
       reason: 'Apply-entry action requires a high-risk gate but is not a final-submit action.',
-      workflowPhase: 'entering_application',
+      workflowPhase: 'in_target_flow',
       requiresFreshContext: true,
     })),
     traceEvent({
@@ -142,7 +140,7 @@ try {
       policyCode: 'policy.workflow.final_submit',
       ruleId: 'policy.workflow.final_submit.v1',
       reason: 'Submit-like action in review phase requires the final-submit safety gate.',
-      workflowPhase: 'ready_for_final_submit',
+      workflowPhase: 'final_submit_boundary',
       requiresFreshContext: true,
     })),
   ].join('\n') + '\n')
@@ -179,7 +177,7 @@ try {
   assert.equal(result.report.schemaVersion, 'safety-report/v1')
   assert.equal(result.report.runId, runId)
   assert.equal(result.report.finalStatus, 'blocked')
-  assert.equal(result.report.finalWorkflowPhase, 'ready_for_final_submit')
+  assert.equal(result.report.finalWorkflowPhase, 'final_submit_boundary')
   assert.equal(result.report.finalSubmitAttempted, true)
   assert.equal(result.report.finalSubmitBlocked, true)
   assert.equal(result.report.loginHandoffRequired, true)
@@ -191,8 +189,7 @@ try {
   assert.equal(result.report.gatedCount, 3)
   assert.equal(result.report.deniedCount, 1)
   assert.deepEqual(result.report.policyCodes, [
-    'policy.workflow.login_required',
-    'policy.workflow.captcha_required',
+    'policy.workflow.external_blocker',
     'policy.workflow.apply_entry',
     'policy.workflow.final_submit',
   ])

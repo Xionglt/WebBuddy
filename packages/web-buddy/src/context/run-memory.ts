@@ -52,6 +52,9 @@ const EMPTY_RESULT_RE = /(no\s+(results?|matches?)|0\s+(results?|matches?)|nothi
 const EXCLUDED_RE = /(exclude|excluded|skip|skipped|not\s+a\s+fit|不匹配|排除|跳过|不适合|不符合)/i
 const BEST_RE = /(best|top|current\s+best|selected|prefer|推荐|最佳|最匹配|首选|候选)/i
 const JOB_HINT_RE = /(job|position|role|opening|岗位|职位|职缺|招聘)/i
+const TITLE_JOB_RE = /(engineer|developer|architect|scientist|analyst|researcher|manager|工程师|开发|架构师|算法|研发|研究员|产品经理|数据|前端|后端|全栈|客户端|服务端|专家)/i
+const ANSI_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g
+const NON_CANDIDATE_LINE_RE = /\b(?:FAILED|Timeout|locator\.|Call log|Clicked visible text|Typed into|Uploaded file|Ref .* stale)\b|intercepts pointer events|role=dialog|alertdialog|温馨提示|提示|对话框|弹窗|申请名额|需要用户确认|当前状态|点击.*按钮|投递取消|已勾选|已导航|已完成投递前|简历上传成功|页面已加载|page has loaded|navigation includes|共\d+个岗位/i
 
 export function createRunMemory(now = new Date().toISOString()): RunMemory {
   return {
@@ -74,16 +77,18 @@ export function updateRunMemoryFromTool(input: RunMemoryToolUpdateInput): boolea
 
   const observation = truncateText(input.result.observation, 4000)
   const emptyResultKeyword = keyword ?? input.memory.searchedKeywords[input.memory.searchedKeywords.length - 1]
-  if (emptyResultKeyword && isEmptyResultObservation(observation)) {
+  if (input.ok && emptyResultKeyword && isEmptyResultObservation(observation)) {
     changed = addUnique(input.memory.emptyResultKeywords, emptyResultKeyword, MAX_KEYWORDS) || changed
   }
 
-  for (const candidate of extractCandidatesFromText(observation, 'tool_observation', input.currentUrl, now)) {
-    changed = rememberCandidate(input.memory, candidate) || changed
-  }
+  if (input.ok) {
+    for (const candidate of extractCandidatesFromText(observation, 'tool_observation', input.currentUrl, now)) {
+      changed = rememberCandidate(input.memory, candidate) || changed
+    }
 
-  for (const excluded of extractExcludedFromText(observation, 'tool_observation', now)) {
-    changed = rememberExcluded(input.memory, excluded) || changed
+    for (const excluded of extractExcludedFromText(observation, 'tool_observation', now)) {
+      changed = rememberExcluded(input.memory, excluded) || changed
+    }
   }
 
   if (input.toolName === 'agent_done') {
@@ -221,6 +226,7 @@ function candidateFromLine(
 ): RunCandidateJob | undefined {
   const title = titleFromLine(line)
   if (!title || title.length < 3) return undefined
+  if (!looksLikeCandidateJob(title, line)) return undefined
   return {
     id: stableCandidateId(title),
     title,
@@ -236,7 +242,7 @@ function candidateLines(text: string): string[] {
   return text
     .split(/\n|[。；;]/)
     .map((line) => compactText(line.replace(/^[\s*\-•\d.、#]+/, ''), 320))
-    .filter((line) => line.length >= 6 && (JOB_HINT_RE.test(line) || /工程师|开发|developer|engineer|architect/i.test(line)))
+    .filter((line) => line.length >= 6 && !NON_CANDIDATE_LINE_RE.test(line) && (JOB_HINT_RE.test(line) || TITLE_JOB_RE.test(line)))
 }
 
 function titleFromLine(line: string): string | undefined {
@@ -245,6 +251,13 @@ function titleFromLine(line: string): string | undefined {
   const candidate = colonSplit.length > 1 && colonSplit[0].length < 24 ? colonSplit.slice(1).join(': ') : withoutRef
   const title = candidate.split(/\s+[|(-]\s+|，|,|理由|reason=/i)[0]?.trim()
   return title ? compactText(title, 120) : undefined
+}
+
+function looksLikeCandidateJob(title: string, line: string): boolean {
+  if (NON_CANDIDATE_LINE_RE.test(title) || NON_CANDIDATE_LINE_RE.test(line)) return false
+  if (TITLE_JOB_RE.test(title)) return true
+  if (/(候选岗位|current\s+best\s+candidate|best\s+candidate|搜索到.*岗位|找到.*岗位)/i.test(line) && TITLE_JOB_RE.test(line)) return true
+  return false
 }
 
 function rememberCandidate(memory: RunMemory, candidate: RunCandidateJob): boolean {
@@ -296,12 +309,12 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function compactText(value: string, max: number): string {
-  const compact = value.replace(/\s+/g, ' ').trim()
+  const compact = value.replace(ANSI_RE, '').replace(/\s+/g, ' ').trim()
   return compact.length > max ? `${compact.slice(0, Math.max(0, max - 3))}...` : compact
 }
 
 function truncateText(value: string, max: number): string {
-  const trimmed = value.trim()
+  const trimmed = value.replace(ANSI_RE, '').trim()
   return trimmed.length > max ? `${trimmed.slice(0, Math.max(0, max - 3))}...` : trimmed
 }
 

@@ -4,6 +4,7 @@ import type { PolicyDecision } from '../policy/agent-policy.js'
 import type { GateDecision, GateKind } from '../sdk/human.js'
 import type { LocalToolRunResult } from '../tools/local-adapter.js'
 import { inspectDirectSubmitWorkflowState } from './direct-submit.js'
+import { classifyObservationPhase, type ObservationPhaseBlocker } from './phase-classifier.js'
 import type { WorkflowConfidence, WorkflowPhase, WorkflowState } from './workflow-state.js'
 
 export interface WorkflowTransitionInput {
@@ -27,13 +28,10 @@ export interface WorkflowTransitionResult {
 
 const LOGIN_TEXT = /login|log in|sign in|signin|sso|auth|password|密码登录|短信登录|账号登录|统一认证|单点登录|请登录|登录后|登陆后|登入后/i
 const CAPTCHA_TEXT = /captcha|human verification|verify you are human|人机验证|验证码|安全验证|滑块验证/i
-const APPLY_ENTRY_TEXT = /apply|投递|投递简历|立即投递|申请职位|开始申请/i
 
 export function transitionWorkflowState(input: WorkflowTransitionInput): WorkflowTransitionResult {
   const now = input.now ?? new Date().toISOString()
   const rule = inferWorkflowRule(input)
-  if (!rule) return { state: input.previous, changed: false }
-
   const nextState = buildState(input.previous, rule.phase, {
     confidence: rule.confidence,
     reason: rule.reason,
@@ -60,62 +58,22 @@ interface WorkflowRule {
   blocker?: string
 }
 
-function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule | undefined {
+function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule {
   if (input.agentDoneBlocked === false) {
     return {
       phase: 'done',
       confidence: 'high',
-      reason: 'Agent reported completion without a blocker.',
+      reason: 'Agent reported completion; completion gate must still verify evidence.',
     }
   }
 
   if (input.agentDoneBlocked === true) {
-    if (input.gateKind === 'final_submit') {
-      return {
-        phase: 'blocked',
-        confidence: 'high',
-        reason: 'Final-submit gate triggered and the workflow is blocked.',
-        humanHandoffRequired: true,
-        blocker: 'Final submit requires manual takeover.',
-      }
-    }
     return {
       phase: 'blocked',
       confidence: 'high',
       reason: 'Agent reported completion with blocked=true.',
       humanHandoffRequired: true,
-      blocker: 'Agent reported the workflow is blocked.',
-    }
-  }
-
-  if (input.gateKind === 'final_submit' && input.gateDecision && input.gateDecision !== 'approve') {
-    return {
-      phase: 'blocked',
-      confidence: 'high',
-      reason: `Final-submit gate returned ${input.gateDecision}.`,
-      humanHandoffRequired: true,
-      blocker: 'Final submit requires manual takeover.',
-    }
-  }
-
-  const pageText = workflowText(input.currentUrl, input.page)
-  if (input.page?.pageType === 'captcha' || CAPTCHA_TEXT.test(pageText)) {
-    return {
-      phase: 'captcha_required',
-      confidence: input.page?.pageType === 'captcha' ? 'high' : 'medium',
-      reason: 'Current page appears to require human verification.',
-      humanHandoffRequired: true,
-      blocker: 'Human verification required before continuing.',
-    }
-  }
-
-  if (input.page?.pageType === 'login' || LOGIN_TEXT.test(pageText)) {
-    return {
-      phase: 'login_required',
-      confidence: input.page?.pageType === 'login' ? 'high' : 'medium',
-      reason: 'Current page appears to be a login or SSO page.',
-      humanHandoffRequired: true,
-      blocker: 'Human login required before continuing.',
+      blocker: blockerForGate(input.gateKind) ?? 'Agent reported the workflow is blocked.',
     }
   }
 
@@ -124,68 +82,96 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule | undef
     page: input.page,
     currentUrl: input.currentUrl,
   })
-  if (directSubmit?.detected) {
+  const blockers = blockersFor(input, directSubmit?.detected === true)
+  const phase = classifyObservationPhase({
+    page: input.page,
+    form: input.form,
+    blockers,
+    policyFacts: input.policyDecision ? [input.policyDecision] : undefined,
+    permissionFacts: input.gateKind ? [{ gateKind: input.gateKind, decision: input.gateDecision }] : undefined,
+    summary: input.toolResult?.observation,
+  })
+
+  if (phase === 'external_blocker') {
+    const blockerGateKind = blockers.find((blocker) => blocker.gateKind === 'login' || blocker.gateKind === 'captcha')?.gateKind
+    const gateKind = input.page?.pageType === 'captcha'
+      ? 'captcha'
+      : input.page?.pageType === 'login'
+        ? 'login'
+        : externalGateKind(input.gateKind) ?? externalGateKind(blockerGateKind)
     return {
-      phase: 'direct_submit_review',
-      confidence: 'high',
-      reason: 'Site appears to use an online-resume/direct-submit flow with no fillable fields.',
+      phase,
+      confidence: gateKind ? 'high' : 'medium',
+      reason: gateKind === 'captcha'
+        ? 'Current evidence shows a human verification blocker.'
+        : gateKind === 'login'
+          ? 'Current evidence shows a login or SSO blocker.'
+          : 'Current evidence shows an external blocker.',
       humanHandoffRequired: true,
-      blocker: 'Direct-submit review: next step is final submit and requires manual confirmation.',
+      blocker: blockerForGate(gateKind) ?? 'External blocker requires human action before continuing.',
     }
   }
 
-  if (input.gateKind === 'final_submit' || input.policyDecision?.gateKind === 'final_submit') {
+  if (phase === 'final_submit_boundary') {
     return {
-      phase: 'ready_for_final_submit',
+      phase,
       confidence: 'high',
-      reason: 'Policy identified a final-submit gate.',
+      reason: directSubmit?.detected
+        ? 'Direct-submit evidence shows the next step is a final-submit boundary.'
+        : 'Policy, permission, or page evidence shows a final-submit boundary.',
+      humanHandoffRequired: true,
+      blocker: 'Final submit requires human takeover before completion.',
     }
   }
 
-  if (input.form && shouldReviewForm(input.form)) {
+  if (phase === 'blocked') {
     return {
-      phase: 'reviewing',
-      confidence: 'medium',
-      reason: 'Application form appears mostly filled and has submit candidates.',
+      phase,
+      confidence: 'high',
+      reason: 'Current evidence shows the workflow cannot continue.',
+      humanHandoffRequired: true,
+      blocker: 'Workflow is blocked until human input or external state changes.',
     }
   }
 
-  if (input.form && shouldFillForm(input.form)) {
-    return {
-      phase: 'filling_application',
-      confidence: 'medium',
-      reason: 'Application form has fields or missing required values.',
-    }
+  return {
+    phase,
+    confidence: input.page || input.form || input.toolResult ? 'medium' : input.previous.confidence,
+    reason: phase === 'done'
+      ? 'Current evidence shows the target state is reached.'
+      : 'Current evidence remains inside the requested target flow.',
   }
+}
 
-  if (isApplyEntryClick(input)) {
-    return {
-      phase: 'entering_application',
-      confidence: 'medium',
-      reason: 'Apply entry action appears to open the application flow.',
-    }
+function blockersFor(input: WorkflowTransitionInput, directSubmitDetected: boolean): ObservationPhaseBlocker[] {
+  const blockers: ObservationPhaseBlocker[] = []
+  const pageText = [input.page?.title, input.page?.textSummary].filter(Boolean).join('\n')
+  if (CAPTCHA_TEXT.test(pageText)) {
+    blockers.push({ gateKind: 'captcha', kind: 'external_blocker', message: 'Human verification required before continuing.' })
+  } else if (LOGIN_TEXT.test(pageText)) {
+    blockers.push({ gateKind: 'login', kind: 'external_blocker', message: 'Human login required before continuing.' })
   }
-
-  if (
-    input.page?.pageType === 'detail' &&
-    (
-      input.previous.phase === 'observing' ||
-      input.previous.phase === 'entering_application' ||
-      input.previous.phase === 'login_required' ||
-      input.previous.phase === 'captcha_required'
-    )
-  ) {
-    return {
-      phase: 'job_detail',
-      confidence: 'medium',
-      reason: 'Current page appears to be a job detail page.',
-    }
+  if (input.gateKind && input.gateDecision !== 'approve') {
+    blockers.push({
+      gateKind: input.gateKind,
+      message: input.policyDecision?.reason,
+      unresolved: input.gateDecision !== 'approve',
+    })
   }
-
-  const clearedHandoff = clearedHumanHandoffRule(input)
-  if (clearedHandoff) return clearedHandoff
-
-  return undefined
+  if (directSubmitDetected) {
+    blockers.push({
+      gateKind: 'final_submit',
+      message: 'Direct-submit review reached final submit boundary.',
+    })
+  }
+  if (input.gateDecision && input.gateDecision !== 'approve') {
+    blockers.push({
+      gateKind: input.gateKind,
+      message: `Gate returned ${input.gateDecision}.`,
+      recoverable: input.gateKind === 'final_submit' ? true : undefined,
+    })
+  }
+  return blockers
 }
 
 function buildState(
@@ -202,10 +188,11 @@ function buildState(
   return {
     schemaVersion: 'workflow-state/v1',
     phase,
+    observationPhase: phase,
     confidence: options.confidence,
     reason: options.reason,
     updatedAt: options.now,
-    ...(options.humanHandoffRequired ? { humanHandoffRequired: options.humanHandoffRequired } : {}),
+    ...(options.humanHandoffRequired ? { humanHandoffRequired: true } : {}),
     ...(options.blocker ? { blocker: options.blocker } : {}),
     ...(phase !== previous.phase
       ? {
@@ -222,62 +209,13 @@ function buildState(
   }
 }
 
-function workflowText(currentUrl: string | undefined, page: PageState | undefined): string {
-  return [currentUrl, page?.url, page?.title, page?.textSummary].filter(Boolean).join('\n')
+function externalGateKind(gateKind: GateKind | undefined): Extract<GateKind, 'login' | 'captcha'> | undefined {
+  return gateKind === 'login' || gateKind === 'captcha' ? gateKind : undefined
 }
 
-function shouldFillForm(form: FormState): boolean {
-  return form.missingRequired.length > 0 || form.fields.length >= 3
-}
-
-function shouldReviewForm(form: FormState): boolean {
-  if (form.submitCandidates.length === 0 || form.fields.length === 0) return false
-  if (form.missingRequired.length === 0) return true
-  return form.filledFields.length > 0 && form.missingRequired.length <= Math.max(1, Math.floor(form.fields.length * 0.2))
-}
-
-function isApplyEntryClick(input: WorkflowTransitionInput): boolean {
-  if (input.toolName !== 'browser_click' && input.toolName !== 'browser_click_text') return false
-  if (input.previous.phase !== 'job_detail' && input.previous.phase !== 'entering_application') return false
-  const observation = input.toolResult?.observation ?? ''
-  if (input.policyDecision?.gateKind === 'final_submit') return false
-  return APPLY_ENTRY_TEXT.test(observation) || input.toolResult?.pageChanged === true
-}
-
-function clearedHumanHandoffRule(input: WorkflowTransitionInput): WorkflowRule | undefined {
-  if (input.previous.phase !== 'login_required' && input.previous.phase !== 'captcha_required') return undefined
-  if (!input.page) return undefined
-  const pageText = workflowText(input.currentUrl, input.page)
-  if (input.page.pageType === 'login' || input.page.pageType === 'captcha') return undefined
-  if (LOGIN_TEXT.test(pageText) || CAPTCHA_TEXT.test(pageText)) return undefined
-
-  if (input.page.pageType === 'detail') {
-    return {
-      phase: 'job_detail',
-      confidence: 'medium',
-      reason: 'Human handoff appears cleared and the current page is a job detail page.',
-    }
-  }
-
-  if (input.page.pageType === 'form' || (input.form && input.form.fields.length > 0)) {
-    return {
-      phase: 'filling_application',
-      confidence: 'medium',
-      reason: 'Human handoff appears cleared and the current page has application form fields.',
-    }
-  }
-
-  if (input.page.pageType === 'confirmation') {
-    return {
-      phase: 'done',
-      confidence: 'medium',
-      reason: 'Human handoff appears cleared and the current page looks like a confirmation page.',
-    }
-  }
-
-  return {
-    phase: 'observing',
-    confidence: 'medium',
-    reason: 'Human handoff appears cleared; resuming workflow observation.',
-  }
+function blockerForGate(gateKind: GateKind | undefined): string | undefined {
+  if (gateKind === 'login') return 'Human login required before continuing.'
+  if (gateKind === 'captcha') return 'Human verification required before continuing.'
+  if (gateKind === 'final_submit') return 'Final submit requires human takeover before completion.'
+  return undefined
 }

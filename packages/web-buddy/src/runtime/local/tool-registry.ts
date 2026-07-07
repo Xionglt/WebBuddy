@@ -31,8 +31,14 @@ export class ToolRegistry {
     return [...this.tools.values()]
   }
 
-  toOpenAITools(): ToolSchema[] {
-    return toOpenAITools(this.list())
+  toOpenAITools(options: { include?: Iterable<string>; exclude?: Iterable<string> } = {}): ToolSchema[] {
+    const include = options.include ? new Set(options.include) : undefined
+    const exclude = new Set(options.exclude ?? [])
+    const tools = this.list().filter((tool) => {
+      if (include && !include.has(tool.name)) return false
+      return !exclude.has(tool.name)
+    })
+    return toOpenAITools(tools)
   }
 
   resolveRisk(name: string, args: Record<string, unknown>, ctx: ToolContext): RiskLevel | undefined {

@@ -1,9 +1,13 @@
-import type { FormState } from '../observation/form-state.js'
+import type { FillLedgerSummary } from '../fill/fill-ledger.js'
+import type { FormCoverage, FormState } from '../observation/form-state.js'
 import type { PageState } from '../observation/page-state.js'
 import type { PolicyDecision, PolicyEngineDecision } from '../policy/agent-policy.js'
 import type { ApprovalRequest, ApprovalResolution, PermissionDecision, PermissionRequest } from '../permission/permission-types.js'
 import type { GateDecision, GateKind } from '../sdk/human.js'
 import type { LocalToolRunResult } from '../tools/local-adapter.js'
+import type { WebBuddyTaskType } from './completion-gate.js'
+import { classifyObservationPhase, type ObservationPhase } from './phase-classifier.js'
+import { evaluateTaskCompletion, type TaskCompletionVerdict } from './task-completion.js'
 import {
   jobApplicationWorkflowDefinition,
   type WorkflowCompletionCriterion,
@@ -78,6 +82,12 @@ export interface WorkflowEngineInput {
   permissionFacts?: WorkflowPermissionFact[]
   approvalFacts?: WorkflowApprovalFact[]
   evidenceSnapshot?: EvidenceStoreSnapshot | WorkflowEvidence[] | WorkflowEvidenceSnapshotLike
+  summary?: string
+  taskType?: WebBuddyTaskType
+  formCoverage?: FormCoverage
+  fillLedgerSummary?: FillLedgerSummary
+  requiresCurrentResumeUpload?: boolean
+  currentResumeUploaded?: boolean
   now?: string
 }
 
@@ -115,6 +125,7 @@ export interface WorkflowBlocker {
 
 export interface WorkflowEngineEvaluation {
   state: WorkflowState
+  observationPhase?: ObservationPhase
   changed: boolean
   matchedCriteria: WorkflowCriterionMatch[]
   missingCriteria: WorkflowCriterionMissing[]
@@ -148,40 +159,61 @@ export class WorkflowEngine {
   evaluate(input: WorkflowEngineInput): WorkflowEngineEvaluation {
     const now = input.now ?? new Date().toISOString()
     const facts = runtimeFactsFor(input)
+    const observationFacts = contextualRuntimeFactsFor(input, facts)
+    const policyFacts = contextualPolicyFactsFor(input)
+    const permissionFacts = contextualPermissionFactsFor(input)
     const transition = transitionWorkflowState({
       previous: input.previous,
       currentUrl: input.currentUrl,
       page: input.page,
       form: input.form,
-      toolName: facts.toolName,
-      toolResult: facts.toolResult,
-      policyDecision: facts.policyDecision,
-      gateKind: facts.gateKind,
-      gateDecision: facts.gateDecision,
-      agentDoneBlocked: facts.agentDoneBlocked,
+      toolName: observationFacts.toolName,
+      toolResult: observationFacts.toolResult,
+      policyDecision: observationFacts.policyDecision,
+      gateKind: observationFacts.gateKind,
+      gateDecision: observationFacts.gateDecision,
+      agentDoneBlocked: observationFacts.agentDoneBlocked,
       now,
     })
 
-    const state = withRequiredHandoffState(transition.state, input.previous, facts, this.definition, now)
     const evidence = evidenceLookupFor(input.evidenceSnapshot)
-    const baseBlockers = handoffAndWorkflowBlockers(state, facts, this.definition)
-    const { matchedCriteria, missingCriteria } = evaluateCriteria(this.definition, state, evidence, baseBlockers)
+    const transitionedState = withRequiredHandoffState(transition.state, input.previous, observationFacts, this.definition, now)
+    const preliminaryBlockers = handoffAndWorkflowBlockers(transitionedState, observationFacts, this.definition)
+    const taskCompletionVerdict = taskCompletionVerdictFor(input, transitionedState, evidence, now)
+    const observationPhase = classifyObservationPhase({
+      page: input.page,
+      form: input.form,
+      blockers: preliminaryBlockers,
+      ...(taskCompletionVerdict ? { taskCompletionVerdict } : {}),
+      policyFacts,
+      permissionFacts,
+      externalBlockerVisible: transitionedState.phase === 'external_blocker',
+      summary: input.summary ?? observationFacts.latestAction?.summary ?? observationFacts.toolResult?.observation,
+    })
+    const classifiedState = withObservationPhase(
+      transitionStatePhase(transitionedState, input.previous, observationPhase, now),
+      observationPhase,
+    )
+    const stateForEvaluation = withRequiredHandoffState(classifiedState, input.previous, observationFacts, this.definition, now)
+    const baseBlockers = handoffAndWorkflowBlockers(stateForEvaluation, observationFacts, this.definition)
+    const { matchedCriteria, missingCriteria } = evaluateCriteria(this.definition, stateForEvaluation, evidence, baseBlockers)
     const blockers = uniqueBlockers([
       ...baseBlockers,
       ...missingCriteria
         .filter((criterion) => criterion.kind !== 'phase_required_evidence')
-        .map((criterion) => missingEvidenceBlocker(state, criterion)),
+        .map((criterion) => missingEvidenceBlocker(stateForEvaluation, criterion)),
     ])
     const evidenceIds = unique(matchedCriteria.flatMap((criterion) => criterion.evidenceIds))
 
     return {
-      state,
-      changed: transition.changed || !sameWorkflowState(input.previous, state),
+      state: stateForEvaluation,
+      observationPhase,
+      changed: transition.changed || !sameWorkflowState(input.previous, stateForEvaluation),
       matchedCriteria,
       missingCriteria,
       blockers,
       evidenceIds,
-      reason: evaluationReason(state, matchedCriteria, missingCriteria, blockers),
+      reason: evaluationReason(stateForEvaluation, matchedCriteria, missingCriteria, blockers),
     }
   }
 }
@@ -213,6 +245,80 @@ function runtimeFactsFor(input: WorkflowEngineInput): RuntimeFacts {
       : {}),
   }
 }
+
+function contextualRuntimeFactsFor(input: WorkflowEngineInput, facts: RuntimeFacts): RuntimeFacts {
+  if (!shouldIgnoreStaleFinalSubmitFacts(input, facts)) return facts
+
+  return {
+    ...(facts.latestAction ? { latestAction: facts.latestAction } : {}),
+    ...(facts.toolName ? { toolName: facts.toolName } : {}),
+    ...(facts.toolResult ? { toolResult: facts.toolResult } : {}),
+    ...(facts.policyDecision && !isFinalSubmitPolicyFact(facts.policyDecision) ? { policyDecision: facts.policyDecision } : {}),
+    ...(facts.gateKind && facts.gateKind !== 'final_submit' ? { gateKind: facts.gateKind } : {}),
+    ...(facts.gateKind && facts.gateKind !== 'final_submit' && facts.gateDecision ? { gateDecision: facts.gateDecision } : {}),
+    ...(facts.agentDoneBlocked !== undefined ? { agentDoneBlocked: facts.agentDoneBlocked } : {}),
+  }
+}
+
+function contextualPolicyFactsFor(input: WorkflowEngineInput): WorkflowPolicyFact[] | undefined {
+  if (!shouldIgnoreStaleFinalSubmitFacts(input, runtimeFactsFor(input))) return input.policyFacts
+  return input.policyFacts?.filter((fact) => !isFinalSubmitPolicyFact(fact))
+}
+
+function contextualPermissionFactsFor(input: WorkflowEngineInput): WorkflowPermissionFact[] | undefined {
+  if (!shouldIgnoreStaleFinalSubmitFacts(input, runtimeFactsFor(input))) return input.permissionFacts
+  return input.permissionFacts?.filter((fact) => gateKindFromPermission(fact) !== 'final_submit')
+}
+
+function shouldIgnoreStaleFinalSubmitFacts(input: WorkflowEngineInput, facts: RuntimeFacts): boolean {
+  if (!hasCurrentObservation(input)) return false
+  if (currentObservationHasFinalSubmitSurface(input)) return false
+  return (
+    facts.gateKind === 'final_submit' ||
+    isFinalSubmitPolicyFact(facts.policyDecision) ||
+    input.policyFacts?.some(isFinalSubmitPolicyFact) === true ||
+    input.permissionFacts?.some((fact) => gateKindFromPermission(fact) === 'final_submit') === true ||
+    input.approvalFacts?.some((fact) => gateKindFromApproval(fact) === 'final_submit') === true
+  )
+}
+
+function hasCurrentObservation(input: WorkflowEngineInput): boolean {
+  return Boolean(input.page || input.form || input.currentUrl || input.summary)
+}
+
+function currentObservationHasFinalSubmitSurface(input: WorkflowEngineInput): boolean {
+  const formSubmit = input.form?.submitCandidates.some((candidate) => {
+    if (candidate.visible === false) return false
+    if (APPLY_ENTRY_TEXT.test(candidate.text)) return false
+    return candidate.risk === 'L3' || candidate.risk === 'L4' || FINAL_SUBMIT_TEXT.test(candidate.text)
+  })
+  if (formSubmit) return true
+
+  const finalButton = input.page?.facts?.likelyFinalSubmitButtons.some(
+    (button) => button.visible !== false && FINAL_SUBMIT_TEXT.test(button.text),
+  )
+  if (finalButton) return true
+
+  const dialog = input.page?.facts?.visibleBlockingDialog
+  if (dialog?.present && /quota|final_submit|submit/i.test(String(dialog.kind ?? ''))) return true
+
+  const text = [input.summary, input.page?.title, input.page?.textSummary, input.form?.visibleErrors?.join(' ')]
+    .filter(Boolean)
+    .join(' ')
+  return FINAL_SUBMIT_CONTEXT_TEXT.test(text)
+}
+
+function isFinalSubmitPolicyFact(fact: WorkflowPolicyFact | undefined): boolean {
+  if (!fact) return false
+  return fact.gateKind === 'final_submit' || FINAL_SUBMIT_CONTEXT_TEXT.test([fact.reason, fact.policyCode].filter(Boolean).join(' '))
+}
+
+const FINAL_SUBMIT_TEXT =
+  /确认投递|提交申请|完成投递|确认提交|递交申请|最终提交|final submit|submit application|complete application|finish application|confirm and submit|publish application|submit$/i
+const APPLY_ENTRY_TEXT =
+  /^(投递简历|立即投递|申请职位|开始申请|start application|apply now|apply)$/i
+const FINAL_SUBMIT_CONTEXT_TEXT =
+  /最终提交|final submit|submit application|complete application|finish application|confirm and submit|确认投递|确认提交|提交申请|递交申请|温馨提示.*(申请|投递)|本月.*还能.*(申请|投递)|申请名额|投递名额/i
 
 function withRequiredHandoffState(
   state: WorkflowState,
@@ -441,30 +547,96 @@ function missingEvidenceBlocker(state: WorkflowState, criterion: WorkflowCriteri
   }
 }
 
+function taskCompletionVerdictFor(
+  input: WorkflowEngineInput,
+  state: WorkflowState,
+  evidence: EvidenceLookup,
+  now: string,
+): Pick<TaskCompletionVerdict, 'targetStateReached' | 'externalBlockerVisible'> | undefined {
+  if (!input.taskType) {
+    if (state.phase === 'done') return { targetStateReached: true, externalBlockerVisible: false }
+    return undefined
+  }
+
+  const verdict = evaluateTaskCompletion({
+    taskType: input.taskType,
+    page: input.page,
+    form: input.form,
+    formCoverage: input.formCoverage ?? input.form?.formCoverage ?? input.previous.formCoverage,
+    fillLedgerSummary: input.fillLedgerSummary ?? input.previous.fillLedgerSummary,
+    requiresCurrentResumeUpload: input.requiresCurrentResumeUpload,
+    currentResumeUploaded: input.currentResumeUploaded ?? input.previous.currentResumeUploaded,
+    summary: input.summary,
+    evidenceSnapshot: evidenceStoreSnapshotFor(evidence, now),
+  })
+
+  return {
+    targetStateReached: verdict.targetStateReached,
+    externalBlockerVisible: verdict.externalBlockerVisible,
+  }
+}
+
+function transitionStatePhase(state: WorkflowState, previous: WorkflowState, phase: WorkflowPhase, now: string): WorkflowState {
+  if (state.phase === phase) return state
+  return {
+    ...state,
+    phase,
+    reason: phaseReason(phase, state.reason),
+    updatedAt: now,
+    ...(phase === 'external_blocker' || phase === 'final_submit_boundary' || phase === 'blocked'
+      ? { humanHandoffRequired: true, blocker: state.blocker ?? blockerMessageFor(undefined, phase) }
+      : {}),
+    ...(phase === 'in_target_flow' || phase === 'done'
+      ? { humanHandoffRequired: undefined, blocker: undefined }
+      : {}),
+    lastTransition: {
+      from: previous.phase,
+      to: phase,
+      reason: phaseReason(phase, state.reason),
+      at: now,
+    },
+  }
+}
+
+function withObservationPhase(state: WorkflowState, observationPhase: ObservationPhase): WorkflowState {
+  if (state.observationPhase === observationPhase) return state
+  return {
+    ...state,
+    observationPhase,
+  }
+}
+
 function humanHandoffGateKindFor(
   state: WorkflowState,
   facts: RuntimeFacts,
   definition: WorkflowDefinition<WorkflowPhase>,
 ): GateKind | undefined {
-  if (state.phase === 'login_required') return 'login'
-  if (state.phase === 'captcha_required') return 'captcha'
-  if (state.phase === 'direct_submit_review') return 'final_submit'
-  if (state.phase === 'ready_for_final_submit') return 'final_submit'
+  if (state.phase === 'final_submit_boundary') return 'final_submit'
+  if (state.phase === 'external_blocker' && (facts.gateKind === 'login' || facts.gateKind === 'captcha')) return facts.gateKind
+  if (state.phase === 'external_blocker' && /captcha|verification|验证码|人机验证/i.test(state.blocker ?? state.reason)) return 'captcha'
+  if (state.phase === 'external_blocker' && /login|sign in|sso|登录|登陆/i.test(state.blocker ?? state.reason)) return 'login'
   if (facts.gateKind === 'final_submit') return facts.gateKind
   if ((facts.gateKind === 'login' || facts.gateKind === 'captcha') && facts.gateDecision !== 'approve') return facts.gateKind
   return undefined
 }
 
 function blockerMessageFor(gateKind: GateKind | undefined, phase: WorkflowPhase): string {
-  if (gateKind === 'login' || phase === 'login_required') return 'Human login required before continuing.'
-  if (gateKind === 'captcha' || phase === 'captcha_required') return 'Human verification required before continuing.'
-  if (phase === 'direct_submit_review') {
-    return 'Direct-submit review required: no fillable fields were found and the next step is final submit.'
-  }
-  if (gateKind === 'final_submit' || phase === 'ready_for_final_submit') {
+  if (gateKind === 'login') return 'Human login required before continuing.'
+  if (gateKind === 'captcha') return 'Human verification required before continuing.'
+  if (gateKind === 'final_submit' || phase === 'final_submit_boundary') {
     return 'Final submit requires human takeover before completion.'
   }
+  if (phase === 'external_blocker') return 'External blocker requires human action before continuing.'
+  if (phase === 'blocked') return 'Workflow is blocked until human input or external state changes.'
   return 'Workflow requires human action before continuing.'
+}
+
+function phaseReason(phase: WorkflowPhase, fallback: string): string {
+  if (phase === 'done') return 'Task completion evidence reached the requested target state.'
+  if (phase === 'external_blocker') return 'Current observation shows an external blocker.'
+  if (phase === 'final_submit_boundary') return 'Current observation shows a final-submit boundary.'
+  if (phase === 'blocked') return 'Current observation shows the workflow is blocked.'
+  return fallback || 'Current observation remains inside the requested target flow.'
 }
 
 function evidenceLookupFor(snapshot: WorkflowEngineInput['evidenceSnapshot']): EvidenceLookup {
@@ -489,6 +661,27 @@ function evidenceListFor(snapshot: WorkflowEngineInput['evidenceSnapshot']): Wor
 
 function evidenceIdsForKinds(evidence: EvidenceLookup, kinds: EvidenceKind[]): string[] {
   return unique(kinds.flatMap((kind) => evidence.byKind.get(kind) ?? []).map((item) => item.id))
+}
+
+function evidenceStoreSnapshotFor(evidence: EvidenceLookup, now: string): EvidenceStoreSnapshot {
+  const byKind: Record<string, WorkflowEvidence[]> = {}
+  const countsByKind: Record<string, number> = {}
+  for (const item of evidence.all) {
+    byKind[item.kind] = [...(byKind[item.kind] ?? []), cloneEvidence(item)]
+    countsByKind[item.kind] = (countsByKind[item.kind] ?? 0) + 1
+  }
+
+  return {
+    schemaVersion: 'evidence-store-snapshot/v1',
+    version: 1,
+    generatedAt: now,
+    total: evidence.all.length,
+    kinds: Object.keys(countsByKind),
+    countsByKind,
+    evidence: evidence.all.map(cloneEvidence),
+    byKind,
+    all: evidence.all.map(cloneEvidence),
+  }
 }
 
 function gateKindFromPermission(fact: WorkflowPermissionFact | undefined): GateKind | undefined {

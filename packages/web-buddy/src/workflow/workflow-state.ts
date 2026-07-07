@@ -1,18 +1,11 @@
 import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { FormCoverage } from '../observation/form-state.js'
+import type { ObservationPhase } from './phase-classifier.js'
 
 export type WorkflowPhase =
-  | 'observing'
-  | 'selecting_job'
-  | 'job_detail'
-  | 'entering_application'
-  | 'login_required'
-  | 'captcha_required'
-  | 'editing_resume'
-  | 'filling_application'
-  | 'reviewing'
-  | 'direct_submit_review'
-  | 'ready_for_final_submit'
+  | 'in_target_flow'
+  | 'external_blocker'
+  | 'final_submit_boundary'
   | 'done'
   | 'blocked'
 
@@ -21,6 +14,7 @@ export type WorkflowConfidence = 'low' | 'medium' | 'high'
 export interface WorkflowState {
   schemaVersion: 'workflow-state/v1'
   phase: WorkflowPhase
+  observationPhase?: ObservationPhase
   confidence: WorkflowConfidence
   reason: string
   updatedAt: string
@@ -40,9 +34,9 @@ export interface WorkflowState {
 export function createInitialWorkflowState(now = new Date().toISOString()): WorkflowState {
   return {
     schemaVersion: 'workflow-state/v1',
-    phase: 'observing',
+    phase: 'in_target_flow',
     confidence: 'medium',
-    reason: 'Workflow has not inferred a more specific phase yet.',
+    reason: 'Workflow is observing target-flow progress from current evidence.',
     updatedAt: now,
   }
 }

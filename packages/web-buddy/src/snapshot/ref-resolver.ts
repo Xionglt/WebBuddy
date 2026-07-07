@@ -1,6 +1,8 @@
 import type { Locator, Page } from 'playwright'
 import type { SnapshotRecord, StoredRef } from '../types.js'
 import { toolFailure } from '../errors.js'
+import { browserSnapshot } from '../browser/snapshot.js'
+import { sessionManager } from '../session/manager.js'
 
 export async function resolveRef(
   page: Page,
@@ -56,4 +58,33 @@ export async function resolveRef(
       suggestedNextActions: ['browser_snapshot'],
     }),
   }
+}
+
+export async function resolveRefWithSnapshotRetry(
+  page: Page,
+  snapshotRecord: SnapshotRecord | null,
+  ref: string,
+  sessionId?: string,
+): Promise<{ ok: true; locator: Locator; stored: StoredRef } | { ok: false; failure: ReturnType<typeof toolFailure> }> {
+  const first = await resolveRef(page, snapshotRecord, ref)
+  if (first.ok || !isRetryableRefFailure(first.failure)) return first
+
+  const refreshed = await browserSnapshot({ sessionId })
+  if (!refreshed.ok) return first
+
+  const nextSnapshot = sessionManager.get(sessionId)?.latestSnapshot ?? null
+  const second = await resolveRef(page, nextSnapshot, ref)
+  if (second.ok) return second
+
+  return {
+    ok: false,
+    failure: toolFailure('REF_STALE', `Ref "${ref}" is stale after refreshing the snapshot.`, {
+      recoverable: true,
+      suggestedNextActions: ['browser_snapshot'],
+    }),
+  }
+}
+
+function isRetryableRefFailure(failure: ReturnType<typeof toolFailure>): boolean {
+  return failure.error.code === 'REF_STALE' || failure.error.code === 'ELEMENT_NOT_FOUND'
 }

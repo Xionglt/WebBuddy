@@ -83,6 +83,7 @@ try {
   const restoredEvent = completedEvents.find((event) => event.type === 'session_restored')
   assert.equal(restoredEvent.data.sessionStatus, 'blocked')
   assert.equal(restoredEvent.data.workflowPhase, 'done')
+  assert.equal(restoredEvent.data.observationPhase, 'done')
   assert.equal(restoredEvent.data.workflowEvidenceCount, 1)
   const userConfirmedEvent = completedEvents.find((event) => event.type === 'user_confirmed')
   assert.equal(userConfirmedEvent.data.confirmationId, completed.confirmation.id)
@@ -95,6 +96,7 @@ try {
   assert.equal(completedRecheckedEvent.data.completionGateAction, 'allow')
   assert.equal(completedRecheckedEvent.data.recommendedStatus, 'completed')
   assert.equal(completedRecheckedEvent.data.workflowPhase, 'done')
+  assert.equal(completedRecheckedEvent.data.observationPhase, 'done')
 
   const finalSubmitSession = await createFinalSubmitBlockedSession(store, {
     sessionId: 'session-completion-final-submit',
@@ -111,7 +113,7 @@ try {
   assert.equal(blocked.status, 'blocked')
   assert.equal(blocked.completion.completionGateDecision.action, 'block')
   assert.equal(blocked.completion.completionGateDecision.recommendedStatus, 'blocked')
-  assert.equal(blocked.completion.completionGateDecision.workflowPhase, 'ready_for_final_submit')
+  assert.equal(blocked.completion.completionGateDecision.workflowPhase, 'final_submit_boundary')
   assert.match(blocked.reason, /final submit/i)
   assert(
     blocked.completion.completionGateDecision.blockers.some((blocker) => blocker.gateKind === 'final_submit'),
@@ -125,12 +127,15 @@ try {
   const blockedFinal = blockedTranscript.filter((entry) => entry.type === 'final_result').at(-1)
   assert.equal(blockedFinal.status, 'blocked')
   assert.equal(blockedFinal.result.completionGate.action, 'block')
+  assert.equal(blockedFinal.result.completionGate.observationPhase, 'final_submit_boundary')
+  assert.equal(blockedFinal.result.workflowEvaluation.observationPhase, 'final_submit_boundary')
   const blockedRecheckedEvent = (await readJsonLines(finalSubmitSession.eventsPath)).find(
     (event) => event.type === 'session_completion_rechecked',
   )
   assert.equal(blockedRecheckedEvent.data.completionGateAction, 'block')
   assert.equal(blockedRecheckedEvent.data.action, 'block')
   assert.equal(blockedRecheckedEvent.data.recommendedStatus, 'blocked')
+  assert.equal(blockedRecheckedEvent.data.observationPhase, 'final_submit_boundary')
   assert(
     blockedRecheckedEvent.data.blockers.some((blocker) => blocker.gateKind === 'final_submit'),
     'session_completion_rechecked should expose final-submit blockers',
@@ -286,6 +291,7 @@ async function createBlockedDoneSession(store, ids) {
       missingCriteria: [missingCriterion],
       blockers: [blocker],
       workflowPhase: 'done',
+      observationPhase: 'done',
       evidenceIds: [evidence.id],
     },
   })
@@ -315,7 +321,7 @@ async function createFinalSubmitBlockedSession(store, ids) {
   })
 
   const state = {
-    ...workflowState('ready_for_final_submit', 'Policy identified a final-submit gate.'),
+    ...workflowState('final_submit_boundary', 'Policy identified a final-submit gate.'),
     humanHandoffRequired: true,
     blocker: 'Final submit requires manual takeover.',
   }
@@ -327,7 +333,7 @@ async function createFinalSubmitBlockedSession(store, ids) {
     source: 'runtime_context',
     confidence: 'high',
     ts: now,
-    phase: 'ready_for_final_submit',
+    phase: 'final_submit_boundary',
     sessionId: session.sessionId,
     runId: session.runId,
   }
@@ -339,7 +345,7 @@ async function createFinalSubmitBlockedSession(store, ids) {
     source: 'policy_engine',
     confidence: 'high',
     ts: now,
-    phase: 'ready_for_final_submit',
+    phase: 'final_submit_boundary',
     sessionId: session.sessionId,
     runId: session.runId,
     data: {
@@ -354,7 +360,7 @@ async function createFinalSubmitBlockedSession(store, ids) {
     id: 'human-handoff-final-submit',
     kind: 'human_handoff',
     message: 'Final submit requires human takeover before completion.',
-    phase: 'ready_for_final_submit',
+    phase: 'final_submit_boundary',
     gateKind: 'final_submit',
     evidenceIds: [policyEvidence.id],
   }
@@ -383,7 +389,8 @@ async function createFinalSubmitBlockedSession(store, ids) {
       reason: 'Completion gate blocked final submit.',
       missingCriteria: [],
       blockers: [finalSubmitBlocker],
-      workflowPhase: 'ready_for_final_submit',
+      workflowPhase: 'final_submit_boundary',
+      observationPhase: 'final_submit_boundary',
       evidenceIds: [formEvidence.id, policyEvidence.id],
     },
   })
@@ -400,6 +407,7 @@ function workflowState(phase, reason) {
   return {
     schemaVersion: 'workflow-state/v1',
     phase,
+    observationPhase: phase === 'final_submit_boundary' ? 'final_submit_boundary' : phase,
     confidence: 'high',
     reason,
     updatedAt: now,

@@ -39,7 +39,7 @@ export interface DirectSubmitSignals {
 
 export interface DirectSubmitReview {
   schemaVersion: 'direct-submit-review/v1'
-  phase: 'direct_submit_review'
+  phase: 'final_submit_boundary'
   detected: true
   url?: string
   title?: string
@@ -243,7 +243,7 @@ export function toDirectSubmitReview(inspection: DirectSubmitInspection): Direct
   if (!inspection.detected) return undefined
   return {
     schemaVersion: 'direct-submit-review/v1',
-    phase: 'direct_submit_review',
+    phase: 'final_submit_boundary',
     detected: true,
     url: inspection.url,
     title: inspection.title,

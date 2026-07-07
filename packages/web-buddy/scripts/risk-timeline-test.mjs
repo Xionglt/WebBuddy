@@ -19,8 +19,8 @@ const policyDecision = {
   requiresFreshContext: true,
   policyCode: 'policy.workflow.apply_entry',
   ruleId: 'policy.workflow.apply_entry.v1',
-  workflowPhase: 'entering_application',
-  auditTags: ['action:gate', 'risk:high', 'workflow:entering_application'],
+  workflowPhase: 'in_target_flow',
+  auditTags: ['action:gate', 'risk:high', 'workflow:in_target_flow'],
 }
 
 const policyRecord = createPolicyRiskDecision({

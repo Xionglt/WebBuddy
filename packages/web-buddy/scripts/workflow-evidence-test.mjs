@@ -4,38 +4,30 @@ import { jobApplicationWorkflowDefinition } from '../dist/workflow/workflow-defi
 import { EvidenceStore } from '../dist/workflow/workflow-evidence.js'
 
 const workflowPhases = [
-  'observing',
-  'selecting_job',
-  'job_detail',
-  'entering_application',
-  'login_required',
-  'captcha_required',
-  'editing_resume',
-  'filling_application',
-  'reviewing',
-  'direct_submit_review',
-  'ready_for_final_submit',
+  'in_target_flow',
+  'external_blocker',
+  'final_submit_boundary',
   'done',
   'blocked',
 ]
 
 assert.equal(jobApplicationWorkflowDefinition.schemaVersion, 'workflow-definition/v1')
 assert.equal(jobApplicationWorkflowDefinition.id, 'job-application')
-assert.equal(jobApplicationWorkflowDefinition.initialPhase, 'observing')
+assert.equal(jobApplicationWorkflowDefinition.initialPhase, 'in_target_flow')
 assert.deepEqual(jobApplicationWorkflowDefinition.terminalPhases, ['done', 'blocked'])
 assert.deepEqual(
   jobApplicationWorkflowDefinition.phases.map((phase) => phase.id),
   workflowPhases,
-  'built-in job application workflow should stay compatible with WorkflowPhase',
+  'built-in workflow should expose only the five observation phases',
 )
 assert.deepEqual(
   jobApplicationWorkflowDefinition.phases.map((phase) => phase.phase),
   workflowPhases,
-  'phase aliases should also stay compatible with WorkflowPhase',
+  'phase aliases should also expose only the five observation phases',
 )
 
-const finalSubmitPhase = jobApplicationWorkflowDefinition.phases.find((phase) => phase.id === 'ready_for_final_submit')
-assert(finalSubmitPhase, 'ready_for_final_submit phase should exist')
+const finalSubmitPhase = jobApplicationWorkflowDefinition.phases.find((phase) => phase.id === 'final_submit_boundary')
+assert(finalSubmitPhase, 'final_submit_boundary phase should exist')
 assert.equal(finalSubmitPhase.humanHandoffRequired, true)
 assert(finalSubmitPhase.requiredEvidenceKinds.includes('policy'))
 
@@ -65,7 +57,7 @@ const pageEvidence = store.add({
   summary: 'Application form page is visible.',
   source: 'browser_snapshot',
   confidence: 'high',
-  phase: 'filling_application',
+  phase: 'in_target_flow',
   sessionId: 'session-1',
   runId: 'run-1',
   data: { url: 'https://example.test/apply' },
@@ -75,7 +67,7 @@ assert.equal(pageEvidence.schemaVersion, 'workflow-evidence/v1')
 assert.equal(pageEvidence.id, 'evid_page_0001')
 assert.equal(pageEvidence.ts, '2026-06-29T00:00:00.000Z')
 assert.equal(pageEvidence.confidence, 'high')
-assert.equal(pageEvidence.phase, 'filling_application')
+assert.equal(pageEvidence.phase, 'in_target_flow')
 
 pageEvidence.summary = 'mutated outside store'
 pageEvidence.data.url = 'https://example.test/mutated'
@@ -87,7 +79,7 @@ const formEvidence = store.add({
   kind: 'form',
   summary: 'Required application fields are filled.',
   source: 'browser_form_snapshot',
-  phase: 'reviewing',
+  phase: 'in_target_flow',
   metadata: { fieldCount: 8, missingRequiredCount: 0 },
 })
 

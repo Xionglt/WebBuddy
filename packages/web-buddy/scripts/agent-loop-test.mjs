@@ -89,7 +89,7 @@ console.log('events:')
 for (const e of events) console.log(`  [${e.level}] ${e.phase}: ${e.message}`)
 console.log('result:', result.finalState, '—', result.message.slice(0, 80))
 
-assert.strictEqual(result.finalState, 'stopped_at_submit', `expected stopped_at_submit, got ${result.finalState}`)
+assert.strictEqual(result.finalState, 'filled', `expected filled, got ${result.finalState}`)
 assert(/did not submit|not submitted/i.test(result.message), 'must state it did not submit')
 
 const traceDir = join(config.trace.outDir, 'traces', `run_${result.summary.runId}`)
@@ -167,7 +167,7 @@ async function runPermissionScenarios() {
     })
     assert.equal(finalSubmit.result.blocked, true, 'final submit should remain blocked after approval')
     assert.equal(finalSubmit.result.steps >= 2, true, 'final submit approval should return control to the model before the run stops')
-    assert.equal(finalSubmit.result.workflowState?.phase, 'ready_for_final_submit')
+    assert.equal(finalSubmit.result.workflowState?.phase, 'final_submit_boundary')
     assert.equal(finalSubmit.toolCalls.length, 0, 'final submit tool must not execute')
     assert.equal(finalSubmit.gate.requests[0].kind, 'final_submit')
     assert.equal(finalSubmit.queue.snapshot().approved.length, 1)
@@ -207,12 +207,12 @@ async function runPermissionScenarios() {
       'final submit should retain the human approval evidence even though runtime still blocks execution',
     )
     assert(
-      finalSubmitEvidence.some((evidence) => evidence.kind === 'workflow_state' && evidence.phase === 'ready_for_final_submit'),
-      'final submit should record ready_for_final_submit workflow_state evidence after returning control',
+      finalSubmitEvidence.some((evidence) => evidence.kind === 'workflow_state' && evidence.phase === 'final_submit_boundary'),
+      'final submit should record final_submit_boundary workflow_state evidence after returning control',
     )
     const finalSubmitCompletionGate = completionGateEntries(finalSubmit.transcript).at(-1)
     assert.equal(finalSubmitCompletionGate?.action, 'block')
-    assert.equal(finalSubmitCompletionGate?.workflowPhase, 'ready_for_final_submit')
+    assert.equal(finalSubmitCompletionGate?.workflowPhase, 'final_submit_boundary')
 
     const agentDoneWorkflow = new RecordingWorkflowEngine()
     const agentDone = await runLoopScenario({
@@ -717,10 +717,10 @@ function seedFreshObservation(sessionId) {
       snapshotId: `snap-${sessionId}`,
       url: 'https://example.test/apply',
       title: 'Application form',
-      textSummary: 'Application form with safe draft actions and a final submit button.',
+      textSummary: 'Application form with safe draft actions.',
       elements: [
         element('e1', 'button', 'Open details', 'L3'),
-        element('e2', 'button', 'Submit application', 'L3'),
+        element('e2', 'button', 'Save draft', 'L1'),
       ],
       stats: {
         elementCount: 2,
@@ -728,7 +728,7 @@ function seedFreshObservation(sessionId) {
         formCount: 1,
         linkCount: 0,
         buttonCount: 2,
-        inputCount: 0,
+        inputCount: 1,
         truncated: false,
       },
     },

@@ -5,6 +5,7 @@ import { browserFormAudit } from '../browser/form-audit.js'
 import { browserFormSnapshot } from '../browser/form-snapshot.js'
 import { browserInspectOptions } from '../browser/inspect-options.js'
 import { browserOpen } from '../browser/open.js'
+import { browserPressKey } from '../browser/press-key.js'
 import { browserScreenshot } from '../browser/screenshot.js'
 import { browserSelect } from '../browser/select.js'
 import { browserSelectByText } from '../browser/select-by-text.js'
@@ -347,6 +348,17 @@ const localHandlers: Record<string, LocalHandler> = {
     return toResult(r, undefined, r.ok)
   },
 
+  async browser_press_key(args, ctx) {
+    const r = await browserPressKey({
+      key: String(args.key ?? ''),
+      ref: args.ref as string | undefined,
+      sessionId: ctx.sessionId,
+      timeoutMs: args.timeoutMs as number | undefined,
+      highlight: ctx.highlight,
+    })
+    return toResult(r, r.ok ? r.data : undefined, r.ok ? Boolean(r.pageChanged) : false)
+  },
+
   async browser_fill_by_label(args, ctx) {
     const r = await browserFillByLabel({
       label: String(args.label ?? ''),
@@ -421,6 +433,7 @@ const localHandlers: Record<string, LocalHandler> = {
       label: args.label as string | undefined,
       outDir: args.outDir as string | undefined,
       fullPage: args.fullPage as boolean | undefined,
+      timeoutMs: args.timeoutMs as number | undefined,
     })
     return toResult(r, r.ok ? r.data : undefined, false)
   },

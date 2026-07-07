@@ -13,7 +13,7 @@ const login = transitionWorkflowState({
   now,
 })
 assert.equal(login.changed, true)
-assert.equal(login.state.phase, 'login_required')
+assert.equal(login.state.phase, 'external_blocker')
 assert.equal(login.state.humanHandoffRequired, true)
 assert.match(login.state.blocker, /login/i)
 
@@ -22,11 +22,11 @@ const captcha = transitionWorkflowState({
   page: page({ pageType: 'captcha', title: 'Security check', textSummary: '请完成人机验证' }),
   now,
 })
-assert.equal(captcha.state.phase, 'captcha_required')
+assert.equal(captcha.state.phase, 'external_blocker')
 assert.equal(captcha.state.humanHandoffRequired, true)
 assert.match(captcha.state.blocker, /verification/i)
 
-const jobDetail = { ...initial, phase: 'job_detail' }
+const jobDetail = { ...initial, phase: 'in_target_flow' }
 const entering = transitionWorkflowState({
   previous: jobDetail,
   toolName: 'browser_click_text',
@@ -34,7 +34,7 @@ const entering = transitionWorkflowState({
   policyDecision: { action: 'gate', riskLevel: 'high', reason: 'entry', gateKind: 'high_risk_action' },
   now,
 })
-assert.equal(entering.state.phase, 'entering_application')
+assert.equal(entering.state.phase, 'in_target_flow')
 
 const filling = transitionWorkflowState({
   previous: initial,
@@ -45,9 +45,9 @@ const filling = transitionWorkflowState({
   }),
   now,
 })
-assert.equal(filling.state.phase, 'filling_application')
+assert.equal(filling.state.phase, 'in_target_flow')
 
-const reviewing = transitionWorkflowState({
+const in_target_flow = transitionWorkflowState({
   previous: filling.state,
   form: form({
     fields: [field(0, 'Name', 'Zhang San', true), field(1, 'Email', 'zhangsan@example.com', true)],
@@ -57,7 +57,7 @@ const reviewing = transitionWorkflowState({
   }),
   now,
 })
-assert.equal(reviewing.state.phase, 'reviewing')
+assert.equal(in_target_flow.state.phase, 'final_submit_boundary')
 
 const directSubmitReview = transitionWorkflowState({
   previous: entering.state,
@@ -78,7 +78,7 @@ const directSubmitReview = transitionWorkflowState({
   }),
   now,
 })
-assert.equal(directSubmitReview.state.phase, 'direct_submit_review')
+assert.equal(directSubmitReview.state.phase, 'final_submit_boundary')
 assert.equal(directSubmitReview.state.humanHandoffRequired, true)
 assert.match(directSubmitReview.state.blocker, /final submit/i)
 
@@ -101,16 +101,16 @@ const applicationEntryNotice = transitionWorkflowState({
   }),
   now,
 })
-assert.equal(applicationEntryNotice.state.phase, 'reviewing')
-assert.notEqual(applicationEntryNotice.state.phase, 'direct_submit_review')
+assert.equal(applicationEntryNotice.state.phase, 'in_target_flow')
+assert.notEqual(applicationEntryNotice.state.phase, 'final_submit_boundary')
 
 const ready = transitionWorkflowState({
-  previous: reviewing.state,
+  previous: in_target_flow.state,
   policyDecision: { action: 'gate', riskLevel: 'high', reason: 'final submit', gateKind: 'final_submit' },
   gateKind: 'final_submit',
   now,
 })
-assert.equal(ready.state.phase, 'ready_for_final_submit')
+assert.equal(ready.state.phase, 'final_submit_boundary')
 
 const finalBlocked = transitionWorkflowState({
   previous: ready.state,
@@ -118,13 +118,13 @@ const finalBlocked = transitionWorkflowState({
   gateDecision: 'takeover',
   now,
 })
-assert.equal(finalBlocked.state.phase, 'blocked')
+assert.equal(finalBlocked.state.phase, 'final_submit_boundary')
 assert.equal(finalBlocked.state.humanHandoffRequired, true)
 
-const done = transitionWorkflowState({ previous: reviewing.state, agentDoneBlocked: false, now })
+const done = transitionWorkflowState({ previous: in_target_flow.state, agentDoneBlocked: false, now })
 assert.equal(done.state.phase, 'done')
 
-const blocked = transitionWorkflowState({ previous: reviewing.state, agentDoneBlocked: true, now })
+const blocked = transitionWorkflowState({ previous: in_target_flow.state, agentDoneBlocked: true, now })
 assert.equal(blocked.state.phase, 'blocked')
 assert.equal(blocked.state.humanHandoffRequired, true)
 

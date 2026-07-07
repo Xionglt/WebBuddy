@@ -374,7 +374,7 @@ try {
     gate: new AutoHumanGate(),
     runId: 'job-crawl-spa-fallback',
   })
-  assert.strictEqual(spaResult.finalState, 'login_required', 'SPA match should stop at human handoff after verified detail')
+  assert.strictEqual(spaResult.finalState, 'external_blocker', 'SPA match should stop at human handoff after verified detail')
   assert.strictEqual(spaResult.chosenJob?.title, 'Frontend Automation Engineer')
   assert.strictEqual(spaDetailHits.get('spa-good'), 1, 'orchestrator should open the SPA target detail once')
   const spaFinal = JSON.parse(readFileSync(join(spaConfig.trace.outDir, 'job-crawl-spa-fallback', 'job-candidates-final.json'), 'utf8'))
@@ -409,7 +409,7 @@ try {
     runId: 'job-crawl-pagination',
   })
 
-  assert.strictEqual(result.finalState, 'login_required', 'match mode should stop at human handoff after selecting a good job')
+  assert.strictEqual(result.finalState, 'external_blocker', 'match mode should stop at human handoff after selecting a good job')
   assert.strictEqual(result.chosenJob?.title, 'Frontend Automation Engineer')
   assert.strictEqual(detailHits.get('frontend'), 1, 'best Top N detail should be opened once')
   assert.strictEqual(detailHits.get('mismatch'), 1, 'mismatched Top N detail should be opened once and rejected')

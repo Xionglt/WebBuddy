@@ -19,6 +19,8 @@ export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
       'Use browser_snapshot whenever page refs may be stale. Use browser_screenshot when visual inspection would help.',
       'If the site requires a human-only credential, SMS code, captcha, payment, or identity proof that cannot be completed with available page information, stop and summarize exactly what blocked you.',
       'For any element marked risk=L3 or risk=L4, the system may require human approval before the action runs.',
+      'If the task context says the current local resume file must be uploaded, an existing on-site resume is not sufficient by itself. First find the site resume/profile/application upload area, upload or re-upload the current resume file, save required changes, then continue the application flow.',
+      'Application-entry buttons such as 投递简历/立即投递/Apply may open the application flow; do not treat seeing that button as task completion. Stop only before true final submission controls such as 确认投递/提交申请/final submit.',
     ]
   }
 

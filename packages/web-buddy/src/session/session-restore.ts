@@ -47,7 +47,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
 
   for (const entry of transcript) {
     if (entry.type === 'workflow_snapshot') {
-      latestWorkflowState = entry.workflowState as WorkflowState
+      latestWorkflowState = workflowStateFromUnknown(entry.workflowState)
       continue
     }
 
@@ -57,12 +57,12 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
     }
 
     if (entry.type === 'workflow_evaluation') {
-      latestWorkflowEvaluation = entry.evaluation as WorkflowEngineEvaluation
+      latestWorkflowEvaluation = workflowEvaluationFromUnknown(entry.evaluation)
       continue
     }
 
     if (entry.type === 'completion_gate') {
-      latestCompletionGate = entry.decision as CompletionGateDecision
+      latestCompletionGate = completionGateDecisionFromUnknown(entry.decision)
       continue
     }
 
@@ -110,4 +110,45 @@ function arrayProperty<T>(value: unknown, property: string): T[] | undefined {
   if (!value || typeof value !== 'object') return undefined
   const candidate = (value as Record<string, unknown>)[property]
   return Array.isArray(candidate) ? ([...candidate] as T[]) : undefined
+}
+
+function workflowStateFromUnknown(value: unknown): WorkflowState | undefined {
+  if (!isRecord(value)) return undefined
+  if (value.schemaVersion !== 'workflow-state/v1') return undefined
+  if (typeof value.phase !== 'string') return undefined
+  return { ...value } as WorkflowState
+}
+
+function workflowEvaluationFromUnknown(value: unknown): WorkflowEngineEvaluation | undefined {
+  if (!isRecord(value)) return undefined
+  const state = workflowStateFromUnknown(value.state)
+  if (!state) return undefined
+  return {
+    ...value,
+    state,
+    matchedCriteria: arrayValue(value.matchedCriteria),
+    missingCriteria: arrayValue(value.missingCriteria),
+    blockers: arrayValue(value.blockers),
+    evidenceIds: arrayValue(value.evidenceIds),
+  } as WorkflowEngineEvaluation
+}
+
+function completionGateDecisionFromUnknown(value: unknown): CompletionGateDecision | undefined {
+  if (!isRecord(value)) return undefined
+  if (value.schemaVersion !== 'completion-gate-decision/v1') return undefined
+  if (typeof value.action !== 'string' || typeof value.recommendedStatus !== 'string') return undefined
+  return {
+    ...value,
+    missingCriteria: arrayValue(value.missingCriteria),
+    blockers: arrayValue(value.blockers),
+    evidenceIds: arrayValue(value.evidenceIds),
+  } as CompletionGateDecision
+}
+
+function arrayValue<T>(value: unknown): T[] {
+  return Array.isArray(value) ? ([...value] as T[]) : []
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

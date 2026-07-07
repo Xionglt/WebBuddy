@@ -1,5 +1,5 @@
 import { toolFailure, toolSuccess } from '../errors.js'
-import { resolveRef } from '../snapshot/ref-resolver.js'
+import { resolveRefWithSnapshotRetry } from '../snapshot/ref-resolver.js'
 import { sessionManager } from '../session/manager.js'
 import type { FieldControlKind, PlannedField } from '../fill/field-plan.js'
 
@@ -80,6 +80,19 @@ function valuesMatch(readback: Readback | undefined, intended: IntendedValue, ki
   const actualJoined = actualParts.join(' / ')
   if (kind === 'cascader') return expectedParts.every((part) => actualJoined.includes(part))
   return expectedParts.some((part) => actualParts.some((actual) => actual === part || actual.includes(part)))
+}
+
+function readbackMismatchReason(readback: Readback | undefined, intended: IntendedValue, kind: SetFieldKind): string {
+  if (kind === 'checkbox') {
+    const expected = typeof intended === 'boolean'
+      ? intended
+      : !['false', 'no', '0', '否', '不'].includes((flattenIntended(intended)[0] ?? '').toLowerCase())
+    return `CHECKED_STATE_MISMATCH expected=${expected} actual=${String(readback?.checked ?? readback?.value ?? '')}`
+  }
+  if (kind === 'radio') {
+    return `RADIO_NOT_SELECTED expected="${flattenIntended(intended).join(' / ')}" actual="${normalizeText(readback?.text ?? readback?.value)}"`
+  }
+  return `VALUE_MISMATCH expected="${flattenIntended(intended).join(' / ')}" actual="${normalizeText(readback?.value)}"`
 }
 
 function inferKind(match: FieldMatch, requested?: string): SetFieldKind {
@@ -538,7 +551,7 @@ export async function browserSetField(input: {
   try {
     let locator: import('playwright').Locator
     if (input.ref) {
-      const resolved = await resolveRef(session.page, session.latestSnapshot, input.ref)
+      const resolved = await resolveRefWithSnapshotRetry(session.page, session.latestSnapshot, input.ref, session.id)
       if (!resolved.ok) return resolved.failure
       locator = resolved.locator
       await locator.evaluate((el, markerValue) => el.setAttribute('data-mfa-set-field-target', markerValue), marker)
@@ -570,12 +583,6 @@ export async function browserSetField(input: {
     }
 
     const actualKind = inferKind(match, controlKind)
-    if (actualKind === 'file') {
-      return toolFailure('INVALID_ARGUMENT', 'browser_set_field does not handle file uploads. Use browser_upload_file instead.', {
-        recoverable: true,
-        suggestedNextActions: ['browser_upload_file'],
-      })
-    }
 
     for (const strategy of ['primary', 'fallback'] as const) {
       try {
@@ -588,7 +595,7 @@ export async function browserSetField(input: {
         await session.page.waitForTimeout(80)
         const readback = await readField(session.page, marker, actualKind)
         const ok = valuesMatch(readback, intendedValue, actualKind)
-        attempts.push({ strategy, ok, readback, ...(ok ? {} : { reason: 'READBACK_MISMATCH' }) })
+        attempts.push({ strategy, ok, readback, ...(ok ? {} : { reason: readbackMismatchReason(readback, intendedValue, actualKind) }) })
         if (ok) {
           await locator.evaluate((el) => el.removeAttribute('data-mfa-set-field-target')).catch(() => {})
           sessionManager.invalidateSnapshot(session.id)

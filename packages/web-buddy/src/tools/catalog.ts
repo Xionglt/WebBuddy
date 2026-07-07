@@ -401,6 +401,35 @@ export const TOOL_CATALOG: ToolDef[] = [
     metadata: { requiresSnapshot: true, riskResolver: 'ref' },
   },
   {
+    name: 'browser_press_key',
+    mcpName: 'browser_press_key',
+    description:
+      'Press a navigation/action key such as Enter, Escape, Tab, ArrowDown, or Backspace. Optionally focus a snapshot ref first. Use after filling search boxes that require Enter.',
+    category: 'action',
+    risk: 'L2',
+    parameters: {
+      type: 'object',
+      properties: {
+        key: {
+          type: 'string',
+          enum: ['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Backspace', 'Delete', 'Space'],
+          description: 'Key to press.',
+        },
+        ref: { type: 'string', description: 'Optional element ref to focus before pressing the key.' },
+        sessionId: { type: 'string' },
+        timeoutMs: { type: 'number', description: 'Action timeout in milliseconds.' },
+        highlight: {
+          type: 'boolean',
+          description: 'When true and headful, flash the focused element before pressing the key.',
+        },
+      },
+      required: ['key'],
+    },
+    local: { enabled: true },
+    mcp: { enabled: true },
+    metadata: { mayChangePage: true },
+  },
+  {
     name: 'browser_select',
     mcpName: 'browser_select',
     description: 'Select an option in a select/combobox element by ref.',
@@ -457,6 +486,7 @@ export const TOOL_CATALOG: ToolDef[] = [
         label: { type: 'string', description: 'Filename slug for the screenshot.' },
         outDir: { type: 'string', description: 'Directory to write the PNG into. Default: ./output/screenshots.' },
         fullPage: { type: 'boolean', description: 'Capture full scrollable page. Default: false.' },
+        timeoutMs: { type: 'number', description: 'Screenshot timeout in milliseconds. Default: 7000.' },
       },
     },
     local: { enabled: true },

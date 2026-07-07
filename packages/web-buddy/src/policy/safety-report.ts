@@ -3,7 +3,6 @@ import { dirname, join } from 'node:path'
 import { aggregateMetrics } from '../metrics/aggregate.js'
 import type { RunMetrics, RunMetricsStatus } from '../metrics/schema.js'
 import { resolveTraceInputs, type ResolveTraceInputsOptions, type ResolvedTraceInputs } from '../metrics/trace-inputs.js'
-import type { WorkflowPhase } from '../workflow/workflow-state.js'
 import type { PolicyAuditEvent } from './policy-audit.js'
 import {
   createRiskDecisionsArtifactFromEvents,
@@ -15,7 +14,7 @@ export interface SafetyReport {
   schemaVersion: 'safety-report/v1'
   runId: string
   finalStatus: RunMetricsStatus
-  finalWorkflowPhase?: WorkflowPhase
+  finalWorkflowPhase?: string
   finalSubmitAttempted: boolean
   finalSubmitBlocked: boolean
   loginHandoffRequired: boolean
@@ -75,12 +74,14 @@ export function generateSafetyReport(options: ResolveTraceInputsOptions = {}): S
       policyEvents.some((event) => event.gateKind === 'final_submit' && event.action === 'block') ||
       legacySteps.some((step) => /GATE \[final_submit\]|final-submit/i.test(step.action ?? step.observation ?? '') && step.status === 'blocked'))
   const loginHandoffRequired =
-    policyEvents.some((event) => event.gateKind === 'login' || event.workflowPhase === 'login_required') ||
+    policyEvents.some((event) => event.gateKind === 'login') ||
     (metrics.policy.gateKindCounts.login ?? 0) > 0 ||
+    legacyPolicyPhaseSeen(policyEvents, 'login_required') ||
     legacySteps.some((step) => /login required|human login/i.test(step.action ?? step.observation ?? ''))
   const captchaHandoffRequired =
-    policyEvents.some((event) => event.gateKind === 'captcha' || event.workflowPhase === 'captcha_required') ||
+    policyEvents.some((event) => event.gateKind === 'captcha') ||
     (metrics.policy.gateKindCounts.captcha ?? 0) > 0 ||
+    legacyPolicyPhaseSeen(policyEvents, 'captcha_required') ||
     legacySteps.some((step) => /captcha|verification required|human verification/i.test(step.action ?? step.observation ?? ''))
   const highRiskActionCount = policyEvents.length > 0
     ? policyEvents.filter((event) => event.riskLevel === 'high' || event.riskLevel === 'critical').length
@@ -147,12 +148,16 @@ function readPolicyEvents(events: AgentTraceEventJson[]): PolicyAuditEvent[] {
     .filter(isPolicyAuditEvent)
 }
 
-function lastWorkflowPhase(events: PolicyAuditEvent[]): WorkflowPhase | undefined {
+function lastWorkflowPhase(events: PolicyAuditEvent[]): string | undefined {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const phase = events[i]?.workflowPhase
     if (phase) return phase
   }
   return undefined
+}
+
+function legacyPolicyPhaseSeen(events: PolicyAuditEvent[], phase: string): boolean {
+  return events.some((event) => event.workflowPhase === phase)
 }
 
 function summarizeSafety(input: {

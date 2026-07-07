@@ -61,7 +61,7 @@ class RuntimeMockLlm {
     const rendered = JSON.stringify(messages)
     assert(!rendered.includes('POISON ARTIFACT'), 'AgentRuntime must not read trace artifact files into prompts')
     this.sawPoisonFreePrompt = true
-    if (rendered.includes('## TASK_STATE') && rendered.includes('phase: observing')) {
+    if (rendered.includes('## TASK_STATE') && rendered.includes('phase: in_target_flow')) {
       this.sawTaskStatePrompt = true
     }
 
@@ -136,7 +136,7 @@ try {
   assert.equal(result.stopReason, 'blocked')
   assert.match(result.summary, /completion gate blocked/i)
   assert(runtimeMock.sawPoisonFreePrompt, 'mock should have inspected runtime prompts')
-  assert(runtimeMock.sawTaskStatePrompt, 'PromptAssembler should add default observing TaskState to runtime prompts')
+  assert(runtimeMock.sawTaskStatePrompt, 'PromptAssembler should add default in_target_flow TaskState to runtime prompts')
   assert(events.some((event) => event.schemaVersion === 'agent-runtime-event/v1'), 'runtime events should be wrapped')
   assert(
     events.some((event) => event.level === 'gate' && /completion_gate blocked/i.test(event.message)),

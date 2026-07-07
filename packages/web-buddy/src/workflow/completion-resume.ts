@@ -135,9 +135,9 @@ function finalSubmitRecoveryAction(restored: RestoredSessionState): WorkflowRece
 
 function hasFinalSubmitRecoveryFact(restored: RestoredSessionState): boolean {
   return (
-    restored.latestWorkflowState?.phase === 'ready_for_final_submit' ||
-    restored.latestWorkflowEvaluation?.state.phase === 'ready_for_final_submit' ||
-    restored.latestCompletionGate?.workflowPhase === 'ready_for_final_submit' ||
+    restored.latestWorkflowState?.phase === 'final_submit_boundary' ||
+    restored.latestWorkflowEvaluation?.state.phase === 'final_submit_boundary' ||
+    restored.latestCompletionGate?.workflowPhase === 'final_submit_boundary' ||
     restored.blockers.some(isFinalSubmitBlocker) ||
     restored.latestWorkflowEvaluation?.blockers.some(isFinalSubmitBlocker) === true ||
     restored.latestCompletionGate?.blockers.some(isFinalSubmitBlocker) === true

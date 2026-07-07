@@ -35,6 +35,7 @@ const requiredLocal = [
   'browser_select_by_text',
   'browser_set_field',
   'browser_wait',
+  'browser_press_key',
   'browser_screenshot',
   'agent_done',
 ]
@@ -47,7 +48,8 @@ for (const name of requiredLocal) {
 assertLocalParams('browser_click', ['ref', 'timeoutMs', 'confirmed', 'highlight'])
 assertLocalParams('browser_click_text', ['text', 'exact', 'nth', 'timeoutMs', 'confirmed', 'highlight'])
 assertLocalParams('browser_type', ['ref', 'text', 'clear', 'timeoutMs', 'highlight', 'typeDelayMs'])
-assertLocalParams('browser_screenshot', ['label', 'outDir', 'fullPage'])
+assertLocalParams('browser_press_key', ['key', 'ref', 'timeoutMs', 'highlight'])
+assertLocalParams('browser_screenshot', ['label', 'outDir', 'fullPage', 'timeoutMs'])
 assertLocalParams('browser_open', ['url', 'waitUntil'])
 assertLocalParams('browser_wait', ['for', 'value', 'ms', 'timeoutMs'])
 assertLocalParams('browser_select', ['ref', 'value', 'timeoutMs'])
@@ -72,6 +74,7 @@ for (const name of [
   'browser_select_by_text',
   'browser_set_field',
   'browser_type',
+  'browser_press_key',
   'browser_select',
   'browser_wait',
   'browser_screenshot',
@@ -92,6 +95,7 @@ assertToolRisk('browser_form_audit', 'L0')
 assertToolRisk('browser_inspect_options', 'L0')
 assertToolRisk('plan_form_fill', 'L0')
 assertToolRisk('browser_set_field', 'L2')
+assertToolRisk('browser_press_key', 'L2')
 
 console.log('tool-catalog-test: PASS')
 

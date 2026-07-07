@@ -101,7 +101,7 @@ export async function collectPageFacts(page: Page): Promise<PageFacts> {
     const agreementText =
       /同意|已阅读|阅读并同意|协议|条款|须知|需知|隐私|声明|承诺|授权|agreement|agree|terms|notice|privacy|consent/i
     const quotaText =
-      /申请名额|投递名额|申请次数|投递次数|本月.{0,12}申请.{0,12}职位|每月.{0,12}申请|可申请.{0,12}职位|application quota|application limit|apply quota|apply limit|submission quota|submission limit/i
+      /申请名额|投递名额|申请次数|投递次数|你已申请.{0,12}职位|已申请.{0,12}职位|本月.{0,18}(?:还能|可|可以).{0,18}(?:申请|投递)|本月.{0,12}申请.{0,12}职位|每月.{0,12}申请|可申请.{0,12}职位|请慎重选择|application quota|application limit|apply quota|apply limit|submission quota|submission limit/i
     const uploadActionText =
       /确认投递|提交申请|投递简历|立即投递|提交投递|投递|提交|申请|\b(?:apply(?:\s+now)?|submit(?:\s+application)?|confirm(?:\s+(?:application|submit))?|send\s+application|start\s+application)\b/i
     const uploadTargetText =

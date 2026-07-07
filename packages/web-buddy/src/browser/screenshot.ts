@@ -8,6 +8,7 @@ export async function browserScreenshot(input: {
   label?: string
   outDir?: string
   fullPage?: boolean
+  timeoutMs?: number
 }) {
   const session = sessionManager.get(input.sessionId)
   if (!session) {
@@ -28,11 +29,18 @@ export async function browserScreenshot(input: {
   const file = join(outDir, `${slug}-${stamp}.png`)
 
   try {
-    await session.page.screenshot({ path: file, fullPage: input.fullPage ?? false })
+    const timeout = input.timeoutMs ?? Number(process.env.PLAYWRIGHT_SCREENSHOT_TIMEOUT_MS || 7000)
+    await session.page.screenshot({
+      path: file,
+      fullPage: input.fullPage ?? false,
+      timeout,
+      animations: 'disabled',
+    })
     return toolSuccess(`Screenshot saved: ${file}`, {
       path: file,
       url: session.page.url(),
       fullPage: input.fullPage ?? false,
+      timeoutMs: timeout,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

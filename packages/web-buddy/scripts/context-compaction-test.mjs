@@ -33,7 +33,7 @@ try {
 
   const workflowState = {
     schemaVersion: 'workflow-state/v1',
-    phase: 'ready_for_final_submit',
+    phase: 'final_submit_boundary',
     confidence: 'high',
     reason: 'Application form is open and a submit candidate is visible.',
     updatedAt: '2026-06-29T07:59:00.000Z',
@@ -134,7 +134,7 @@ try {
     risk: 'L4',
     riskLevel: 'critical',
     currentUrl: 'https://jobs.example.test/apply',
-    workflowPhase: 'ready_for_final_submit',
+    workflowPhase: 'final_submit_boundary',
     gateKind: 'final_submit',
     policy: {
       schemaVersion: 'policy-decision/v1',
@@ -205,7 +205,7 @@ try {
       summary: 'Job detail page was inspected before entering the application.',
       source: 'browser_snapshot',
       confidence: 'medium',
-      phase: 'job_detail',
+      phase: 'in_target_flow',
       sessionId: 'compact-session',
       runId: 'compact-run',
       turnId: 'turn-5',
@@ -219,7 +219,7 @@ try {
       summary: 'Form evidence: Full name is filled and Email is still missing.',
       source: 'browser_form_snapshot',
       confidence: 'high',
-      phase: 'reviewing',
+      phase: 'in_target_flow',
       sessionId: 'compact-session',
       runId: 'compact-run',
       turnId: 'turn-6',
@@ -233,7 +233,7 @@ try {
       summary: 'Final submit gate evaluated browser_click on Submit application and required approval.',
       source: 'policy_engine',
       confidence: 'high',
-      phase: 'ready_for_final_submit',
+      phase: 'final_submit_boundary',
       sessionId: 'compact-session',
       runId: 'compact-run',
       turnId: 'turn-7',
@@ -247,7 +247,7 @@ try {
       summary: 'User declined final submission approval; manual handoff remains required.',
       source: 'approval_queue',
       confidence: 'high',
-      phase: 'ready_for_final_submit',
+      phase: 'final_submit_boundary',
       sessionId: 'compact-session',
       runId: 'compact-run',
       turnId: 'turn-7',
@@ -329,7 +329,7 @@ try {
   assert.equal(result.summary.schemaVersion, 'compact-run-summary/v1')
   assert.equal(result.summary.summaryId, 'compact_compact-session_compact-run_turn-7_2026-06-29T08_00_00_000Z')
   assert.equal(result.summary.goal, 'Apply to the saved job without final submission.')
-  assert.equal(result.summary.workflow.phase, 'ready_for_final_submit')
+  assert.equal(result.summary.workflow.phase, 'final_submit_boundary')
   assert.equal(result.summary.workflow.blocker, 'Final submit requires human approval.')
   assert.equal(result.summary.page.title, 'Frontend Engineer Application')
   assert.equal(result.summary.form.fieldCount, 3)
@@ -354,7 +354,7 @@ try {
   ])
   assert.equal(result.summary.evidence.recentKeyEvidence[1].toolCallId, 'call-submit')
   assert.equal(result.summary.evidence.recentKeyEvidence[1].source, 'policy_engine')
-  assert.equal(result.summary.evidence.recentKeyEvidence[2].phase, 'ready_for_final_submit')
+  assert.equal(result.summary.evidence.recentKeyEvidence[2].phase, 'final_submit_boundary')
   assert(result.summary.evidence.recentKeyEvidence.every((item) => item.data === undefined), 'evidence retention should keep summaries, not raw payloads')
   assert(!JSON.stringify(result.summary.evidence).includes('THIS_RAW_EVIDENCE_DATA_SHOULD_NOT_SURVIVE'), 'evidence summary should not retain raw data payloads')
   assert.equal(result.summary.completion.finalSubmitBlocker, 'Final submit is blocked until the human explicitly takes over.')

@@ -47,6 +47,7 @@
   textarea { min-height: 116px; resize: vertical; }
   input:focus, textarea:focus, select:focus { border-color: #6ea5ff; }
   .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #0f1116; padding: 4px; border-radius: 8px; border: 1px solid #303541; }
+  .seg.runtime { grid-template-columns: 1fr 1fr 1fr; }
   .seg button { border: 0; border-radius: 6px; background: transparent; color: #aeb6c5; padding: 7px 8px; cursor: pointer; }
   .seg button.on { background: #eef1f6; color: #111318; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -145,11 +146,20 @@
   <aside>
     <div class="brand">
       <div class="mark"></div>
-      <div><h1>Web Agent Console</h1><p>Claude runtime + Playwright MCP</p></div>
+      <div><h1>Web Agent Console</h1><p>Claude Code + Web Buddy runtimes</p></div>
     </div>
 
     <div class="group">
-      <div class="label"><span>Preset</span><span>runtime</span></div>
+      <div class="label"><span>Runtime</span><span>selector</span></div>
+      <div class="seg runtime" id="runtimeSeg">
+        <button data-v="claude-code" class="on">Claude Code</button>
+        <button data-v="web-buddy-raw">Web Buddy Raw</button>
+        <button data-v="web-buddy-match">Web Buddy Match</button>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="label"><span>Preset</span><span>Claude</span></div>
       <div class="seg" id="presetSeg">
         <button data-v="generic" class="on">Generic</button>
         <button data-v="alibaba">Alibaba</button>
@@ -224,8 +234,12 @@
       <h2>Run</h2>
       <div class="kv">
         <div>Status</div><div class="mono" id="runStatus">idle</div>
+        <div>Runtime</div><div class="mono" id="runRuntime">-</div>
+        <div>Mode</div><div class="mono" id="runMode">-</div>
+        <div>Run ID</div><div class="mono" id="runIdPanel">-</div>
         <div>Run dir</div><div class="mono" id="runDir">-</div>
         <div>Trace dir</div><div class="mono" id="traceDir">-</div>
+        <div>Trace path</div><div class="mono" id="tracePath">-</div>
         <div>Spans</div><div class="mono" id="spanCount">0</div>
       </div>
     </div>
@@ -271,10 +285,60 @@ const GENERIC_PROMPT = '请打开目标网页，根据我的目标完成操作�
 const ALIBABA_PROMPT = '这是我的个人简历文件，然后现在我想去阿里官方招聘网站进行投递，然后请帮我找到适合我的岗位，然后帮我进行投递，填写表单，充分利用网站信息';
 const ALIBABA_URL = 'https://talent-holding.alibaba.com/off-campus/position-list?lang=zh';
 let preset = 'generic';
+let runtime = 'claude-code';
+let activeRuntime = null;
+let activeMode = null;
 let runId = null;
 let events = null;
 let traceTimer = null;
 let riskTimelineKeys = new Set();
+
+const RUNTIMES = {
+  'claude-code': {
+    label: 'Claude Code',
+    mode: () => preset,
+    runPath: '/api/runtime/run',
+    eventsPath: (id) => `/api/runtime/events?id=${encodeURIComponent(id)}`,
+    tracePath: (id) => `/api/runtime/trace?id=${encodeURIComponent(id)}`,
+    stopPath: (id) => `/api/runtime/stop?id=${encodeURIComponent(id)}`,
+    continuePath: (id) => `/api/runtime/continue?id=${encodeURIComponent(id)}`,
+  },
+  'web-buddy-raw': {
+    label: 'Web Buddy Raw',
+    mode: () => 'raw',
+    runPath: '/api/run',
+    eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
+    tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
+    stopPath: () => '/api/stop',
+  },
+  'web-buddy-match': {
+    label: 'Web Buddy Match',
+    mode: () => 'match',
+    runPath: '/api/run',
+    eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
+    tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
+    stopPath: () => '/api/stop',
+  },
+};
+
+function runtimeInfo(name = runtime) {
+  return RUNTIMES[name] || RUNTIMES['claude-code'];
+}
+
+function activeRuntimeInfo() {
+  return runtimeInfo(activeRuntime || runtime);
+}
+
+function runtimeMode() {
+  return runtimeInfo().mode();
+}
+
+function setRuntime(next) {
+  runtime = RUNTIMES[next] ? next : 'claude-code';
+  document.querySelectorAll('#runtimeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === runtime));
+  $('continueBtn').style.display = (activeRuntime || runtime) === 'claude-code' && $('runStatus').textContent === 'blocked' ? 'block' : 'none';
+  updateRunMeta();
+}
 
 function setPreset(next) {
   preset = next;
@@ -285,6 +349,14 @@ function setPreset(next) {
   } else if (!$('prompt').value.trim() || $('prompt').value === ALIBABA_PROMPT) {
     $('prompt').value = GENERIC_PROMPT;
   }
+  updateRunMeta();
+}
+
+function updateRunMeta(extra = {}) {
+  const info = runtimeInfo(activeRuntime || runtime);
+  $('runRuntime').textContent = extra.runtime || info.label;
+  $('runMode').textContent = extra.mode || activeMode || runtimeMode();
+  $('runIdPanel').textContent = extra.runId || runId || '-';
 }
 
 function setStatus(value) {
@@ -311,6 +383,7 @@ async function loadConfig() {
   $('resumePath').value = cfg.resumePath || '';
   $('keyState').textContent = cfg.hasKey ? 'set' : 'not set';
   setPreset('generic');
+  setRuntime('claude-code');
 }
 
 async function saveConfig() {
@@ -347,18 +420,26 @@ function addEvent(event) {
 
 async function refreshTrace() {
   if (!runId) return;
-  const trace = await api(`/api/runtime/trace?id=${encodeURIComponent(runId)}`);
+  const trace = await api(activeRuntimeInfo().tracePath(runId));
+  updateRunMeta({ runtime: displayRuntime(trace.runtime), mode: trace.mode, runId });
   $('runDir').textContent = trace.runDir || '-';
   $('traceDir').textContent = trace.traceDir || '-';
+  $('tracePath').textContent = trace.summary?.tracePath || trace.tracePath || '-';
   $('spanCount').textContent = String(trace.spans?.length || 0);
   renderMetrics(trace.metrics || null);
   renderRiskDecisions(trace.riskDecisions || null);
   appendRiskTimeline(trace.riskDecisions?.decisions || []);
-  if (trace.handoffWaiting) {
+  if ((activeRuntime || runtime) === 'claude-code' && trace.handoffWaiting) {
     $('continueBtn').style.display = 'block';
     setStatus('blocked');
   }
   renderSpans(trace.spans || []);
+}
+
+function displayRuntime(value) {
+  if (value === 'web-buddy') return activeRuntimeInfo().label;
+  if (value === 'claude-code') return 'Claude Code';
+  return value || activeRuntimeInfo().label;
 }
 
 function timelinePhase(event) {
@@ -529,9 +610,34 @@ function closeStream() {
   }
 }
 
+function setRunControls(running) {
+  $('runBtn').disabled = running;
+  $('stopBtn').disabled = !running;
+  document.querySelectorAll('#runtimeSeg button').forEach((button) => { button.disabled = running; });
+  document.querySelectorAll('#presetSeg button').forEach((button) => { button.disabled = running; });
+}
+
+function validateRunInput() {
+  const url = $('url').value.trim();
+  const prompt = $('prompt').value.trim();
+  if (!url) return 'Target URL is required.';
+  if (!prompt) return 'Task prompt is required.';
+  try {
+    new URL(url);
+  } catch {
+    return 'Target URL must be a valid URL, for example https://example.com.';
+  }
+  return '';
+}
+
 $('presetSeg').addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (button) setPreset(button.dataset.v);
+});
+
+$('runtimeSeg').addEventListener('click', (event) => {
+  const button = event.target.closest('button');
+  if (button) setRuntime(button.dataset.v);
 });
 
 $('uploadBtn').addEventListener('click', async () => {
@@ -547,59 +653,112 @@ $('uploadBtn').addEventListener('click', async () => {
 });
 
 $('runBtn').addEventListener('click', async () => {
-  await saveConfig();
   closeStream();
+  const validationError = validateRunInput();
+  if (validationError) {
+    setStatus('failed');
+    addEvent({ level: 'error', phase: 'input', message: validationError });
+    setRunControls(false);
+    return;
+  }
+
   $('timeline').innerHTML = '<div class="empty">Starting runtime...</div>';
   $('spans').innerHTML = '<div class="empty" style="padding:8px 0">No spans yet.</div>';
+  $('runDir').textContent = '-';
+  $('traceDir').textContent = '-';
+  $('tracePath').textContent = '-';
+  $('spanCount').textContent = '0';
+  runId = null;
+  activeRuntime = runtime;
+  activeMode = runtimeMode();
+  $('runId').textContent = 'starting...';
+  updateRunMeta();
   riskTimelineKeys = new Set();
   renderMetrics(null);
   renderRiskDecisions(null);
   $('continueBtn').style.display = 'none';
   setStatus('running');
-  $('runBtn').disabled = true;
-  $('stopBtn').disabled = false;
-  const started = await api('/api/runtime/run', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      preset,
-      url: $('url').value.trim(),
-      prompt: $('prompt').value.trim(),
-      resumePath: $('resumePath').value.trim() || undefined,
-      headless: $('headless').checked,
-      maxTurns: $('maxTurns').value.trim() || undefined,
-      allowedDomains: $('allowedDomains').value.trim() || undefined,
-    }),
-  });
-  runId = started.runId;
-  $('runId').textContent = runId;
-  events = new EventSource(`/api/runtime/events?id=${encodeURIComponent(runId)}`);
-  events.onmessage = (message) => {
-    const event = JSON.parse(message.data);
-    if (event._end) {
-      setStatus(event.exitCode === 0 ? 'done' : 'failed');
-      $('runBtn').disabled = false;
-      $('stopBtn').disabled = true;
-      closeStream();
-      refreshTrace().catch(() => {});
-      return;
+  setRunControls(true);
+
+  try {
+    await saveConfig();
+    const mode = activeMode;
+    const isClaude = runtime === 'claude-code';
+    const prompt = $('prompt').value.trim();
+    const url = $('url').value.trim();
+    const started = await api(activeRuntimeInfo().runPath, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(isClaude ? {
+        runtime,
+        mode,
+        preset,
+        url,
+        startUrl: url,
+        prompt,
+        taskPrompt: prompt,
+        resumePath: $('resumePath').value.trim() || undefined,
+        headless: $('headless').checked,
+        maxTurns: $('maxTurns').value.trim() || undefined,
+        allowedDomains: $('allowedDomains').value.trim() || undefined,
+      } : {
+        runtime,
+        mode,
+        startUrl: url,
+        resumePath: $('resumePath').value.trim() || undefined,
+        headless: $('headless').checked,
+        prompt,
+        taskPrompt: prompt,
+      }),
+    });
+    runId = started.runId;
+    $('runId').textContent = runId;
+    updateRunMeta({ runtime: displayRuntime(started.runtime), mode: started.mode || mode, runId });
+    events = new EventSource(activeRuntimeInfo().eventsPath(runId));
+    events.onmessage = (message) => {
+      const event = JSON.parse(message.data);
+      if (event._end) {
+        updateRunMeta({ runtime: displayRuntime(event.runtime), mode: event.mode || mode, runId });
+        setStatus(finalStatusForEnd(event));
+        setRunControls(false);
+        closeStream();
+        refreshTrace().catch(() => {});
+        return;
+      }
+      addEvent(event);
+    };
+    events.onerror = () => {};
+    traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
+  } catch (error) {
+    if (!runId) {
+      activeRuntime = null;
+      activeMode = null;
+      $('runId').textContent = 'no run';
+      updateRunMeta();
     }
-    addEvent(event);
-  };
-  events.onerror = () => {};
-  traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
+    setStatus('failed');
+    setRunControls(false);
+    addEvent({ level: 'error', phase: 'run', message: error.message || String(error) });
+  }
 });
 
+function finalStatusForEnd(event) {
+  if (event.exitCode !== undefined) return event.exitCode === 0 ? 'done' : 'failed';
+  if (event.finalState === 'error') return 'failed';
+  if (event.finalState === 'blocked' || event.finalState === 'login_required' || event.finalState === 'direct_submit_review' || event.finalState === 'stopped_at_submit') return 'blocked';
+  return 'done';
+}
+
 $('continueBtn').addEventListener('click', async () => {
-  if (!runId) return;
-  await api(`/api/runtime/continue?id=${encodeURIComponent(runId)}`, { method: 'POST' });
+  if (!runId || activeRuntime !== 'claude-code') return;
+  await api(activeRuntimeInfo().continuePath(runId), { method: 'POST' });
   $('continueBtn').style.display = 'none';
   setStatus('running');
 });
 
 $('stopBtn').addEventListener('click', async () => {
   if (!runId) return;
-  await api(`/api/runtime/stop?id=${encodeURIComponent(runId)}`, { method: 'POST' });
+  await api(activeRuntimeInfo().stopPath(runId), { method: 'POST' });
 });
 
 $('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => addEvent({ level: 'error', phase: 'trace', message: error.message })));

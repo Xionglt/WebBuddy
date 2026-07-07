@@ -52,7 +52,7 @@ try {
   }
   const workflowState = {
     schemaVersion: 'workflow-state/v1',
-    phase: 'filling_application',
+    phase: 'in_target_flow',
     confidence: 'medium',
     reason: 'Application fields are present.',
     updatedAt: '2026-06-25T00:00:30.000Z',

@@ -3,6 +3,7 @@ import type { RiskLevel } from '../sdk/trace.js'
 import type { PolicyEngineDecision, PolicyRiskLevel } from '../policy/agent-policy.js'
 import type { ToolCall } from '../tools/tool-contract.js'
 import type { ToolCategory } from '../tools/types.js'
+import type { ObservationPhase } from '../workflow/phase-classifier.js'
 import type { WorkflowPhase, WorkflowState } from '../workflow/workflow-state.js'
 
 export type PermissionAction = 'allow' | 'ask' | 'deny'
@@ -66,7 +67,8 @@ export interface PermissionRequest {
   risk?: RiskLevel
   riskLevel: PolicyRiskLevel
   currentUrl?: string
-  workflowPhase?: WorkflowPhase
+  workflowPhase?: WorkflowPhase | string
+  observationPhase?: ObservationPhase
   gateKind?: GateKind
   policy: PermissionRequestPolicy
   context?: {
@@ -214,7 +216,8 @@ export interface CreateToolPermissionRequestInput {
   risk?: RiskLevel
   currentUrl?: string
   workflowState?: WorkflowState
-  workflowPhase?: WorkflowPhase
+  workflowPhase?: WorkflowPhase | string
+  observationPhase?: ObservationPhase
   runId: string
   sessionId: string
   turnId?: string
@@ -245,7 +248,8 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 }
 
 export function createToolPermissionRequest(input: CreateToolPermissionRequestInput): PermissionRequest {
-  const workflowPhase = input.workflowPhase ?? input.policyDecision.workflowPhase ?? input.workflowState?.phase
+  const workflowPhase = input.workflowPhase ?? input.workflowState?.phase
+  const observationPhase = input.observationPhase ?? input.workflowState?.observationPhase
   return {
     schemaVersion: 'permission-request/v1',
     requestId: input.requestId ?? permissionRequestIdFor(input.turnId, input.call.id),
@@ -266,6 +270,7 @@ export function createToolPermissionRequest(input: CreateToolPermissionRequestIn
     riskLevel: input.policyDecision.riskLevel,
     ...(input.currentUrl ? { currentUrl: input.currentUrl } : {}),
     ...(workflowPhase ? { workflowPhase } : {}),
+    ...(observationPhase ? { observationPhase } : {}),
     ...(input.policyDecision.gateKind ? { gateKind: input.policyDecision.gateKind } : {}),
     policy: {
       schemaVersion: input.policyDecision.schemaVersion,
@@ -308,6 +313,7 @@ export function createWorkflowHandoffPermissionRequest(
     riskLevel: 'high',
     ...(input.currentUrl ? { currentUrl: input.currentUrl } : {}),
     workflowPhase: input.workflowState.phase,
+    ...(input.workflowState.observationPhase ? { observationPhase: input.workflowState.observationPhase } : {}),
     gateKind: input.handoffKind,
     policy: {
       schemaVersion: 'policy-decision/v1',

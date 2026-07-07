@@ -6,6 +6,7 @@ import { browserFormAudit } from '../browser/form-audit.js'
 import { browserFormSnapshot } from '../browser/form-snapshot.js'
 import { browserInspectOptions } from '../browser/inspect-options.js'
 import { browserOpen } from '../browser/open.js'
+import { browserPressKey } from '../browser/press-key.js'
 import { browserScreenshot } from '../browser/screenshot.js'
 import { browserSelect } from '../browser/select.js'
 import { browserSelectByText } from '../browser/select-by-text.js'
@@ -31,6 +32,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknow
   browser_select_by_text: (args) => browserSelectByText(args as Parameters<typeof browserSelectByText>[0]),
   browser_set_field: (args) => browserSetField(args as Parameters<typeof browserSetField>[0]),
   browser_type: (args) => browserType(args as Parameters<typeof browserType>[0]),
+  browser_press_key: (args) => browserPressKey(args as Parameters<typeof browserPressKey>[0]),
   browser_select: (args) => browserSelect(args as Parameters<typeof browserSelect>[0]),
   browser_wait: (args) => browserWait(args as Parameters<typeof browserWait>[0]),
   browser_screenshot: (args) => browserScreenshot(args as Parameters<typeof browserScreenshot>[0]),

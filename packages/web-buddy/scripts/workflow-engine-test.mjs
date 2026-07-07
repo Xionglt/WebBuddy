@@ -9,8 +9,8 @@ const engine = new WorkflowEngine()
 const initial = createInitialWorkflowState(now)
 
 const loginEvidence = snapshot([
-  evidence('ev-page-login', 'page', 'Login page is visible.', 'login_required'),
-  evidence('ev-workflow-login', 'workflow_state', 'Workflow entered login handoff.', 'login_required'),
+  evidence('ev-page-login', 'page', 'Login page is visible.', 'external_blocker'),
+  evidence('ev-workflow-login', 'workflow_state', 'Workflow entered login handoff.', 'external_blocker'),
 ])
 const login = engine.evaluate({
   previous: initial,
@@ -20,7 +20,9 @@ const login = engine.evaluate({
   now,
 })
 assert.equal(login.changed, true)
-assert.equal(login.state.phase, 'login_required')
+assert.equal(login.state.phase, 'external_blocker')
+assert.equal(login.state.observationPhase, 'external_blocker')
+assert.equal(login.observationPhase, 'external_blocker')
 assert.equal(login.state.humanHandoffRequired, true)
 assert.match(login.state.blocker, /login/i)
 assert(login.blockers.some((blocker) => blocker.kind === 'human_handoff' && blocker.gateKind === 'login'))
@@ -30,16 +32,17 @@ assert(login.evidenceIds.includes('ev-page-login'))
 const captcha = engine.evaluate({
   previous: initial,
   page: page({ pageType: 'captcha', title: 'Security check', textSummary: '请完成人机验证' }),
-  evidenceSnapshot: snapshot([evidence('ev-page-captcha', 'page', 'Captcha page is visible.', 'captcha_required')]),
+  evidenceSnapshot: snapshot([evidence('ev-page-captcha', 'page', 'Captcha page is visible.', 'external_blocker')]),
   now,
 })
-assert.equal(captcha.state.phase, 'captcha_required')
+assert.equal(captcha.state.phase, 'external_blocker')
+assert.equal(captcha.state.observationPhase, 'external_blocker')
 assert.equal(captcha.state.humanHandoffRequired, true)
 assert(captcha.blockers.some((blocker) => blocker.kind === 'human_handoff' && blocker.gateKind === 'captcha'))
 
-const reviewing = {
+const in_target_flow = {
   ...initial,
-  phase: 'reviewing',
+  phase: 'in_target_flow',
   confidence: 'medium',
   reason: 'Application form appears mostly filled and has submit candidates.',
 }
@@ -51,19 +54,20 @@ const readyForm = form({
 })
 const finalSubmitPolicyFact = { action: 'gate', riskLevel: 'high', reason: 'final submit', gateKind: 'final_submit' }
 const readyMissingPolicyEvidence = engine.evaluate({
-  previous: reviewing,
+  previous: in_target_flow,
   form: readyForm,
   policyFacts: [finalSubmitPolicyFact],
   evidenceSnapshot: snapshot([
-    evidence('ev-form-ready-without-policy', 'form', 'Application form is filled.', 'ready_for_final_submit'),
+    evidence('ev-form-ready-without-policy', 'form', 'Application form is filled.', 'final_submit_boundary'),
   ]),
   now,
 })
-assert.equal(readyMissingPolicyEvidence.state.phase, 'ready_for_final_submit')
+assert.equal(readyMissingPolicyEvidence.state.phase, 'final_submit_boundary')
+assert.equal(readyMissingPolicyEvidence.state.observationPhase, 'final_submit_boundary')
 assert(
   readyMissingPolicyEvidence.missingCriteria.some(
     (criterion) =>
-      criterion.id === 'ready-for-final-submit-requires-form-and-policy-evidence' &&
+      criterion.id === 'final-submit-boundary-requires-page-form-and-policy-evidence' &&
       criterion.missingEvidenceKinds.includes('policy'),
   ),
   'policy facts alone should not satisfy persisted policy evidence',
@@ -72,27 +76,29 @@ assert(
   readyMissingPolicyEvidence.blockers.some(
     (blocker) =>
       blocker.kind === 'missing_evidence' &&
-      blocker.criterionId === 'ready-for-final-submit-requires-form-and-policy-evidence',
+      blocker.criterionId === 'final-submit-boundary-requires-page-form-and-policy-evidence',
   ),
-  'ready_for_final_submit should report missing policy evidence as a blocker',
+  'final_submit_boundary should report missing policy evidence as a blocker',
 )
 
 const ready = engine.evaluate({
-  previous: reviewing,
+  previous: in_target_flow,
   form: readyForm,
   policyFacts: [finalSubmitPolicyFact],
   evidenceSnapshot: snapshot([
-    evidence('ev-form-ready', 'form', 'Application form is filled.', 'ready_for_final_submit'),
-    evidence('ev-policy-final', 'policy', 'Policy identified final submit gate.', 'ready_for_final_submit'),
+    evidence('ev-page-ready', 'page', 'Application review page is visible.', 'final_submit_boundary'),
+    evidence('ev-form-ready', 'form', 'Application form is filled.', 'final_submit_boundary'),
+    evidence('ev-policy-final', 'policy', 'Policy identified final submit gate.', 'final_submit_boundary'),
   ]),
   now,
 })
-assert.equal(ready.state.phase, 'ready_for_final_submit')
-assert.notEqual(ready.state.phase, 'done', 'ready_for_final_submit must not mean completed')
+assert.equal(ready.state.phase, 'final_submit_boundary')
+assert.equal(ready.state.observationPhase, 'final_submit_boundary')
+assert.notEqual(ready.state.phase, 'done', 'final_submit_boundary must not mean completed')
 assert.equal(ready.state.humanHandoffRequired, true)
 assert.match(ready.state.blocker, /Final submit/i)
 assert(ready.blockers.some((blocker) => blocker.kind === 'human_handoff' && blocker.gateKind === 'final_submit'))
-assert(ready.matchedCriteria.some((criterion) => criterion.id === 'ready-for-final-submit-requires-form-and-policy-evidence'))
+assert(ready.matchedCriteria.some((criterion) => criterion.id === 'final-submit-boundary-requires-page-form-and-policy-evidence'))
 assert(ready.evidenceIds.includes('ev-form-ready'))
 assert(ready.evidenceIds.includes('ev-policy-final'))
 
@@ -116,17 +122,18 @@ const directSubmitReview = engine.evaluate({
   form: directSubmitForm,
   policyFacts: [{ action: 'gate', riskLevel: 'critical', reason: 'final submit', gateKind: 'final_submit' }],
   evidenceSnapshot: snapshot([
-    evidence('ev-page-direct-submit', 'page', 'Direct submit page is visible.', 'direct_submit_review'),
-    evidence('ev-form-direct-submit', 'form', 'Only agreement checkbox and apply button are visible.', 'direct_submit_review'),
-    evidence('ev-policy-direct-submit', 'policy', 'Policy identified final submit gate.', 'direct_submit_review'),
+    evidence('ev-page-direct-submit', 'page', 'Direct submit page is visible.', 'final_submit_boundary'),
+    evidence('ev-form-direct-submit', 'form', 'Only agreement checkbox and apply button are visible.', 'final_submit_boundary'),
+    evidence('ev-policy-direct-submit', 'policy', 'Policy identified final submit gate.', 'final_submit_boundary'),
   ]),
   now,
 })
-assert.equal(directSubmitReview.state.phase, 'direct_submit_review')
+assert.equal(directSubmitReview.state.phase, 'final_submit_boundary')
+assert.equal(directSubmitReview.state.observationPhase, 'final_submit_boundary')
 assert.notEqual(directSubmitReview.state.phase, 'blocked')
 assert.equal(directSubmitReview.state.humanHandoffRequired, true)
 assert(directSubmitReview.blockers.some((blocker) => blocker.kind === 'human_handoff' && blocker.gateKind === 'final_submit'))
-assert(directSubmitReview.matchedCriteria.some((criterion) => criterion.id === 'direct-submit-review-requires-page-form-and-policy-evidence'))
+assert(directSubmitReview.matchedCriteria.some((criterion) => criterion.id === 'final-submit-boundary-requires-page-form-and-policy-evidence'))
 assert(directSubmitReview.evidenceIds.includes('ev-form-direct-submit'))
 
 const finalDeclined = engine.evaluate({
@@ -135,23 +142,67 @@ const finalDeclined = engine.evaluate({
   evidenceSnapshot: snapshot([evidence('ev-workflow-blocked', 'workflow_state', 'Final submit was declined.', 'blocked')]),
   now,
 })
-assert.equal(finalDeclined.state.phase, 'blocked')
+assert.equal(finalDeclined.state.phase, 'final_submit_boundary')
+assert.equal(finalDeclined.state.observationPhase, 'final_submit_boundary')
 assert(finalDeclined.blockers.some((blocker) => blocker.kind === 'human_handoff' && blocker.gateKind === 'final_submit'))
-assert(finalDeclined.blockers.some((blocker) => blocker.kind === 'workflow_blocked'))
-assert(finalDeclined.matchedCriteria.some((criterion) => criterion.id === 'blocked-is-terminal'))
+
+const profileAfterFinalCancel = engine.evaluate({
+  previous: ready.state,
+  currentUrl: 'https://example.test/profile/resume',
+  page: page({
+    url: 'https://example.test/profile/resume',
+    title: '个人中心',
+    pageType: 'form',
+    textSummary: '个人中心 简历管理 上传简历 保存',
+    formCount: 1,
+    inputCount: 3,
+    buttonCount: 2,
+    facts: {
+      hasAgreementCheckbox: false,
+      agreementChecked: false,
+      hasApplicationQuotaDialog: false,
+      hasRealUploadInput: true,
+      uploadCandidateCount: 1,
+      submitLikeButtons: [{ tag: 'button', type: 'button', text: '保存', visible: true }],
+      likelyApplyEntryButtons: [],
+      likelyFinalSubmitButtons: [],
+      visibleBlockingDialog: { present: false },
+    },
+  }),
+  form: form({
+    url: 'https://example.test/profile/resume',
+    fields: [field(0, '上传简历', '', false, 'file'), field(1, '姓名', 'Zhang San', true)],
+    filledFields: [field(1, '姓名', 'Zhang San', true)],
+    submitCandidates: [{ tag: 'button', type: 'button', text: '保存', visible: true }],
+  }),
+  policyFacts: [finalSubmitPolicyFact],
+  permissionFacts: [{ gateKind: 'final_submit', decision: 'deny' }],
+  approvalFacts: [{ gateKind: 'final_submit', status: 'denied', decision: 'decline' }],
+  evidenceSnapshot: snapshot([
+    evidence('ev-page-ready', 'page', 'Previous application review page was visible.', 'final_submit_boundary'),
+    evidence('ev-policy-final', 'policy', 'Previous policy identified final submit gate.', 'final_submit_boundary'),
+  ]),
+  now,
+})
+assert.equal(profileAfterFinalCancel.state.phase, 'in_target_flow')
+assert.equal(profileAfterFinalCancel.state.observationPhase, 'in_target_flow')
+assert.equal(profileAfterFinalCancel.state.humanHandoffRequired, undefined)
+assert.equal(profileAfterFinalCancel.state.blocker, undefined)
+assert(!profileAfterFinalCancel.blockers.some((blocker) => blocker.gateKind === 'final_submit'))
 
 const doneMissingEvidence = engine.evaluate({
-  previous: reviewing,
+  previous: in_target_flow,
   recentActions: [
     {
       toolName: 'agent_done',
       toolResult: { observation: 'agent_done: Completed.', done: true, data: { blocked: false } },
     },
   ],
-  evidenceSnapshot: snapshot([evidence('ev-form-reviewing', 'form', 'Review page is visible.', 'reviewing')]),
+  evidenceSnapshot: snapshot([evidence('ev-form-in_target_flow', 'form', 'Review page is visible.', 'in_target_flow')]),
   now,
 })
 assert.equal(doneMissingEvidence.state.phase, 'done')
+assert.equal(doneMissingEvidence.state.observationPhase, 'done')
 assert(
   doneMissingEvidence.missingCriteria.some(
     (criterion) =>
@@ -164,7 +215,7 @@ assert(
 assert(doneMissingEvidence.blockers.some((blocker) => blocker.kind === 'missing_evidence'))
 
 const doneWithEvidence = engine.evaluate({
-  previous: reviewing,
+  previous: in_target_flow,
   recentActions: [
     {
       toolName: 'agent_done',
@@ -178,9 +229,44 @@ const doneWithEvidence = engine.evaluate({
   now,
 })
 assert.equal(doneWithEvidence.state.phase, 'done')
+assert.equal(doneWithEvidence.state.observationPhase, 'done')
 assert(doneWithEvidence.matchedCriteria.some((criterion) => criterion.id === 'done-requires-explicit-completion-evidence'))
 assert(doneWithEvidence.evidenceIds.includes('ev-tool-done'))
 assert(doneWithEvidence.evidenceIds.includes('ev-user-confirm'))
+
+const taskCompleted = engine.evaluate({
+  previous: in_target_flow,
+  page: page({ pageType: 'form', formCount: 1, inputCount: 2, textSummary: 'Application form ready for review.' }),
+  form: {
+    ...readyForm,
+    formCoverage: {
+      totalFields: 2,
+      visibleFields: 2,
+      coveredFields: 2,
+      uncoveredRequired: [],
+      scrolledBottom: true,
+      updatedAt: now,
+    },
+  },
+  taskType: 'fill_form',
+  fillLedgerSummary: {
+    total: 2,
+    verified: 2,
+    failed: 0,
+    needsUser: 0,
+    skipped: 0,
+    pendingRequired: 0,
+    updatedAt: now,
+  },
+  requiresCurrentResumeUpload: true,
+  currentResumeUploaded: true,
+  policyFacts: [finalSubmitPolicyFact],
+  evidenceSnapshot: snapshot([evidence('ev-form-task-complete', 'form', 'Filled form verified.', 'in_target_flow')]),
+  now,
+})
+assert.equal(taskCompleted.state.phase, 'done')
+assert.equal(taskCompleted.state.observationPhase, 'done')
+assert.equal(taskCompleted.observationPhase, 'done')
 
 console.log('workflow-engine-test: PASS')
 
@@ -250,7 +336,7 @@ function field(index, label, value, required, type = 'text') {
 function enteringState() {
   return {
     ...initial,
-    phase: 'entering_application',
+    phase: 'in_target_flow',
     confidence: 'medium',
     reason: 'Apply entry action appears to open the application flow.',
   }

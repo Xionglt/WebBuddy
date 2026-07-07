@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import type { Locator, Page } from 'playwright'
 import { toolFailure, toolSuccess } from '../errors.js'
-import { resolveRef } from '../snapshot/ref-resolver.js'
+import { resolveRefWithSnapshotRetry } from '../snapshot/ref-resolver.js'
 import { sessionManager } from '../session/manager.js'
 import { clearHighlight, visualizeBeforeAction } from '../sdk/highlight.js'
 
@@ -235,13 +235,15 @@ export async function browserUploadFile(input: {
 
   try {
     if (input.ref) {
-      const resolved = await resolveRef(session.page, session.latestSnapshot, input.ref)
+      const resolved = await resolveRefWithSnapshotRetry(session.page, session.latestSnapshot, input.ref, session.id)
       if (!resolved.ok) return resolved.failure
       const { locator } = resolved
       const tagName = await locator.evaluate((el) => el.tagName.toLowerCase()).catch(() => '')
       const typeAttr = await locator.getAttribute('type').catch(() => '')
+      let verifyLocator: Locator | undefined
       if (tagName === 'input' && typeAttr === 'file') {
         await locator.setInputFiles(filePath, { timeout })
+        verifyLocator = locator
       } else {
         const target = await assertUploadTarget(locator, `ref ${input.ref}`)
         if (!target.ok) return target.failure
@@ -249,8 +251,9 @@ export async function browserUploadFile(input: {
         await uploadViaFileChooser(session.page, locator, filePath, timeout)
       }
       if (input.highlight && isHeadful()) await clearHighlight(session.page)
+      const verification = await verifyUploadAcknowledged(session.page, filePath, verifyLocator)
       sessionManager.invalidateSnapshot(session.id)
-      return toolSuccess(`Uploaded file to ref ${input.ref}.`, { filePath, ref: input.ref, url: session.page.url() }, true)
+      return uploadResult(`Uploaded file to ref ${input.ref}.`, { filePath, ref: input.ref, url: session.page.url() }, verification)
     }
 
     if (input.selector) {
@@ -264,15 +267,18 @@ export async function browserUploadFile(input: {
       }
       const tagName = await locator.evaluate((el) => el.tagName.toLowerCase()).catch(() => '')
       const typeAttr = await locator.getAttribute('type').catch(() => '')
+      let verifyLocator: Locator | undefined
       if (tagName === 'input' && typeAttr === 'file') {
         await locator.setInputFiles(filePath, { timeout })
+        verifyLocator = locator
       } else {
         const target = await assertUploadTarget(locator, `selector ${input.selector}`)
         if (!target.ok) return target.failure
         await uploadViaFileChooser(session.page, locator, filePath, timeout)
       }
+      const verification = await verifyUploadAcknowledged(session.page, filePath, verifyLocator)
       sessionManager.invalidateSnapshot(session.id)
-      return toolSuccess(`Uploaded file via selector ${input.selector}.`, { filePath, selector: input.selector, url: session.page.url() }, true)
+      return uploadResult(`Uploaded file via selector ${input.selector}.`, { filePath, selector: input.selector, url: session.page.url() }, verification)
     }
 
     if (input.text) {
@@ -297,24 +303,26 @@ export async function browserUploadFile(input: {
       } finally {
         await locator.evaluate((el) => el.removeAttribute('data-mfa-upload-target')).catch(() => {})
       }
+      const verification = await verifyUploadAcknowledged(session.page, filePath)
       sessionManager.invalidateSnapshot(session.id)
-      return toolSuccess(`Uploaded file via visible text "${input.text}".`, {
+      return uploadResult(`Uploaded file via visible text "${input.text}".`, {
         filePath,
         text: input.text,
         matchedText: match.text,
         totalMatches: match.totalMatches,
         url: session.page.url(),
-      }, true)
+      }, verification)
     }
 
     const fileInput = session.page.locator('input[type="file"]').first()
     if ((await fileInput.count()) > 0) {
       await fileInput.setInputFiles(filePath, { timeout })
+      const verification = await verifyUploadAcknowledged(session.page, filePath, fileInput)
       sessionManager.invalidateSnapshot(session.id)
-      return toolSuccess('Uploaded file via first input[type=file].', {
+      return uploadResult('Uploaded file via first input[type=file].', {
         filePath,
         url: session.page.url(),
-      }, true)
+      }, verification)
     }
 
     return toolFailure('ELEMENT_NOT_FOUND', 'No upload target was found. Provide ref, text, or selector after browser_form_snapshot.', {
@@ -337,4 +345,53 @@ async function uploadViaFileChooser(page: Page, locator: Locator, filePath: stri
     locator.click({ timeout }),
   ])
   await fileChooser.setFiles(filePath)
+}
+
+async function verifyUploadAcknowledged(page: Page, filePath: string, locator?: Locator): Promise<{ verified: boolean; signals: string[] }> {
+  const signals: string[] = []
+  const fileName = basename(filePath)
+  if (locator) {
+    const fileCount = await locator.evaluate((el) => {
+      const input = el as HTMLInputElement
+      return input.files?.length ?? 0
+    }).catch(() => 0)
+    if (fileCount > 0) signals.push('input.files')
+  }
+
+  const pageSignals = await page.evaluate((name) => {
+    const text = (document.body?.innerText || '').replace(/\s+/g, ' ')
+    const fileInputsWithFiles = Array.from(document.querySelectorAll('input[type="file"]')).some((el) => {
+      const input = el as HTMLInputElement
+      return (input.files?.length ?? 0) > 0
+    })
+    return {
+      fileNameVisible: Boolean(name) && text.includes(name),
+      uploadStatusVisible: /uploaded|uploading|attached|processing|解析|上传成功|已上传|附件|简历/i.test(text),
+      fileInputsWithFiles,
+    }
+  }, fileName).catch(() => ({
+    fileNameVisible: false,
+    uploadStatusVisible: false,
+    fileInputsWithFiles: false,
+  }))
+  if (pageSignals.fileNameVisible) signals.push('filename_visible')
+  if (pageSignals.uploadStatusVisible) signals.push('upload_status_visible')
+  if (pageSignals.fileInputsWithFiles) signals.push('page_file_input_files')
+
+  return { verified: signals.length > 0, signals }
+}
+
+function uploadResult<T extends Record<string, unknown>>(
+  observation: string,
+  data: T,
+  verification: { verified: boolean; signals: string[] },
+) {
+  if (!verification.verified) {
+    return toolSuccess(
+      `UPLOAD_UNVERIFIED: file chooser accepted the file but the page did not acknowledge it. Re-snapshot before assuming success.`,
+      { ...data, uploadVerified: false, uploadSignals: verification.signals },
+      false,
+    )
+  }
+  return toolSuccess(observation, { ...data, uploadVerified: true, uploadSignals: verification.signals }, true)
 }

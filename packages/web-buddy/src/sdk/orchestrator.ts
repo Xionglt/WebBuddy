@@ -695,9 +695,9 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
     const llmExtraContext = [
       extraContext,
       `Task type: ${taskType}. Completion criteria must follow this task contract.`,
-      mode === 'raw' || !options.requiresCurrentResumeUpload
-        ? currentResumeReadOnlyContext(config.resumePath)
-        : currentResumeUploadContext(config.resumePath),
+      options.requiresCurrentResumeUpload
+        ? currentResumeUploadContext(config.resumePath)
+        : currentResumeReadOnlyContext(config.resumePath),
     ].filter(Boolean).join('\n')
     if (useLlm) {
       const goal =
@@ -728,7 +728,7 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         : 'filled'
       return finalizeRun({
         mode, profile, matches, chosenJob, finalState,
-        message: loopResult.summary + (loopResult.blocked ? ' (stopped)' : ' (draft filled — not submitted)'),
+        message: loopResult.summary + (loopResult.blocked ? ' (stopped — not submitted)' : ' (draft filled — not submitted)'),
         trace, emit,
         recordSessionFinal: false,
       })

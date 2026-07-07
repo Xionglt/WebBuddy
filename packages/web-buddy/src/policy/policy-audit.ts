@@ -1,6 +1,5 @@
 import type { GateKind } from '../sdk/human.js'
 import type { RiskLevel } from '../sdk/trace.js'
-import type { WorkflowPhase } from '../workflow/workflow-state.js'
 import type { ActionIntent } from './action-intent.js'
 import type { PolicyAction, PolicyEngineDecision, PolicyRiskLevel } from './policy-engine.js'
 
@@ -18,7 +17,7 @@ export interface PolicyAuditEvent {
   policyCode: string
   ruleId: string
   reason: string
-  workflowPhase?: WorkflowPhase
+  workflowPhase?: string
   requiresFreshContext?: boolean
 }
 
@@ -45,7 +44,6 @@ export function createPolicyAuditEvent(input: {
     ruleId: decision.ruleId,
     reason: decision.reason,
     ...(decision.gateKind ? { gateKind: decision.gateKind } : {}),
-    ...(decision.workflowPhase ? { workflowPhase: decision.workflowPhase } : {}),
     ...(decision.requiresFreshContext ? { requiresFreshContext: decision.requiresFreshContext } : {}),
   }
 }

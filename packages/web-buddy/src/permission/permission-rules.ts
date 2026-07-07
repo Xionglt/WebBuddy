@@ -251,8 +251,6 @@ function gateKindFor(request: PermissionRequest): GateKind | undefined {
 function workflowHandoffKindFor(request: PermissionRequest): Extract<GateKind, 'login' | 'captcha'> | undefined {
   if (request.subject.kind === 'workflow_handoff') return request.subject.handoffKind
   if (request.gateKind === 'login' || request.gateKind === 'captcha') return request.gateKind
-  if (request.workflowPhase === 'login_required') return 'login'
-  if (request.workflowPhase === 'captcha_required') return 'captcha'
   return undefined
 }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { PermissionEngine } from '../dist/permission/permission-engine.js'
+import { createToolPermissionRequest } from '../dist/permission/permission-types.js'
 
 const fixedDate = new Date('2026-06-29T00:00:00.000Z')
 const engine = new PermissionEngine({ now: () => fixedDate })
@@ -79,12 +80,12 @@ const login = engine.evaluate(permissionRequest({
   args: { text: 'Sign in' },
   risk: 'L3',
   riskLevel: 'high',
-  workflowPhase: 'login_required',
+  workflowPhase: 'external_blocker',
   policyAction: 'gate',
   gateKind: 'login',
-  policyCode: 'policy.workflow.login_required',
-  ruleId: 'policy.workflow.login_required.v1',
-  reason: 'Workflow is in login_required; route this step through the login human gate.',
+  policyCode: 'policy.workflow.external_blocker',
+  ruleId: 'policy.workflow.external_blocker.v1',
+  reason: 'Workflow is in external_blocker; route this step through the login human gate.',
 }))
 assert.equal(login.action, 'ask')
 assert.equal(login.gateKind, 'login')
@@ -96,16 +97,118 @@ const captcha = engine.evaluate(permissionRequest({
   args: { text: 'Verify' },
   risk: 'L3',
   riskLevel: 'high',
-  workflowPhase: 'captcha_required',
+  workflowPhase: 'external_blocker',
   policyAction: 'gate',
   gateKind: 'captcha',
-  policyCode: 'policy.workflow.captcha_required',
-  ruleId: 'policy.workflow.captcha_required.v1',
-  reason: 'Workflow is in captcha_required; route this step through the captcha human gate.',
+  policyCode: 'policy.workflow.external_blocker',
+  ruleId: 'policy.workflow.external_blocker.v1',
+  reason: 'Workflow is in external_blocker; route this step through the captcha human gate.',
 }))
 assert.equal(captcha.action, 'ask')
 assert.equal(captcha.gateKind, 'captcha')
 assert.equal(captcha.rememberable, false)
+
+const legacyPhaseOnlyLogin = engine.evaluate(permissionRequest({
+  requestId: 'perm-legacy-phase-only-login',
+  toolName: 'browser_click_text',
+  args: { text: 'Sign in' },
+  risk: 'L3',
+  riskLevel: 'high',
+  workflowPhase: 'external_blocker',
+  policyAction: 'gate',
+  policyCode: 'policy.high_risk.gate',
+  ruleId: 'policy.high_risk.gate.v1',
+  reason: 'High-risk tool action requires a human gate.',
+}))
+assert.equal(legacyPhaseOnlyLogin.action, 'ask')
+assert.equal(legacyPhaseOnlyLogin.gateKind, 'high_risk_action')
+
+const requestFromWorkflowState = createToolPermissionRequest({
+  call: {
+    id: 'call-state-phase',
+    name: 'browser_click',
+    arguments: { ref: 'apply' },
+  },
+  policyDecision: {
+    schemaVersion: 'policy-decision/v1',
+    action: 'gate',
+    riskLevel: 'high',
+    policyCode: 'policy.high_risk.gate',
+    ruleId: 'policy.high_risk.gate.v1',
+    reason: 'High-risk action requires permission.',
+    auditTags: ['action:gate', 'risk:high'],
+    workflowPhase: 'external_blocker',
+  },
+  workflowState: {
+    schemaVersion: 'workflow-state/v1',
+    phase: 'in_target_flow',
+    observationPhase: 'in_target_flow',
+    confidence: 'high',
+    reason: 'Application flow is active.',
+    updatedAt: fixedDate.toISOString(),
+  },
+  risk: 'L3',
+  runId: 'run-permission-test',
+  sessionId: 'sess-permission-test',
+  turnId: 'turn-1',
+  step: 2,
+  now: () => fixedDate,
+})
+assert.equal(requestFromWorkflowState.workflowPhase, 'in_target_flow')
+assert.equal(requestFromWorkflowState.observationPhase, 'in_target_flow')
+
+const requestWithExplicitPhase = createToolPermissionRequest({
+  call: {
+    id: 'call-explicit-phase',
+    name: 'browser_click',
+    arguments: { ref: 'apply' },
+  },
+  policyDecision: {
+    schemaVersion: 'policy-decision/v1',
+    action: 'gate',
+    riskLevel: 'high',
+    policyCode: 'policy.high_risk.gate',
+    ruleId: 'policy.high_risk.gate.v1',
+    reason: 'High-risk action requires permission.',
+    auditTags: ['action:gate', 'risk:high'],
+    workflowPhase: 'external_blocker',
+  },
+  workflowPhase: 'in_target_flow',
+  observationPhase: 'in_target_flow',
+  risk: 'L3',
+  runId: 'run-permission-test',
+  sessionId: 'sess-permission-test',
+  turnId: 'turn-1',
+  step: 3,
+  now: () => fixedDate,
+})
+assert.equal(requestWithExplicitPhase.workflowPhase, 'in_target_flow')
+assert.equal(requestWithExplicitPhase.observationPhase, 'in_target_flow')
+
+const requestWithoutRuntimePhase = createToolPermissionRequest({
+  call: {
+    id: 'call-no-runtime-phase',
+    name: 'browser_click',
+    arguments: { ref: 'apply' },
+  },
+  policyDecision: {
+    schemaVersion: 'policy-decision/v1',
+    action: 'gate',
+    riskLevel: 'high',
+    policyCode: 'policy.high_risk.gate',
+    ruleId: 'policy.high_risk.gate.v1',
+    reason: 'High-risk action requires permission.',
+    auditTags: ['action:gate', 'risk:high'],
+    workflowPhase: 'external_blocker',
+  },
+  risk: 'L3',
+  runId: 'run-permission-test',
+  sessionId: 'sess-permission-test',
+  turnId: 'turn-1',
+  step: 4,
+  now: () => fixedDate,
+})
+assert.equal(requestWithoutRuntimePhase.workflowPhase, undefined)
 
 const policyBlock = engine.evaluate(permissionRequest({
   requestId: 'perm-policy-block',

@@ -16,27 +16,28 @@ const finalSubmit = decideToolPolicy({
 })
 assert.equal(finalSubmit.action, 'gate')
 assert.equal(finalSubmit.riskLevel, 'high')
-assert.equal(finalSubmit.actionIntent, 'final_submit')
+assert.equal(finalSubmit.actionIntent, 'safety_sensitive')
 assert.equal(finalSubmit.gateKind, 'final_submit')
 assert.equal(finalSubmit.requiresFreshContext, true)
-assert.match(finalSubmit.reason, /final-submit/i)
+assert.match(finalSubmit.reason, /final submit/i)
 assert.equal(finalSubmit.schemaVersion, 'policy-decision/v1')
 assert.equal(finalSubmit.policyCode, 'policy.high_risk.gate')
 assert.equal(finalSubmit.ruleId, 'policy.high_risk.gate.v1')
-assert(finalSubmit.auditTags.includes('intent:final_submit'))
+assert(finalSubmit.auditTags.includes('intent:safety_sensitive'))
 assert(finalSubmit.auditTags.includes('gate:final_submit'))
+assert(finalSubmit.auditTags.includes('invariant:no_final_submit'))
 
 const applyEntry = decideToolPolicy({
   toolName: 'browser_click_text',
   args: { text: 'Apply' },
   risk: 'L3',
   safetyMode: 'guarded',
-  workflowPhase: 'job_detail',
+  workflowPhase: 'in_target_flow',
 })
 assert.equal(applyEntry.action, 'gate')
-assert.equal(applyEntry.actionIntent, 'apply_entry')
+assert.equal(applyEntry.actionIntent, 'unknown_high_risk')
 assert.equal(applyEntry.gateKind, 'high_risk_action')
-assert.equal(applyEntry.policyCode, 'policy.workflow.apply_entry')
+assert.equal(applyEntry.policyCode, 'policy.high_risk.gate')
 
 const applicationEntry = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -45,13 +46,13 @@ const applicationEntry = decideToolPolicy({
   safetyMode: 'guarded',
   workflowState: {
     schemaVersion: 'workflow-state/v1',
-    phase: 'entering_application',
+    phase: 'in_target_flow',
     confidence: 'medium',
     reason: 'Opening application flow.',
     updatedAt: '2026-06-26T00:00:00.000Z',
   },
 })
-assert.equal(applicationEntry.actionIntent, 'apply_entry')
+assert.equal(applicationEntry.actionIntent, 'unknown_high_risk')
 assert.equal(applicationEntry.gateKind, 'high_risk_action')
 
 const workflowFinalSubmit = decideToolPolicy({
@@ -59,11 +60,11 @@ const workflowFinalSubmit = decideToolPolicy({
   args: { text: 'Submit application' },
   risk: 'L3',
   safetyMode: 'guarded',
-  workflowPhase: 'ready_for_final_submit',
+  workflowPhase: 'final_submit_boundary',
 })
 assert.equal(workflowFinalSubmit.gateKind, 'final_submit')
-assert.equal(workflowFinalSubmit.actionIntent, 'final_submit')
-assert.equal(workflowFinalSubmit.policyCode, 'policy.workflow.final_submit')
+assert.equal(workflowFinalSubmit.actionIntent, 'safety_sensitive')
+assert.equal(workflowFinalSubmit.policyCode, 'policy.high_risk.gate')
 
 const ordinaryClick = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -73,7 +74,7 @@ const ordinaryClick = decideToolPolicy({
 })
 assert.equal(ordinaryClick.action, 'allow')
 assert.equal(ordinaryClick.riskLevel, 'low')
-assert.equal(ordinaryClick.actionIntent, 'observe')
+assert.equal(ordinaryClick.actionIntent, 'state_change')
 assert.equal(ordinaryClick.gateKind, undefined)
 assert.equal(ordinaryClick.requiresFreshContext, undefined)
 
@@ -84,7 +85,7 @@ const rawSubmit = decideToolPolicy({
   safetyMode: 'raw',
 })
 assert.equal(rawSubmit.action, 'gate')
-assert.equal(rawSubmit.actionIntent, 'final_submit')
+assert.equal(rawSubmit.actionIntent, 'safety_sensitive')
 assert.equal(rawSubmit.gateKind, 'final_submit')
 assert.equal(rawSubmit.requiresFreshContext, true)
 assert.equal(rawSubmit.policyCode, 'policy.high_risk.gate')
@@ -95,12 +96,12 @@ const rawHighRiskClick = decideToolPolicy({
   refLabel: 'Apply now',
   risk: 'L4',
   safetyMode: 'raw',
-  workflowPhase: 'job_detail',
+  workflowPhase: 'in_target_flow',
 })
 assert.equal(rawHighRiskClick.action, 'gate')
 assert.equal(rawHighRiskClick.riskLevel, 'critical')
-assert.equal(rawHighRiskClick.actionIntent, 'apply_entry')
-assert.equal(rawHighRiskClick.policyCode, 'policy.workflow.apply_entry')
+assert.equal(rawHighRiskClick.actionIntent, 'unknown_high_risk')
+assert.equal(rawHighRiskClick.policyCode, 'policy.high_risk.gate')
 
 const staleSubmit = decideToolPolicy({
   toolName: 'browser_click_text',
@@ -116,7 +117,7 @@ const staleSubmit = decideToolPolicy({
   },
 })
 assert.equal(staleSubmit.action, 'block')
-assert.equal(staleSubmit.actionIntent, 'final_submit')
+assert.equal(staleSubmit.actionIntent, 'safety_sensitive')
 assert.equal(staleSubmit.gateKind, 'final_submit')
 assert.equal(staleSubmit.requiresFreshContext, true)
 assert.match(staleSubmit.reason, /stale/i)
@@ -129,7 +130,7 @@ assert.equal(
     args: { ref: 'e1' },
     currentUrl: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh',
     refLabel: '立即投递',
-    workflowPhase: 'direct_submit_review',
+    workflowPhase: 'final_submit_boundary',
   }),
   'high_risk_action',
 )
@@ -150,9 +151,9 @@ assert.equal(
     currentUrl: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh',
     refLabel: '投递',
     contextText: '温馨提示：你暂未申请职位，本月能申请5个职位，请慎重选择！ 取消 投递',
-    workflowPhase: 'direct_submit_review',
+    workflowPhase: 'final_submit_boundary',
   }),
-  'application_confirm',
+  'safety_sensitive',
 )
 assert.equal(
   inferActionIntent({
@@ -161,27 +162,27 @@ assert.equal(
     currentUrl: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh',
     refLabel: '投递',
     contextText: '职位详情 投递简历 取消 投递',
-    workflowPhase: 'direct_submit_review',
+    workflowPhase: 'final_submit_boundary',
   }),
-  'application_confirm',
+  'state_change',
 )
 assert.equal(
   inferActionIntent({
     toolName: 'browser_click_text',
     args: { text: '投递简历' },
     currentUrl: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh',
-    workflowPhase: 'direct_submit_review',
+    workflowPhase: 'final_submit_boundary',
   }),
-  'apply_entry',
+  'state_change',
 )
 assert.equal(
   inferActionIntent({
     toolName: 'browser_click_text',
     args: { text: '完成投递' },
     currentUrl: 'https://talent-holding.alibaba.com/off-campus/position-detail?lang=zh',
-    workflowPhase: 'reviewing',
+    workflowPhase: 'in_target_flow',
   }),
-  'final_submit',
+  'safety_sensitive',
 )
 assert.equal(
   inferActionIntent({
@@ -189,7 +190,7 @@ assert.equal(
     args: { filePath: '/tmp/resume.pdf', text: '投递简历' },
     risk: 'L4',
   }),
-  'unknown_high_risk',
+  'safety_sensitive',
 )
 assert.equal(
   inferActionIntent({
@@ -197,7 +198,7 @@ assert.equal(
     args: { filePath: '/tmp/resume.pdf', text: '上传简历' },
     risk: 'L4',
   }),
-  'upload_resume',
+  'safety_sensitive',
 )
 
 assert.equal(policyRiskLevel('L4'), 'critical')

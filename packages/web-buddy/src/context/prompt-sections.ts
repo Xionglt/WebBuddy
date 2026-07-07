@@ -44,7 +44,7 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   CURRENT_FORM_STATE: 2800,
   FILL_PLAN: 1800,
   RECENT_ACTIONS: 1800,
-  NEXT_ACTION_RULES: 1200,
+  NEXT_ACTION_RULES: 1600,
 }
 
 const SECTION_TITLES: Record<PromptSectionId, string> = {
@@ -132,6 +132,7 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
         'Read the current context and choose exactly one next tool call.',
         'Use browser_snapshot when page refs may be stale or missing.',
         'Use browser_form_snapshot when labels, required fields, selected options, upload hints, or submit candidates are unclear.',
+        'If TASK_STATE/WORKFLOW_STATE says currentResumeUploaded=false or current resume has not been uploaded, prioritize profile/resume/application upload controls (个人中心, 我的简历, 简历管理, 上传, 重新上传, 附件简历, resume, CV, upload), inspect with browser_form_snapshot, then use browser_upload_file with the current task resume path; after upload, save required changes and continue past application-entry buttons such as 投递简历/立即投递/Apply until a true final-submit boundary.',
         'If FILL_PLAN is missing or stale on a fillable form, call plan_form_fill before setting fields.',
         'When FILL_PLAN has a fillable intendedValue, write it into the matching field first; prefer browser_set_field when available, otherwise use browser_fill_by_label, browser_type, browser_select, or browser_select_by_text as appropriate.',
         'If a field lacks resume details beyond RESUME_SUMMARY, call resume_query for the relevant full resume section before leaving it blank.',

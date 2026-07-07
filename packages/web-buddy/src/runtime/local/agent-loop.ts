@@ -182,6 +182,11 @@ export interface AgentLoopCompletionGate {
 
 const DEFAULT_MAX_STEPS = 16
 const DEFAULT_KEEP_RECENT_MESSAGES = 6
+export const RAW_MODE_EXCLUDED_TOOLS = [
+  'job_match_candidates',
+  'plan_form_fill',
+  'browser_set_field',
+] as const
 
 /**
  * The generic ReAct-style loop: the LLM picks browser tools itself, we execute
@@ -215,7 +220,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const emit = (level: AgentEvent['level'], message: string, step: number) =>
     onEvent?.({ step, level, message })
 
-  const tools = registry.toOpenAITools()
+  const tools = toolsForSafetyMode(registry, safetyMode)
   const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
   const permissionMode = input.permissionMode ?? 'safe'
   const permissionEngine = input.permissionEngine ?? new PermissionEngine({
@@ -845,7 +850,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       if (!refreshedSummary) return { resumed: true, summary }
 
       const refreshedKind = workflowHandoffKind(workflowState)
-      if (!refreshedKind) return { resumed: false, summary: refreshedSummary }
+      if (!refreshedKind) return { resumed: true, summary: refreshedSummary }
       summary = refreshedSummary
       handoffKind = refreshedKind
       emit('gate', `${summary} Finish it in the browser, then approve again; choose decline/takeover to stop.`, currentStep)
@@ -1088,11 +1093,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         args: call.arguments,
         risk,
         safetyMode,
-        currentUrl,
         refLabel,
         contextText,
         freshness: latestContext.freshness,
-        workflowState,
       })
       const policyAudit = createPolicyAuditEvent({
         sessionId: ctx.sessionId,
@@ -1750,6 +1753,11 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   return { steps: step, toolCalls, done, blocked, summary, workflowState }
 }
 
+export function toolsForSafetyMode(registry: ToolRegistry, safetyMode: 'guarded' | 'raw'): ReturnType<ToolRegistry['toOpenAITools']> {
+  if (safetyMode === 'raw') return registry.toOpenAITools({ exclude: RAW_MODE_EXCLUDED_TOOLS })
+  return registry.toOpenAITools()
+}
+
 function turnIdForStep(step: number): string {
   return `turn_${String(step).padStart(3, '0')}`
 }
@@ -1851,7 +1859,7 @@ function isFinalSubmitBoundaryActive(
   workflowState: WorkflowState,
   evaluation: WorkflowEngineEvaluation | undefined,
 ): boolean {
-  if (workflowState.phase === 'direct_submit_review' || workflowState.phase === 'ready_for_final_submit') return true
+  if (workflowState.phase === 'final_submit_boundary') return true
   if (/final[-_\s]?submit|final submission|manual takeover/i.test(workflowState.blocker ?? '')) return true
   return evaluation?.blockers.some((blocker) => (
     blocker.gateKind === 'final_submit' ||
@@ -1867,7 +1875,6 @@ function isFieldPlan(value: unknown): value is FieldPlan {
   const plan = objectValue(value)
   return plan.schemaVersion === 'field-plan/v1' && Array.isArray(plan.planned)
 }
-
 
 function updateFillLedgerAfterTool(
   ledger: FillLedger,
@@ -1954,6 +1961,7 @@ function buildLoopContextWithWorkflow(
       resume: input.resume,
       ctx: input.ctx,
       extraContext: input.extraContext,
+      taskState: taskStateForLoop(input, workflowState),
       safetyMode: input.safetyMode,
       workflowState,
       runMemory: compactRunMemory(runMemory),
@@ -1964,6 +1972,37 @@ function buildLoopContextWithWorkflow(
     recentActions,
     blockersWithWorkflow(blockers, workflowState),
   )
+}
+
+function taskStateForLoop(input: AgentLoopInput, workflowState: WorkflowState) {
+  const criteria: string[] = []
+  const blockers: string[] = []
+  if (input.requiresCurrentResumeUpload) {
+    criteria.push('The current local resume file must be uploaded or re-uploaded to the site before the application draft can be considered ready.')
+    criteria.push('After resume upload, refresh page/form state, save required resume/profile changes, then continue to the job application flow.')
+    criteria.push('Do not treat an existing on-site resume as sufficient unless it is verified to be the current task resume or the human explicitly says to reuse it.')
+    criteria.push('Application-entry buttons such as 投递简历/立即投递/Apply may open the application flow; they are not completion by themselves.')
+    if (workflowState.currentResumeUploaded !== true) {
+      blockers.push('Current task resume has not been verified as uploaded yet; first explore profile/resume/application areas for upload or re-upload controls.')
+    }
+  }
+  criteria.push('Stop before true final submission controls such as 确认投递/提交申请/final submit, unless the human explicitly approves that final submit action.')
+  return {
+    schemaVersion: 'task-state/v1' as const,
+    goal: input.goal,
+    phase: workflowState.phase === 'done'
+      ? 'done' as const
+      : workflowState.phase === 'blocked' || workflowState.phase === 'external_blocker' || workflowState.phase === 'final_submit_boundary'
+        ? 'blocked' as const
+        : workflowState.currentResumeUploaded === true
+          ? 'reviewing' as const
+          : input.requiresCurrentResumeUpload
+            ? 'filling' as const
+            : 'observing' as const,
+    knownBlockers: blockers,
+    completionCriteria: criteria,
+    updatedAt: workflowState.updatedAt,
+  }
 }
 
 function summarizeAnswerStore(answerStore: ToolContext['answerStore']): string | undefined {
@@ -1992,17 +2031,16 @@ function blockersWithWorkflow(blockers: string[], workflowState: WorkflowState):
 }
 
 function workflowHandoffSummary(workflowState: WorkflowState): string | undefined {
-  if (workflowState.phase === 'login_required') return 'Human login required before continuing.'
-  if (workflowState.phase === 'captcha_required') return 'Human verification required before continuing.'
-  if (workflowState.phase === 'direct_submit_review') {
-    return 'Direct-submit review: this site uses an online resume/direct-submit mode, no fillable fields were found, and the next step is final submit. Stopping before final_submit for human review.'
-  }
+  if (workflowState.phase === 'external_blocker') return workflowState.blocker ?? 'External blocker requires human action before continuing.'
+  if (workflowState.phase === 'final_submit_boundary') return workflowState.blocker ?? 'Final submit requires human takeover before completion.'
   return undefined
 }
 
 function workflowHandoffKind(workflowState: WorkflowState): Extract<GateKind, 'login' | 'captcha'> | undefined {
-  if (workflowState.phase === 'login_required') return 'login'
-  if (workflowState.phase === 'captcha_required') return 'captcha'
+  if (workflowState.phase !== 'external_blocker') return undefined
+  const text = `${workflowState.blocker ?? ''} ${workflowState.reason}`
+  if (/captcha|verification|验证码|人机验证/i.test(text)) return 'captcha'
+  if (/login|sign in|sso|登录|登陆/i.test(text)) return 'login'
   return undefined
 }
 
@@ -2069,7 +2107,6 @@ function policyMetadata(decision: PolicyEngineDecision): Record<string, unknown>
     requiresFreshContext: decision.requiresFreshContext,
     policyCode: decision.policyCode,
     ruleId: decision.ruleId,
-    workflowPhase: decision.workflowPhase,
     auditTags: decision.auditTags,
   }
 }
@@ -2088,6 +2125,7 @@ function permissionRequestMetadata(request: PermissionRequest): Record<string, u
     riskLevel: request.riskLevel,
     currentUrl: request.currentUrl,
     workflowPhase: request.workflowPhase,
+    observationPhase: request.observationPhase,
     gateKind: request.gateKind,
     policy: { ...request.policy, auditTags: [...request.policy.auditTags] },
     context: request.context
@@ -2194,6 +2232,7 @@ function approvalInputFor(request: PermissionRequest, decision: PermissionDecisi
       policyCode: request.policy.policyCode,
       ruleId: decision.ruleId,
       ...(request.workflowPhase ? { workflowPhase: request.workflowPhase } : {}),
+      ...(request.observationPhase ? { observationPhase: request.observationPhase } : {}),
       permissionReason: decision.reason,
     },
     metadata: {

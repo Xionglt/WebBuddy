@@ -215,7 +215,7 @@ try {
   const taskState = {
     schemaVersion: 'task-state/v1',
     goal: taskGoal,
-    phase: 'reviewing',
+    phase: 'in_target_flow',
     knownBlockers: [
       'Captcha-like human verification remains visible.',
       'Resume upload and work authorization are intentionally unresolved.',
@@ -278,7 +278,7 @@ try {
     freshness: contextSnapshot.freshness,
     taskState: contextSnapshot.taskState,
     renderedChars: renderedContext.length,
-    includesTaskState: renderedContext.includes('## TASK_STATE') && renderedContext.includes('phase: reviewing'),
+    includesTaskState: renderedContext.includes('## TASK_STATE') && renderedContext.includes('phase: in_target_flow'),
     includesFreshness: renderedContext.includes('freshness: ageMs='),
     includesBlocker: renderedContext.includes('captcha-like verification blocker'),
   }
@@ -397,7 +397,7 @@ function validateBenchmarkReport(value) {
 
   assert.equal(value.context?.snapshotSchemaVersion, 'context-snapshot/v1', 'ContextSnapshot should be built')
   assert.equal(value.context?.taskState?.schemaVersion, 'task-state/v1', 'TaskState should be present in context')
-  assert.equal(value.context?.taskState?.phase, 'reviewing', 'TaskState phase should be benchmark-controlled')
+  assert.equal(value.context?.taskState?.phase, 'in_target_flow', 'TaskState phase should be benchmark-controlled')
   assert.equal(value.context?.freshness?.staleAfterMs, 30_000, 'Freshness stale threshold should be recorded')
   assert.equal(typeof value.context?.freshness?.pageStateAgeMs, 'number', 'PageState freshness age should be available')
   assert.equal(typeof value.context?.freshness?.formStateAgeMs, 'number', 'FormState freshness age should be available')
