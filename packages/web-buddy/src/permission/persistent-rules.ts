@@ -7,7 +7,7 @@ export interface PersistentPermissionRule {
   schemaVersion: 'persistent-permission-rule/v1'
   id: string
   action: Extract<PermissionDecision['action'], 'allow' | 'deny'>
-  scope: 'always'
+  scope: 'session' | 'always'
   gateKind?: string
   toolName?: string
   policyCode?: string
@@ -51,6 +51,37 @@ export async function savePersistentPermissionRules(
   await writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
 }
 
+export async function appendPersistentPermissionRule(
+  filePath: string,
+  rule: PersistentPermissionRule,
+  updatedAt = new Date().toISOString(),
+): Promise<PersistentPermissionRule[]> {
+  const rules = await loadPersistentPermissionRules(filePath)
+  const next = upsertPersistentPermissionRule(rules, rule, updatedAt)
+  await savePersistentPermissionRules(filePath, next, updatedAt)
+  return next
+}
+
+export function upsertPersistentPermissionRule(
+  rules: PersistentPermissionRule[],
+  rule: PersistentPermissionRule,
+  updatedAt = new Date().toISOString(),
+): PersistentPermissionRule[] {
+  const next = rules.map(clonePersistentPermissionRule)
+  const index = next.findIndex((item) =>
+    item.action === rule.action &&
+    item.scope === rule.scope &&
+    item.gateKind === rule.gateKind &&
+    item.toolName === rule.toolName &&
+    item.policyCode === rule.policyCode &&
+    item.origin === rule.origin
+  )
+  const value = { ...rule, updatedAt, createdAt: index >= 0 ? next[index]!.createdAt : rule.createdAt }
+  if (index >= 0) next[index] = value
+  else next.push(value)
+  return next
+}
+
 export function persistentPermissionRuleSet(rules: PersistentPermissionRule[]): PermissionRule {
   const rememberedRules = rules.map(clonePersistentPermissionRule)
   return {
@@ -67,10 +98,12 @@ export function persistentPermissionRuleFromDecision(input: {
   id: string
   decision: PermissionDecision
   request: PermissionRequest
+  rememberScope?: 'session' | 'always'
   now?: string
 }): PersistentPermissionRule | undefined {
   if (input.decision.action !== 'allow' && input.decision.action !== 'deny') return undefined
   const gateKind = input.decision.gateKind ?? input.request.gateKind
+  if (isHardGate(gateKind)) return undefined
   if (gateKind && gateKind !== 'high_risk_action') return undefined
   if (input.request.subject.kind !== 'tool_call') return undefined
   const now = input.now ?? new Date().toISOString()
@@ -78,7 +111,7 @@ export function persistentPermissionRuleFromDecision(input: {
     schemaVersion: 'persistent-permission-rule/v1',
     id: input.id,
     action: input.decision.action,
-    scope: 'always',
+    scope: input.rememberScope ?? 'always',
     ...(gateKind ? { gateKind } : {}),
     toolName: input.request.subject.toolName,
     policyCode: input.request.policy.policyCode,
@@ -90,6 +123,7 @@ export function persistentPermissionRuleFromDecision(input: {
 }
 
 function matchesPersistentRule(rule: PersistentPermissionRule, request: PermissionRequest): boolean {
+  if (isHardGate(request.gateKind)) return false
   if (rule.gateKind && rule.gateKind !== request.gateKind) return false
   if (rule.toolName && (request.subject.kind !== 'tool_call' || rule.toolName !== request.subject.toolName)) return false
   if (rule.policyCode && rule.policyCode !== request.policy.policyCode) return false
@@ -141,7 +175,7 @@ function isPersistentPermissionRule(value: unknown): value is PersistentPermissi
   return value.schemaVersion === 'persistent-permission-rule/v1' &&
     typeof value.id === 'string' &&
     (value.action === 'allow' || value.action === 'deny') &&
-    value.scope === 'always' &&
+    (value.scope === 'session' || value.scope === 'always') &&
     typeof value.reason === 'string' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
@@ -158,6 +192,14 @@ function originFor(url: string | undefined): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function isHardGate(gateKind: string | undefined): boolean {
+  return gateKind === 'final_submit' ||
+    gateKind === 'login' ||
+    gateKind === 'captcha' ||
+    gateKind === 'upload_resume' ||
+    gateKind === 'save_resume'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

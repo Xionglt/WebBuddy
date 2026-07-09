@@ -13,6 +13,7 @@ export interface PolicyDecision {
   action: PolicyAction
   riskLevel: PolicyRiskLevel
   reason: string
+  policyCode?: string
   actionIntent?: ActionIntent
   gateKind?: GateKind
   requiresFreshContext?: boolean

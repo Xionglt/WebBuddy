@@ -4,9 +4,11 @@ export { PermissionEngine, permissionEngine } from './permission-engine.js'
 export type { PermissionEngineOptions } from './permission-engine.js'
 export {
   loadPersistentPermissionRules,
+  appendPersistentPermissionRule,
   persistentPermissionRuleFromDecision,
   persistentPermissionRuleSet,
   savePersistentPermissionRules,
+  upsertPersistentPermissionRule,
 } from './persistent-rules.js'
 export type { PersistentPermissionRule, PersistentPermissionRulesFile } from './persistent-rules.js'
 export { defaultPermissionRules } from './permission-rules.js'
