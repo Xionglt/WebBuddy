@@ -8,7 +8,8 @@ import type {
 import { createTranscriptEntryId } from './transcript.js'
 
 type EventInput = Omit<KernelEvent, 'version' | 'sessionId' | 'runId' | 'ts'>
-type TranscriptInput = Omit<TranscriptEntry, 'version' | 'sessionId' | 'runId' | 'entryId' | 'ts'>
+type TranscriptInput = DistributiveOmit<TranscriptEntry, 'version' | 'sessionId' | 'runId' | 'entryId' | 'ts'>
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, Extract<keyof T, K>> : never
 
 export interface SessionRecorder {
   readonly session: AgentSession

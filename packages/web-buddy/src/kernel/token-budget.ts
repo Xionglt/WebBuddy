@@ -3,6 +3,7 @@ import type { ChatMessage } from '../sdk/llm.js'
 export interface TokenBudgetSnapshot {
   version: 1
   maxInputTokens: number
+  modelName?: string
   compactThresholdRatio?: number
   compactThresholdTokens: number
   estimatedInputTokens?: number
@@ -10,10 +11,13 @@ export interface TokenBudgetSnapshot {
   estimatedTotalTokens?: number
   compactRecommended: boolean
   usingDefaultMaxInputTokens?: boolean
+  warnings?: string[]
 }
 
 export interface TokenBudgetOptions {
   maxInputTokens?: number
+  modelName?: string
+  modelMaxInputTokens?: number
   compactThresholdRatio?: number
 }
 
@@ -24,9 +28,15 @@ export interface TokenBudgetEstimate {
 }
 
 const DEFAULT_COMPACT_THRESHOLD_RATIO = 0.8
-export const DEFAULT_MAX_INPUT_TOKENS = 120_000
+export const DEFAULT_MAX_INPUT_TOKENS = 32_000
 const MESSAGE_OVERHEAD_TOKENS = 4
 const TOOL_CALL_OVERHEAD_TOKENS = 8
+const MODEL_MAX_INPUT_TOKENS: Array<{ pattern: RegExp; maxInputTokens: number }> = [
+  { pattern: /gpt-5|gpt-4\.1|gpt-4o|o3|o4/i, maxInputTokens: 120_000 },
+  { pattern: /claude-3\.7|claude-sonnet-4|claude-opus-4|claude-4/i, maxInputTokens: 180_000 },
+  { pattern: /glm-4\.7|glm-4\.5|qwen3|qwen-?max|deepseek/i, maxInputTokens: 120_000 },
+  { pattern: /llama|mistral|mixtral/i, maxInputTokens: 32_000 },
+]
 
 export class TokenBudget {
   private estimatedInputTokens = 0
@@ -118,20 +128,80 @@ function estimateChatMessageTokens(message: ChatMessage): number {
 
 function createSnapshot(estimate: TokenBudgetEstimate, options: TokenBudgetOptions): TokenBudgetSnapshot {
   const compactThresholdRatio = normalizeCompactThresholdRatio(options.compactThresholdRatio)
-  const usingDefaultMaxInputTokens = options.maxInputTokens === undefined
-  const max = options.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS
+  const resolved = resolveMaxInputTokens(options)
+  const max = resolved.maxInputTokens
   const compactThresholdTokens = Math.ceil(max * compactThresholdRatio)
   return {
     version: 1,
     maxInputTokens: max,
+    ...(resolved.modelName ? { modelName: resolved.modelName } : {}),
     compactThresholdRatio,
     compactThresholdTokens,
     estimatedInputTokens: estimate.inputTokens,
     estimatedToolResultTokens: estimate.toolResultTokens,
     estimatedTotalTokens: estimate.totalTokens,
     compactRecommended: estimate.totalTokens >= compactThresholdTokens,
-    ...(usingDefaultMaxInputTokens ? { usingDefaultMaxInputTokens: true } : {}),
+    ...(resolved.usingDefaultMaxInputTokens ? { usingDefaultMaxInputTokens: true } : {}),
+    ...(resolved.warnings.length ? { warnings: resolved.warnings } : {}),
   }
+}
+
+function resolveMaxInputTokens(options: TokenBudgetOptions): {
+  maxInputTokens: number
+  modelName?: string
+  usingDefaultMaxInputTokens: boolean
+  warnings: string[]
+} {
+  if (isPositiveFinite(options.maxInputTokens)) {
+    return {
+      maxInputTokens: Math.floor(options.maxInputTokens),
+      ...(options.modelName ? { modelName: options.modelName } : {}),
+      usingDefaultMaxInputTokens: false,
+      warnings: [],
+    }
+  }
+
+  if (isPositiveFinite(options.modelMaxInputTokens)) {
+    return {
+      maxInputTokens: Math.floor(options.modelMaxInputTokens),
+      ...(options.modelName ? { modelName: options.modelName } : {}),
+      usingDefaultMaxInputTokens: false,
+      warnings: [],
+    }
+  }
+
+  const modelName = options.modelName?.trim()
+  if (modelName) {
+    const known = MODEL_MAX_INPUT_TOKENS.find((entry) => entry.pattern.test(modelName))
+    if (known) {
+      return {
+        maxInputTokens: known.maxInputTokens,
+        modelName,
+        usingDefaultMaxInputTokens: false,
+        warnings: [],
+      }
+    }
+    return {
+      maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
+      modelName,
+      usingDefaultMaxInputTokens: true,
+      warnings: [
+        `Unknown model context window for "${modelName}"; using conservative default ${DEFAULT_MAX_INPUT_TOKENS} input tokens.`,
+      ],
+    }
+  }
+
+  return {
+    maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
+    usingDefaultMaxInputTokens: true,
+    warnings: [
+      `No model context window configured; using conservative default ${DEFAULT_MAX_INPUT_TOKENS} input tokens.`,
+    ],
+  }
+}
+
+function isPositiveFinite(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value > 0
 }
 
 function normalizeCompactThresholdRatio(value: number | undefined): number {

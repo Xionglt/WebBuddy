@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileSessionRecorder, FileSessionStore, restoreSessionState } from '../dist/session/index.js'
+import { appendJsonLine, FileSessionRecorder, FileSessionStore, restoreSessionState } from '../dist/session/index.js'
 
 const root = mkdtempSync(join(tmpdir(), 'mfa-session-restore-'))
 
@@ -191,6 +191,15 @@ try {
     status: 'blocked',
     reason: 'Latest final result is blocked pending user confirmation.',
   })
+  await appendJsonLine(session.transcriptPath, {
+    version: 99,
+    sessionId: session.sessionId,
+    runId: session.runId,
+    entryId: 'unknown-version-memory',
+    ts: '2026-06-30T00:00:08.000Z',
+    type: 'memory_snapshot',
+    memory: { note: 'Unknown schema version should warn but not be silently dropped.' },
+  })
 
   const restored = await restoreSessionState({
     store,
@@ -201,8 +210,11 @@ try {
   assert.equal(restored.schemaVersion, 'restored-session-state/v1')
   assert.equal(restored.session.sessionId, session.sessionId)
   assert.equal(restored.session.status, 'blocked')
-  assert.equal(restored.transcriptCount, 14)
+  assert.equal(restored.transcriptCount, 15)
   assert.equal(restored.restoredAt, '2026-06-30T00:01:00.000Z')
+  assert.equal(restored.migrationWarnings.length, 1)
+  assert.equal(restored.migrationWarnings[0].code, 'unknown_transcript_entry_version')
+  assert.equal(restored.migrationWarnings[0].entryId, 'unknown-version-memory')
   assert.equal(restored.latestWorkflowState?.phase, 'done')
   assert.equal(restored.latestWorkflowState?.observationPhase, 'done')
   assert.equal(restored.latestWorkflowEvaluation?.state.observationPhase, 'done')

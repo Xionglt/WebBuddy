@@ -33,6 +33,14 @@ export type { RestoreSessionStateInput, RestoredSessionState } from './session-r
 export { confirmSessionCompletion } from './session-completion.js'
 export type { ConfirmSessionCompletionInput, ConfirmSessionCompletionResult } from './session-completion.js'
 export { appendJsonLine, compactAssistantContent, compactToolResult, createTranscriptEntryId, readJsonLines } from './transcript.js'
-export { migrateAgentSession, migrateTranscriptEntry, migrateTranscriptEntries } from './migrations.js'
+export {
+  migrateAgentSession,
+  migrateAgentSessionWithWarnings,
+  migrateTranscriptEntry,
+  migrateTranscriptEntryWithWarnings,
+  migrateTranscriptEntries,
+  migrateTranscriptEntriesWithWarnings,
+} from './migrations.js'
+export type { MigrationResult, MigrationWarning } from './migrations.js'
 export { createUserConfirmation } from '../workflow/user-confirmation.js'
 export type { UserConfirmation, UserConfirmationInput } from '../workflow/user-confirmation.js'

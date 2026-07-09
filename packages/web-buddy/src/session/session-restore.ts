@@ -9,7 +9,7 @@ import type { WorkflowEvidence } from '../workflow/workflow-evidence.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import type { AgentSession, FinalResultEntry, SessionStore, TranscriptEntry } from './session-types.js'
 import { readJsonLines } from './transcript.js'
-import { migrateTranscriptEntries } from './migrations.js'
+import { migrateTranscriptEntriesWithWarnings, type MigrationWarning } from './migrations.js'
 
 export interface RestoredSessionState {
   schemaVersion: 'restored-session-state/v1'
@@ -22,6 +22,7 @@ export interface RestoredSessionState {
   latestCompletionGate?: CompletionGateDecision
   latestFinalResult?: FinalResultEntry
   restoredMessages: ChatMessage[]
+  migrationWarnings: MigrationWarning[]
   missingCriteria: WorkflowCriterionMissing[]
   blockers: WorkflowBlocker[]
 }
@@ -40,7 +41,8 @@ export type RestoreSessionStateInput =
 
 export async function restoreSessionState(input: RestoreSessionStateInput): Promise<RestoredSessionState> {
   const session = await resolveSession(input)
-  const transcript = migrateTranscriptEntries(await readJsonLines<unknown>(session.transcriptPath))
+  const migratedTranscript = migrateTranscriptEntriesWithWarnings(await readJsonLines<unknown>(session.transcriptPath))
+  const transcript = migratedTranscript.value
 
   let latestWorkflowState: WorkflowState | undefined
   let latestWorkflowEvaluation: WorkflowEngineEvaluation | undefined
@@ -94,6 +96,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
     ...(latestCompletionGate ? { latestCompletionGate } : {}),
     ...(latestFinalResult ? { latestFinalResult } : {}),
     restoredMessages,
+    migrationWarnings: migratedTranscript.warnings,
     missingCriteria:
       arrayProperty<WorkflowCriterionMissing>(latestWorkflowEvaluation, 'missingCriteria') ??
       arrayProperty<WorkflowCriterionMissing>(latestCompletionGate, 'missingCriteria') ??
@@ -151,6 +154,8 @@ function compactedRestoreMessages(entry: Extract<TranscriptEntry, { type: 'conte
         schemaVersion: 'restored-compacted-run-context/v1',
         summaryId: entry.summaryId,
         reason: entry.reason,
+        ...(entry.mode ? { mode: entry.mode } : {}),
+        ...(entry.semanticError ? { semanticError: entry.semanticError } : {}),
         summary: entry.summary,
       }),
     },
@@ -210,7 +215,7 @@ function workflowStateFromUnknown(value: unknown): WorkflowState | undefined {
   if (!isRecord(value)) return undefined
   if (value.schemaVersion !== 'workflow-state/v1') return undefined
   if (typeof value.phase !== 'string') return undefined
-  return { ...value } as WorkflowState
+  return { ...value } as unknown as WorkflowState
 }
 
 function workflowEvaluationFromUnknown(value: unknown): WorkflowEngineEvaluation | undefined {

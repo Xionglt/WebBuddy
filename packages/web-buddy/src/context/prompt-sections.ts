@@ -6,6 +6,7 @@ import type { WorkflowState } from '../workflow/workflow-state.js'
 import { normalizeLines, oneLine, truncateText } from './budget.js'
 import { renderRunMemory } from './run-memory.js'
 import type { ContextFreshness, ContextRecentAction, ContextSnapshot, PromptSection, PromptSectionId } from './types.js'
+import { renderSkillPromptSection } from '../skills/renderer.js'
 
 export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'SYSTEM_ROLE',
@@ -14,6 +15,7 @@ export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'TASK_STATE',
   'WORKFLOW_STATE',
   'RUN_MEMORY',
+  'RELEVANT_MEMORIES',
   'RESUME_SUMMARY',
   'CURRENT_PAGE_STATE',
   'CURRENT_FORM_STATE',
@@ -39,12 +41,13 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   TASK_STATE: 900,
   WORKFLOW_STATE: 900,
   RUN_MEMORY: 1400,
+  RELEVANT_MEMORIES: 900,
   RESUME_SUMMARY: 2200,
   CURRENT_PAGE_STATE: 1800,
   CURRENT_FORM_STATE: 2800,
   FILL_PLAN: 1800,
   RECENT_ACTIONS: 1800,
-  NEXT_ACTION_RULES: 1600,
+  NEXT_ACTION_RULES: 1900,
 }
 
 const SECTION_TITLES: Record<PromptSectionId, string> = {
@@ -54,6 +57,7 @@ const SECTION_TITLES: Record<PromptSectionId, string> = {
   TASK_STATE: 'TASK_STATE',
   WORKFLOW_STATE: 'WORKFLOW_STATE',
   RUN_MEMORY: 'RUN_MEMORY',
+  RELEVANT_MEMORIES: 'RELEVANT_MEMORIES',
   RESUME_SUMMARY: 'RESUME_SUMMARY',
   CURRENT_PAGE_STATE: 'CURRENT_PAGE_STATE',
   CURRENT_FORM_STATE: 'CURRENT_FORM_STATE',
@@ -117,6 +121,8 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
       return renderWorkflowState(snapshot.workflowState)
     case 'RUN_MEMORY':
       return renderRunMemory(snapshot.runMemory)
+    case 'RELEVANT_MEMORIES':
+      return snapshot.relevantMemories || '(no relevant long-term memories selected for this turn)'
     case 'RESUME_SUMMARY':
       return snapshot.resumeSummary || '(no resume summary provided)'
     case 'CURRENT_PAGE_STATE':
@@ -130,16 +136,7 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
     case 'NEXT_ACTION_RULES':
       return [
         'Read the current context and choose exactly one next tool call.',
-        'Use browser_snapshot when page refs may be stale or missing.',
-        'Use browser_form_snapshot when labels, required fields, selected options, upload hints, or submit candidates are unclear.',
-        'If TASK_STATE/WORKFLOW_STATE says currentResumeUploaded=false or current resume has not been uploaded, prioritize profile/resume/application upload controls (个人中心, 我的简历, 简历管理, 上传, 重新上传, 附件简历, resume, CV, upload), inspect with browser_form_snapshot, then use browser_upload_file with the current task resume path; after upload, save required changes and continue past application-entry buttons such as 投递简历/立即投递/Apply until a true final-submit boundary.',
-        'If FILL_PLAN is missing or stale on a fillable form, call plan_form_fill before setting fields.',
-        'When FILL_PLAN has a fillable intendedValue, write it into the matching field first; prefer browser_set_field when available, otherwise use browser_fill_by_label, browser_type, browser_select, or browser_select_by_text as appropriate.',
-        'If a field lacks resume details beyond RESUME_SUMMARY, call resume_query for the relevant full resume section before leaving it blank.',
-        'If a field needs information that is not in the resume and cannot be inferred from the page, call ask_user with the planned question before filling it.',
-        'Use RUN_MEMORY to avoid repeating empty searches and to preserve promising or excluded job candidates across turns.',
-        'Do not call agent_done while FillLedger shows pendingRequired fields unless you are blocked and explain exactly which required fields remain.',
-        'Follow SAFETY_RULES before any click, submit-like action, credential flow, captcha, payment, or identity-proof step.',
+        ...renderSkillPromptSection(snapshot.resolvedSkillContext, 'NEXT_ACTION_RULES'),
         'Call agent_done when the task is complete or blocked.',
       ].join('\n')
   }
@@ -252,7 +249,7 @@ function renderWorkflowState(workflowState: WorkflowState | undefined): string {
       ? `lastTransition: ${workflowState.lastTransition.from} -> ${workflowState.lastTransition.to} at ${workflowState.lastTransition.at}; reason=${workflowState.lastTransition.reason}`
       : undefined,
     workflowState.formCoverage
-      ? `formCoverage: scrolledBottom=${workflowState.formCoverage.scrolledBottom}, segments=${workflowState.formCoverage.segments}, totalFieldsSeen=${workflowState.formCoverage.totalFieldsSeen}, updatedAt=${workflowState.formCoverage.updatedAt}`
+      ? `formCoverage: scope=${workflowState.formCoverage.scope ?? '(unknown)'}, complete=${workflowState.formCoverage.complete === true}, scrolledBottom=${workflowState.formCoverage.scrolledBottom}, segments=${workflowState.formCoverage.segments}, totalFieldsSeen=${workflowState.formCoverage.totalFieldsSeen}, updatedAt=${workflowState.formCoverage.updatedAt}`
       : undefined,
     workflowState.fillLedgerSummary
       ? `fillLedgerSummary: pendingRequired=${workflowState.fillLedgerSummary.pendingRequired}, verified=${workflowState.fillLedgerSummary.verified}, failed=${workflowState.fillLedgerSummary.failed}, needsUser=${workflowState.fillLedgerSummary.needsUser}, skipped=${workflowState.fillLedgerSummary.skipped}, total=${workflowState.fillLedgerSummary.total}`
@@ -292,6 +289,8 @@ function renderFormState(form: FormState | undefined, freshness: ContextFreshnes
 
   return normalizeLines([
     `schemaVersion: ${form.schemaVersion}`,
+    `formCoverage: scope=${form.coverageScope ?? form.formCoverage?.scope ?? '(unknown)'}, complete=${form.completeCoverage === true}, scrolledBottom=${form.formCoverage?.scrolledBottom ?? '(unknown)'}, segments=${form.formCoverage?.segments ?? '(unknown)'}, totalFieldsSeen=${form.formCoverage?.totalFieldsSeen ?? '(unknown)'}`,
+    `missingRequiredMayBeIncomplete: ${form.missingRequiredMayBeIncomplete === true}`,
     `missingRequiredCount: ${form.missingRequired.length}`,
     'missingRequired:',
     renderFieldList(form.missingRequired),

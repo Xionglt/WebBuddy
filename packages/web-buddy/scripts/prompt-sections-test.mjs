@@ -127,9 +127,9 @@ const sections = buildPromptSections(snapshot, {
 
 assert.deepEqual(sections.map((section) => section.id), PROMPT_SECTION_ORDER, 'prompt section order must be stable')
 assert.deepEqual(
-  PROMPT_SECTION_ORDER.slice(0, 7),
-  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'RUN_MEMORY', 'RESUME_SUMMARY'],
-  'RUN_MEMORY should render after WORKFLOW_STATE and before RESUME_SUMMARY',
+  PROMPT_SECTION_ORDER.slice(0, 8),
+  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'RUN_MEMORY', 'RELEVANT_MEMORIES', 'RESUME_SUMMARY'],
+  'RELEVANT_MEMORIES should render after RUN_MEMORY and before RESUME_SUMMARY',
 )
 assert.equal(
   PROMPT_SECTION_ORDER.indexOf('FILL_PLAN'),
@@ -188,12 +188,8 @@ assert(fillPlanSection.content.includes('pendingRequired=1'), 'ledger pendingReq
 assert(fillPlanSection.content.includes('answerSummary:'), 'answer summary should enter FILL_PLAN')
 
 const nextActionSection = findSection(sections, 'NEXT_ACTION_RULES')
-assert(nextActionSection.content.includes('plan_form_fill'), 'NEXT_ACTION_RULES should refresh missing or stale FieldPlan')
-assert(nextActionSection.content.includes('browser_set_field'), 'NEXT_ACTION_RULES should prefer browser_set_field')
-assert(nextActionSection.content.includes('resume_query'), 'NEXT_ACTION_RULES should direct resume detail lookups to resume_query')
-assert(nextActionSection.content.includes('ask_user'), 'NEXT_ACTION_RULES should direct missing user info to ask_user')
-assert(nextActionSection.content.includes('current resume has not been uploaded'), 'NEXT_ACTION_RULES should prioritize current resume upload')
-assert(nextActionSection.content.includes('application-entry button'), 'NEXT_ACTION_RULES should distinguish application entry buttons from completion')
+assert(nextActionSection.content.includes('choose exactly one next tool call'), 'NEXT_ACTION_RULES should include the base next-action instruction')
+assert(nextActionSection.content.includes('Call agent_done when the task is complete or blocked'), 'NEXT_ACTION_RULES should include the base completion instruction')
 
 const defaultTaskStateSection = findSection(buildPromptSections({ ...snapshot, taskState: undefined }), 'TASK_STATE')
 assert(defaultTaskStateSection.content.includes('phase: observing'), 'missing taskState should render the legacy task-state default')

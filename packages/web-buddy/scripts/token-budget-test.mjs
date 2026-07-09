@@ -27,6 +27,9 @@ assert.deepEqual(inputBudget.snapshot(), {
   estimatedTotalTokens: 3,
   compactRecommended: false,
   usingDefaultMaxInputTokens: true,
+  warnings: [
+    `No model context window configured; using conservative default ${DEFAULT_MAX_INPUT_TOKENS} input tokens.`,
+  ],
 })
 
 const toolBudget = new TokenBudget()
@@ -98,7 +101,20 @@ assert.equal(noMax.compactRecommended, false, 'default maxInputTokens should avo
 
 const defaultThresholdHit = estimateTokenBudget([{ role: 'tool', content: 'B'.repeat(DEFAULT_MAX_INPUT_TOKENS * 4), tool_call_id: 'call_default' }])
 assert.equal(defaultThresholdHit.usingDefaultMaxInputTokens, true)
+assert(defaultThresholdHit.warnings?.length > 0, 'default budget should include a warning')
 assert.equal(defaultThresholdHit.compactRecommended, true, 'unset maxInputTokens should still compact very large transcripts')
+
+const knownModel = estimateTokenBudget(messages, { modelName: 'gpt-5-mini' })
+assert.equal(knownModel.modelName, 'gpt-5-mini')
+assert.equal(knownModel.maxInputTokens, 120_000)
+assert.equal(knownModel.usingDefaultMaxInputTokens, undefined)
+assert.equal(knownModel.warnings, undefined)
+
+const unknownModel = estimateTokenBudget(messages, { modelName: 'mystery-model' })
+assert.equal(unknownModel.modelName, 'mystery-model')
+assert.equal(unknownModel.maxInputTokens, DEFAULT_MAX_INPUT_TOKENS)
+assert.equal(unknownModel.usingDefaultMaxInputTokens, true)
+assert.match(unknownModel.warnings?.[0] ?? '', /Unknown model context window/)
 
 const longObservation = estimateChatMessages([{ role: 'tool', content: 'C'.repeat(4000), tool_call_id: 'call_3' }])
 const shortObservation = estimateChatMessages([{ role: 'tool', content: 'ok', tool_call_id: 'call_4' }])
@@ -116,6 +132,9 @@ assert.deepEqual(createTokenBudgetSnapshot(), {
   estimatedTotalTokens: 0,
   compactRecommended: false,
   usingDefaultMaxInputTokens: true,
+  warnings: [
+    `No model context window configured; using conservative default ${DEFAULT_MAX_INPUT_TOKENS} input tokens.`,
+  ],
 })
 
 console.log('token-budget-test: PASS')

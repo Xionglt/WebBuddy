@@ -1,4 +1,5 @@
 import type { KernelEvent } from '../kernel/kernel-events.js'
+import type { ToolResultArtifactRef } from '../tools/tool-result-store.js'
 
 export type AgentSessionSource = 'cli' | 'web' | 'sdk' | 'benchmark' | 'test'
 
@@ -62,6 +63,7 @@ export interface ToolResultEntry extends TranscriptEntryBase {
   name: string
   ok: boolean
   result?: unknown
+  artifacts?: ToolResultArtifactRef[]
   error?: string
 }
 
@@ -96,6 +98,12 @@ export interface ApprovalDecisionEntry extends TranscriptEntryBase {
   permissionRequestId: string
   toolCallId?: string
   decision: unknown
+}
+
+export interface SkillContextEntry extends TranscriptEntryBase {
+  type: 'skill_context'
+  context: unknown
+  reason?: string
 }
 
 export interface WorkflowSnapshotEntry extends TranscriptEntryBase {
@@ -144,6 +152,10 @@ export interface ContextCompactionEntry extends TranscriptEntryBase {
   summaryId: string
   reason: string
   tokenBudget: unknown
+  postCompactionTokenBudget?: unknown
+  mode?: string
+  microCompaction?: unknown
+  semanticError?: string
   summary: unknown
 }
 
@@ -169,6 +181,7 @@ export type TranscriptEntry =
   | PermissionDecisionEntry
   | ApprovalRequestEntry
   | ApprovalDecisionEntry
+  | SkillContextEntry
   | WorkflowSnapshotEntry
   | MemorySnapshotEntry
   | WorkflowEvidenceEntry

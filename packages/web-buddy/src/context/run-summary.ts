@@ -16,6 +16,17 @@ import type { RecentActionStatus } from './types.js'
 
 export const COMPACTED_RUN_CONTEXT_PREFIX = 'COMPACTED_RUN_CONTEXT'
 
+export type CompactTrigger =
+  | 'token_threshold'
+  | 'tool_result_pressure'
+  | 'phase_transition'
+  | 'failure_repetition'
+  | 'resume'
+
+export type CompactMode =
+  | 'structured'
+  | 'structured_semantic'
+
 export interface CompactRunSummary {
   schemaVersion: 'compact-run-summary/v1'
   summaryId: string
@@ -26,11 +37,18 @@ export interface CompactRunSummary {
   createdAt: string
 
   goal: string
+  trigger?: CompactTrigger
+  compactMode?: CompactMode
   workflow?: CompactWorkflowSummary
   page?: CompactPageSummary
   form?: CompactFormSummary
   evidence?: CompactEvidenceSummary
   completion?: CompactCompletionSummary
+  permissionContract?: CompactPermissionContract
+  answerMemory?: CompactAnswerMemorySummary
+  failurePatterns?: CompactFailurePattern[]
+  staleRefs?: CompactStaleRefSummary
+  semanticSummary?: SemanticCompactSummary
   recentActions: CompactRecentActionSummary[]
   blockers: string[]
   permissions: CompactPermissionSummary[]
@@ -38,6 +56,56 @@ export interface CompactRunSummary {
   safetyNotes: string[]
   nextActionHints: string[]
   source: CompactRunSummarySource
+}
+
+export interface SemanticCompactSummary {
+  schemaVersion: 'semantic-compact-summary/v1'
+  userIntent: string
+  importantDecisions: string[]
+  attemptedPaths: CompactAttemptedPath[]
+  unresolvedQuestions: string[]
+  nextStrategy: string[]
+  riskNotes: string[]
+  generatedAt: string
+  sourceMessageCount: number
+  fallback?: boolean
+  error?: string
+}
+
+export interface CompactAttemptedPath {
+  action: string
+  result: string
+  reason?: string
+  shouldAvoidRetry?: boolean
+}
+
+export interface CompactPermissionContract {
+  rule: 'structured_permissions_are_source_of_truth'
+  finalSubmitRequiresExplicitApproval: boolean
+  approvalsRetained: number
+  permissionsRetained: number
+  notes: string[]
+}
+
+export interface CompactAnswerMemorySummary {
+  source: 'answer_store_summary'
+  summary: string
+}
+
+export interface CompactFailurePattern {
+  toolName: string
+  status: string
+  observation: string
+  count: number
+  lastStep: number
+  shouldAvoidRetry: boolean
+}
+
+export interface CompactStaleRefSummary {
+  rule: 'old_browser_refs_are_not_actionable'
+  latestPageStateUpdatedAt?: string
+  latestFormStateUpdatedAt?: string
+  notes: string[]
 }
 
 export interface CompactWorkflowSummary {
@@ -204,6 +272,8 @@ export interface ContextCompactionStats {
   retainedRecentActionCount: number
   retainedPermissionCount: number
   retainedApprovalCount: number
+  semanticSummaryChars?: number
+  semanticFallback?: boolean
 }
 
 export interface ContextCompactionResult {

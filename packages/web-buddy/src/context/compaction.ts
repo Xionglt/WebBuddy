@@ -12,18 +12,24 @@ import type { ContextRecentAction, ContextSnapshot } from './types.js'
 import {
   COMPACTED_RUN_CONTEXT_PREFIX,
   type CompactApprovalSummary,
+  type CompactAnswerMemorySummary,
   type CompactCompletionCriterionSummary,
   type CompactCompletionSummary,
   type CompactEvidenceSummary,
+  type CompactFailurePattern,
   type CompactFormSummary,
+  type CompactMode,
   type CompactPageSummary,
   type CompactPermissionSummary,
+  type CompactStaleRefSummary,
+  type CompactTrigger,
   type CompactRecentActionSummary,
   type CompactRunSummary,
   type CompactSubmitCandidateSummary,
   type CompactUploadHintSummary,
   type CompactWorkflowSummary,
   type ContextCompactionResult,
+  type SemanticCompactSummary,
 } from './run-summary.js'
 
 export type ContextCompactionEvidenceInput = WorkflowEvidence[] | EvidenceStoreSnapshot
@@ -72,6 +78,9 @@ export interface ContextCompactionInput {
   workflowEvaluation?: ContextCompactionWorkflowEvaluation
   safetyNotes?: string[]
   nextActionHints?: string[]
+  trigger?: CompactTrigger
+  compactMode?: CompactMode
+  semanticSummary?: SemanticCompactSummary
   summaryId?: string
   createdAt?: string
 }
@@ -98,7 +107,7 @@ const DEFAULT_MAX_EVIDENCE_ITEMS = 8
 const DEFAULT_MAX_COMPLETION_CRITERIA = 12
 const DEFAULT_MAX_BLOCKERS = 12
 const DEFAULT_MAX_SAFETY_NOTES = 12
-const DEFAULT_MAX_NEXT_ACTION_HINTS = 8
+const DEFAULT_MAX_NEXT_ACTION_HINTS = 12
 const DEFAULT_MAX_PAGE_TEXT_SUMMARY_CHARS = 700
 const DEFAULT_MAX_ACTION_OBSERVATION_CHARS = 260
 const DEFAULT_MAX_REASON_CHARS = 260
@@ -139,10 +148,18 @@ export class ContextCompactor {
       this.reasonMaxChars,
     )
     const approvals = summarizeApprovals(input.approvals ?? [], this.maxApprovals, this.reasonMaxChars)
+    const failurePatterns = summarizeFailurePatterns(
+      input.recentActions ?? latestContext?.recentActions ?? [],
+      this.reasonMaxChars,
+    )
+    const staleRefs = summarizeStaleRefs(latestContext)
+    const answerMemory = summarizeAnswerMemory(latestContext?.answerSummary)
     const nextActionHints = trimStringList(uniqueStrings([
       ...buildDefaultNextActionHints({ workflow, page, form, blockers, latestContext }),
       ...buildCompletionNextActionHints(completion),
+      ...buildFailureNextActionHints(failurePatterns),
       ...(input.nextActionHints ?? []),
+      ...buildStaleRefNextActionHints(staleRefs),
     ]), this.maxNextActionHints, this.reasonMaxChars)
 
     const summary: CompactRunSummary = {
@@ -160,11 +177,18 @@ export class ContextCompactor {
       step: input.step,
       createdAt,
       goal: input.goal ?? latestContext?.goal ?? '',
+      ...(input.trigger ? { trigger: input.trigger } : {}),
+      compactMode: input.compactMode ?? (input.semanticSummary ? 'structured_semantic' : 'structured'),
       ...(workflow ? { workflow } : {}),
       ...(page ? { page } : {}),
       ...(form ? { form } : {}),
       ...(evidence ? { evidence } : {}),
       ...(completion ? { completion } : {}),
+      permissionContract: summarizePermissionContract(permissions, approvals),
+      ...(answerMemory ? { answerMemory } : {}),
+      ...(failurePatterns.length ? { failurePatterns } : {}),
+      ...(staleRefs ? { staleRefs } : {}),
+      ...(input.semanticSummary ? { semanticSummary: input.semanticSummary } : {}),
       recentActions,
       blockers,
       permissions,
@@ -198,6 +222,12 @@ export class ContextCompactor {
         retainedRecentActionCount: recentActions.length,
         retainedPermissionCount: permissions.length,
         retainedApprovalCount: approvals.length,
+        ...(input.semanticSummary
+          ? {
+              semanticSummaryChars: JSON.stringify(input.semanticSummary).length,
+              ...(input.semanticSummary.fallback ? { semanticFallback: true } : {}),
+            }
+          : {}),
       },
     }
   }
@@ -556,6 +586,93 @@ function buildCompletionNextActionHints(completion: CompactCompletionSummary | u
     hints.push(`Do not mark completion until missing criteria are resolved: ${completion.missingCriteria.map((criterion) => criterion.description).join('; ')}`)
   }
   return hints
+}
+
+function buildFailureNextActionHints(failurePatterns: CompactFailurePattern[]): string[] {
+  return failurePatterns
+    .filter((pattern) => pattern.shouldAvoidRetry)
+    .slice(0, 3)
+    .map((pattern) => `Avoid repeating ${pattern.toolName} with the same arguments unless fresh page/form state changed: ${pattern.observation}`)
+}
+
+function buildStaleRefNextActionHints(staleRefs: CompactStaleRefSummary | undefined): string[] {
+  if (!staleRefs) return []
+  return staleRefs.notes
+    .filter((note) => /stale|refs|snapshot/i.test(note))
+    .slice(0, 2)
+}
+
+function summarizePermissionContract(
+  permissions: CompactPermissionSummary[],
+  approvals: CompactApprovalSummary[],
+): CompactRunSummary['permissionContract'] {
+  return {
+    rule: 'structured_permissions_are_source_of_truth',
+    finalSubmitRequiresExplicitApproval: true,
+    approvalsRetained: approvals.length,
+    permissionsRetained: permissions.length,
+    notes: [
+      'Do not infer approvals from semantic summaries or assistant wording.',
+      'Only recorded permission/approval entries can authorize gated browser actions.',
+      'Application-entry clicks do not imply approval for final submit.',
+    ],
+  }
+}
+
+function summarizeAnswerMemory(answerSummary: string | undefined): CompactAnswerMemorySummary | undefined {
+  if (!answerSummary) return undefined
+  return {
+    source: 'answer_store_summary',
+    summary: truncateText(answerSummary, 1200),
+  }
+}
+
+function summarizeFailurePatterns(
+  actions: ContextRecentAction[],
+  maxObservationChars: number,
+): CompactFailurePattern[] {
+  const grouped = new Map<string, { action: ContextRecentAction; count: number }>()
+  for (const action of actions) {
+    if (action.status === 'ok') continue
+    const key = `${action.toolName}\n${oneLine(action.argumentsSummary, 180)}`
+    const existing = grouped.get(key)
+    if (existing) {
+      existing.action = action
+      existing.count += 1
+    } else {
+      grouped.set(key, { action, count: 1 })
+    }
+  }
+
+  return [...grouped.values()]
+    .sort((left, right) => right.action.step - left.action.step)
+    .slice(0, 8)
+    .map(({ action, count }) => ({
+      toolName: action.toolName,
+      status: action.status,
+      observation: oneLine(action.observation ?? action.argumentsSummary, maxObservationChars),
+      count,
+      lastStep: action.step,
+      shouldAvoidRetry: action.status === 'blocked' || action.status === 'error' || count > 1,
+    }))
+}
+
+function summarizeStaleRefs(latestContext: ContextSnapshot | undefined): CompactStaleRefSummary | undefined {
+  if (!latestContext) return undefined
+  const notes: string[] = []
+  if (latestContext.freshness.pageStateStale) {
+    notes.push('Refresh page state before relying on old or missing element refs.')
+  }
+  if (latestContext.freshness.formStateStale) {
+    notes.push('Refresh form state before relying on old or missing field refs.')
+  }
+  notes.push('Element refs from omitted or compacted browser snapshots are historical evidence, not actionable refs.')
+  return {
+    rule: 'old_browser_refs_are_not_actionable',
+    ...(latestContext.page?.updatedAt ? { latestPageStateUpdatedAt: latestContext.page.updatedAt } : {}),
+    ...(latestContext.form?.updatedAt ? { latestFormStateUpdatedAt: latestContext.form.updatedAt } : {}),
+    notes,
+  }
 }
 
 function normalizeEvidenceInput(input: ContextCompactionEvidenceInput | undefined): WorkflowEvidence[] {
