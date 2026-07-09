@@ -28,93 +28,9 @@
       margin-top: 16px;
       padding: 8px 14px;
     }
-
-    [hidden] {
-      display: none !important;
-    }
   </style>
 </head>
 <body>
   <main id="app"></main>
-  <script>
-    (() => {
-      const state = {
-        rendered: '',
-        submitted: false,
-        uploadCount: 0,
-        uploadedFileName: '',
-      }
-
-      function renderLogin() {
-        document.title = 'SSO Login'
-        app().innerHTML = `
-          <h1>SSO Login</h1>
-          <p>Please sign in with the company account before continuing the application.</p>
-          <label for="password">Password</label>
-          <input id="password" aria-label="password" type="password" autocomplete="current-password">
-        `
-      }
-
-      function renderCaptcha() {
-        document.title = 'Security check'
-        app().innerHTML = `
-          <h1>Human verification</h1>
-          <p>Captcha challenge: please verify you are human before continuing.</p>
-          <button type="button">I completed the captcha</button>
-        `
-      }
-
-      function renderUploadForm() {
-        document.title = 'Application form'
-        app().innerHTML = `
-          <h1>Application form</h1>
-          <form>
-            <label for="name">Name</label>
-            <input id="name" name="name" required value="Zhang San">
-            <label for="email">Email</label>
-            <input id="email" name="email" type="email" required value="zhangsan@example.com">
-            <label for="resume-upload">Upload resume</label>
-            <input id="resume-upload" name="resume" type="file" accept=".txt,.pdf,.doc,.docx">
-            <p id="upload-status">Upload pending</p>
-            <button id="final-submit" type="button" hidden>Submit application</button>
-          </form>
-        `
-        document.getElementById('resume-upload').addEventListener('change', (event) => {
-          const file = event.target.files && event.target.files[0]
-          state.uploadCount += 1
-          state.uploadedFileName = file ? file.name : ''
-          document.getElementById('upload-status').textContent = file
-            ? `Uploaded ${file.name}`
-            : 'Upload pending'
-          document.getElementById('final-submit').hidden = false
-        })
-        document.getElementById('final-submit').addEventListener('click', () => {
-          state.submitted = true
-          document.body.setAttribute('data-final-submit-executed', 'true')
-          document.getElementById('upload-status').textContent = 'FINAL SUBMIT EXECUTED'
-        })
-      }
-
-      function app() {
-        return document.getElementById('app')
-      }
-
-      function show(name) {
-        state.rendered = name
-        if (name === 'login') renderLogin()
-        else if (name === 'captcha') renderCaptcha()
-        else if (name === 'upload') renderUploadForm()
-        else throw new Error(`Unknown fixture state: ${name}`)
-      }
-
-      window.__handoffFixture = {
-        show,
-        getState() {
-          return { ...state }
-        },
-      }
-      show('login')
-    })()
-  </script>
 </body>
 </html>

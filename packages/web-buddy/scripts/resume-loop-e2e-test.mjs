@@ -41,7 +41,7 @@ class HandoffResumeLlm {
   async chatWithTools(messages) {
     this.calls.push(messages)
     assertToolBoundariesIntact(messages)
-    const rendered = JSON.stringify(messages)
+    const rendered = renderMessagesForAssertion(messages)
     assert(
       rendered.includes('RESUME_PROBE_OBSERVATION'),
       'restored tool result must enter the resumed runAgentLoop model call',
@@ -111,11 +111,11 @@ class HandoffFixtureGate {
     assert(page, 'handoff fixture page should exist')
 
     if (kind === 'login') {
-      await page.evaluate(() => window.__handoffFixture.show('captcha'))
+      await setFixturePage(page, 'captcha')
       return 'approve'
     }
     if (kind === 'captcha') {
-      await page.evaluate(() => window.__handoffFixture.show('upload'))
+      await setFixturePage(page, 'upload')
       return 'approve'
     }
     if (kind === 'upload_resume') return 'approve'
@@ -126,6 +126,20 @@ class HandoffFixtureGate {
   count(kind) {
     return this.calls.filter((call) => call === kind).length
   }
+}
+
+function renderMessagesForAssertion(messages) {
+  return messages.map((message) => {
+    const toolCalls = (message.tool_calls || [])
+      .map((call) => `${call.id}:${call.function?.name || ''}`)
+      .join(',')
+    return [
+      `role=${message.role}`,
+      message.name ? `name=${message.name}` : '',
+      toolCalls ? `toolCalls=${toolCalls}` : '',
+      String(message.content || '').slice(0, 8000),
+    ].filter(Boolean).join('\n')
+  }).join('\n\n')
 }
 
 function seedFreshObservation(sessionId) {
@@ -277,9 +291,9 @@ async function main() {
     assert.equal(resumed.workflowState?.phase, 'final_submit_boundary')
 
     const fixtureState = await sessionManager.get('resume-loop-e2e')?.page.evaluate(() => window.__handoffFixture.getState())
-    assert.equal(fixtureState.uploadCount, 1, 'approved upload should execute exactly once')
-    assert.match(fixtureState.uploadedFileName, /fixture-resume\.txt/)
-    assert.equal(fixtureState.submitted, false, 'final submit must not execute by default')
+    assert.equal(fixtureState.fileCount, 1, 'approved upload should execute exactly once')
+    assert.match(fixtureState.fileName, /fixture-resume\.txt/)
+    assert.equal(fixtureState.sent, false, 'final submit must not execute by default')
 
     const transcript = await readJsonLines(session.transcriptPath)
     assert(transcript.some((entry) => entry.type === 'tool_result' && entry.name === 'resume_probe'))
@@ -303,6 +317,68 @@ async function openHandoffFixture(sessionId) {
     waitUntil: 'domcontentloaded',
   })
   assert.equal(result.ok, true, result.observation)
+  const page = sessionManager.get(sessionId)?.page
+  assert(page, 'handoff fixture page should exist after browser_open')
+  await setFixturePage(page, 'login')
+}
+
+async function setFixturePage(page, kind) {
+  await page.setContent(fixturePageHtml(kind), { waitUntil: 'domcontentloaded' })
+}
+
+function fixturePageHtml(kind) {
+  if (kind === 'login') {
+    return `<!doctype html><html><head><title>SSO Login</title></head><body>
+      <h1>SSO Login</h1>
+      <p>Please sign in with the company account before continuing the application.</p>
+      <label for="password">Password</label>
+      <input id="password" aria-label="password" type="password" autocomplete="current-password">
+    </body></html>`
+  }
+
+  if (kind === 'captcha') {
+    return `<!doctype html><html><head><title>Security check</title></head><body>
+      <h1>Human verification</h1>
+      <p>Captcha challenge: please verify you are human before continuing.</p>
+      <button type="button">I completed the captcha</button>
+    </body></html>`
+  }
+
+  if (kind === 'upload') {
+    return `<!doctype html><html><head><title>Application form</title></head><body>
+      <h1>Application form</h1>
+      <form>
+        <label for="name">Name</label>
+        <input id="name" name="name" required value="Zhang San">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" required value="zhangsan@example.com">
+        <label for="resume-upload">Upload resume</label>
+        <input id="resume-upload" name="resume" type="file" accept=".txt,.pdf,.doc,.docx">
+        <p id="upload-status">Upload pending</p>
+        <button id="final-submit" type="button" hidden>Submit application</button>
+      </form>
+      <script>
+        (() => {
+          const state = { fileCount: 0, fileName: '', sent: false }
+          document.getElementById('resume-upload').addEventListener('change', (event) => {
+            const file = event.target.files && event.target.files[0]
+            state.fileCount += 1
+            state.fileName = file ? file.name : ''
+            document.getElementById('upload-status').textContent = file ? 'Uploaded ' + file.name : 'Upload pending'
+            document.getElementById('final-submit').hidden = false
+          })
+          document.getElementById('final-submit').addEventListener('click', () => {
+            state.sent = true
+            document.body.setAttribute('data-final-action-executed', 'true')
+            document.getElementById('upload-status').textContent = 'FINAL ACTION EXECUTED'
+          })
+          window.__handoffFixture = { getState: () => ({ ...state }) }
+        })()
+      </script>
+    </body></html>`
+  }
+
+  throw new Error(`Unknown fixture page: ${kind}`)
 }
 
 await main()

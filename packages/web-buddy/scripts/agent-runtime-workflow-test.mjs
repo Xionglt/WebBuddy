@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { AgentRuntime } from '../dist/agent/agent-runtime.js'
 import { browserOpen } from '../dist/browser/open.js'
 import { AutoHumanGate } from '../dist/sdk/human.js'
+import { TraceRecorder } from '../dist/sdk/trace.js'
 import { sessionManager } from '../dist/session/manager.js'
 
 process.env.PLAYWRIGHT_HEADLESS = 'true'
@@ -23,9 +27,14 @@ const profile = {
   source: 'json',
 }
 
-const trace = {
-  record() {},
-}
+const traceRoot = mkdtempSync(join(tmpdir(), 'mfa-agent-runtime-workflow-'))
+const trace = new TraceRecorder(traceRoot, {
+  runId: 'agent-runtime-workflow-test',
+  source: 'local-runtime',
+  scenario: 'agent-runtime-workflow-test',
+  profile: 'test',
+  goal: 'Verify workflow handoff and final-submit boundaries.',
+})
 
 const runtime = new AgentRuntime()
 
@@ -267,6 +276,13 @@ class LoginClearingGate {
   }
 }
 
+class BlockingWorkflowHandoffGate {
+  async confirm(kind) {
+    assert(kind === 'login' || kind === 'captcha')
+    return 'takeover'
+  }
+}
+
 class ApprovingFinalSubmitGate {
   async confirm(kind) {
     assert.equal(kind, 'final_submit')
@@ -285,7 +301,7 @@ try {
     resume: profile,
     llm: new UnexpectedLlm(),
     ctx: { sessionId: 'workflow-login', highlight: false, trace },
-    gate: new AutoHumanGate(),
+    gate: new BlockingWorkflowHandoffGate(),
     maxSteps: 3,
   })
   assert.equal(loginResult.done, true)
@@ -326,7 +342,7 @@ try {
     resume: profile,
     llm: new UnexpectedLlm(),
     ctx: { sessionId: 'workflow-captcha', highlight: false, trace },
-    gate: new AutoHumanGate(),
+    gate: new BlockingWorkflowHandoffGate(),
     maxSteps: 3,
   })
   assert.equal(captchaResult.done, true)
@@ -452,7 +468,9 @@ try {
 
   console.log('agent-runtime-workflow-test: PASS')
 } finally {
+  trace.finish()
   await sessionManager.closeAll().catch(() => {})
+  rmSync(traceRoot, { recursive: true, force: true })
 }
 
 async function openHtml(sessionId, html) {
