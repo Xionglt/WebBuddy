@@ -2,6 +2,13 @@ export { ApprovalQueue, ApprovalQueueError } from './approval-queue.js'
 export type { ApprovalQueueErrorCode, ApprovalQueueEvent, ApprovalQueueOptions, ApprovalQueueSnapshot } from './approval-queue.js'
 export { PermissionEngine, permissionEngine } from './permission-engine.js'
 export type { PermissionEngineOptions } from './permission-engine.js'
+export {
+  loadPersistentPermissionRules,
+  persistentPermissionRuleFromDecision,
+  persistentPermissionRuleSet,
+  savePersistentPermissionRules,
+} from './persistent-rules.js'
+export type { PersistentPermissionRule, PersistentPermissionRulesFile } from './persistent-rules.js'
 export { defaultPermissionRules } from './permission-rules.js'
 export type { PermissionRule, PermissionRuleContext } from './permission-rules.js'
 export {

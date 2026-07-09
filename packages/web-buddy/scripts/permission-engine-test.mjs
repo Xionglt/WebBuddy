@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PermissionEngine } from '../dist/permission/permission-engine.js'
 import { createToolPermissionRequest } from '../dist/permission/permission-types.js'
+import {
+  loadPersistentPermissionRules,
+  persistentPermissionRuleFromDecision,
+  savePersistentPermissionRules,
+} from '../dist/permission/persistent-rules.js'
 
 const fixedDate = new Date('2026-06-29T00:00:00.000Z')
 const engine = new PermissionEngine({ now: () => fixedDate })
@@ -302,6 +310,60 @@ assert.equal(rawAutoConfirmFinalSubmit.gateKind, 'final_submit')
 
 for (const field of ['source', 'risk', 'reason', 'rememberable', 'gateKind']) {
   assert(field in policyGate, `permission decision should include ${field}`)
+}
+
+const root = mkdtempSync(join(tmpdir(), 'mfa-permission-rules-'))
+try {
+  const rulesPath = join(root, 'permissions.json')
+  const rememberedRule = persistentPermissionRuleFromDecision({
+    id: 'remember-apply-click',
+    decision: {
+      ...policyGate,
+      action: 'allow',
+      source: 'user',
+      reason: 'User chose to always allow apply-entry clicks on this origin.',
+    },
+    request: permissionRequest({
+      requestId: 'perm-policy-gate',
+      toolName: 'browser_click',
+      args: { ref: 'e7' },
+      risk: 'L3',
+      riskLevel: 'high',
+      policyAction: 'gate',
+      gateKind: 'high_risk_action',
+      policyCode: 'policy.high_risk.gate',
+      ruleId: 'policy.high_risk.gate.v1',
+      reason: 'High-risk tool action requires a human gate.',
+    }),
+    now: fixedDate.toISOString(),
+  })
+  assert(rememberedRule, 'remembered high-risk allow decision should create a persistent rule')
+  await savePersistentPermissionRules(rulesPath, [rememberedRule], fixedDate.toISOString())
+  const loadedRules = await loadPersistentPermissionRules(rulesPath)
+  assert.equal(loadedRules.length, 1)
+
+  const rememberedEngine = new PermissionEngine({
+    now: () => fixedDate,
+    persistentRules: loadedRules,
+  })
+  const rememberedDecision = rememberedEngine.evaluate(permissionRequest({
+    requestId: 'perm-policy-gate-reused',
+    toolName: 'browser_click',
+    args: { ref: 'e8' },
+    risk: 'L3',
+    riskLevel: 'high',
+    policyAction: 'gate',
+    gateKind: 'high_risk_action',
+    policyCode: 'policy.high_risk.gate',
+    ruleId: 'policy.high_risk.gate.v1',
+    reason: 'High-risk tool action requires a human gate.',
+  }))
+  assert.equal(rememberedDecision.action, 'allow')
+  assert.equal(rememberedDecision.source, 'runtime_rule')
+  assert.equal(rememberedDecision.rememberable, false)
+  assert(rememberedDecision.auditTags.includes('permission:persistent'))
+} finally {
+  rmSync(root, { recursive: true, force: true })
 }
 
 console.log('permission-engine-test: PASS')

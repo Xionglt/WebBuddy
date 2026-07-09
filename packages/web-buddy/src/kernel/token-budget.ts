@@ -2,13 +2,14 @@ import type { ChatMessage } from '../sdk/llm.js'
 
 export interface TokenBudgetSnapshot {
   version: 1
-  maxInputTokens?: number
+  maxInputTokens: number
   compactThresholdRatio?: number
-  compactThresholdTokens?: number
+  compactThresholdTokens: number
   estimatedInputTokens?: number
   estimatedToolResultTokens?: number
   estimatedTotalTokens?: number
   compactRecommended: boolean
+  usingDefaultMaxInputTokens?: boolean
 }
 
 export interface TokenBudgetOptions {
@@ -23,6 +24,7 @@ export interface TokenBudgetEstimate {
 }
 
 const DEFAULT_COMPACT_THRESHOLD_RATIO = 0.8
+export const DEFAULT_MAX_INPUT_TOKENS = 120_000
 const MESSAGE_OVERHEAD_TOKENS = 4
 const TOOL_CALL_OVERHEAD_TOKENS = 8
 
@@ -116,17 +118,19 @@ function estimateChatMessageTokens(message: ChatMessage): number {
 
 function createSnapshot(estimate: TokenBudgetEstimate, options: TokenBudgetOptions): TokenBudgetSnapshot {
   const compactThresholdRatio = normalizeCompactThresholdRatio(options.compactThresholdRatio)
-  const max = options.maxInputTokens
-  const compactThresholdTokens = max !== undefined ? Math.ceil(max * compactThresholdRatio) : undefined
+  const usingDefaultMaxInputTokens = options.maxInputTokens === undefined
+  const max = options.maxInputTokens ?? DEFAULT_MAX_INPUT_TOKENS
+  const compactThresholdTokens = Math.ceil(max * compactThresholdRatio)
   return {
     version: 1,
-    ...(max !== undefined ? { maxInputTokens: max } : {}),
+    maxInputTokens: max,
     compactThresholdRatio,
-    ...(compactThresholdTokens !== undefined ? { compactThresholdTokens } : {}),
+    compactThresholdTokens,
     estimatedInputTokens: estimate.inputTokens,
     estimatedToolResultTokens: estimate.toolResultTokens,
     estimatedTotalTokens: estimate.totalTokens,
-    compactRecommended: compactThresholdTokens !== undefined ? estimate.totalTokens >= compactThresholdTokens : false,
+    compactRecommended: estimate.totalTokens >= compactThresholdTokens,
+    ...(usingDefaultMaxInputTokens ? { usingDefaultMaxInputTokens: true } : {}),
   }
 }
 

@@ -111,6 +111,21 @@ try {
     evidenceIds: [],
   }
 
+  await recorder.transcript({ type: 'user_message', content: 'Please continue this application.' })
+  await recorder.transcript({ type: 'assistant_message', content: 'I will inspect the current page.' })
+  await recorder.transcript({
+    type: 'tool_call',
+    toolCallId: 'call_restore_snapshot',
+    name: 'browser_snapshot',
+    args: { includeText: true },
+  })
+  await recorder.transcript({
+    type: 'tool_result',
+    toolCallId: 'call_restore_snapshot',
+    name: 'browser_snapshot',
+    ok: true,
+    result: { observation: 'Application review page is visible.' },
+  })
   await recorder.transcript({ type: 'workflow_snapshot', workflowState: oldWorkflowState })
   await recorder.transcript({ type: 'workflow_evidence', evidence: pageEvidence })
   await recorder.transcript({
@@ -186,7 +201,7 @@ try {
   assert.equal(restored.schemaVersion, 'restored-session-state/v1')
   assert.equal(restored.session.sessionId, session.sessionId)
   assert.equal(restored.session.status, 'blocked')
-  assert.equal(restored.transcriptCount, 10)
+  assert.equal(restored.transcriptCount, 14)
   assert.equal(restored.restoredAt, '2026-06-30T00:01:00.000Z')
   assert.equal(restored.latestWorkflowState?.phase, 'done')
   assert.equal(restored.latestWorkflowState?.observationPhase, 'done')
@@ -201,6 +216,12 @@ try {
   )
   assert.deepEqual(restored.missingCriteria, [latestMissingCriterion])
   assert.deepEqual(restored.blockers, [latestBlocker])
+  assert.deepEqual(
+    restored.restoredMessages.map((message) => message.role),
+    ['user', 'assistant', 'assistant', 'tool'],
+  )
+  assert.equal(restored.restoredMessages[2].tool_calls?.[0]?.function.name, 'browser_snapshot')
+  assert.equal(restored.restoredMessages[3].tool_call_id, 'call_restore_snapshot')
 
   const restoredFromSessionObject = await restoreSessionState({
     session: blockedSession,

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileSessionRecorder, FileSessionStore, readJsonLines } from '../dist/session/index.js'
+import { FileSessionRecorder, FileSessionStore, migrateTranscriptEntry, readJsonLines } from '../dist/session/index.js'
 
 const root = mkdtempSync(join(tmpdir(), 'mfa-session-store-'))
 
@@ -115,6 +115,12 @@ try {
   assert.equal(saved.status, 'completed')
   assert.equal(saved.sessionId, session.sessionId)
   assert(saved.completedAt, 'completedAt should be written for terminal status')
+  const legacySaved = { ...saved }
+  delete legacySaved.version
+  writeFileSync(join(session.outputDir, 'session.json'), `${JSON.stringify(legacySaved, null, 2)}\n`)
+  const migratedSession = await store.get(session.sessionId)
+  assert.equal(migratedSession?.version, 1, 'FileSessionStore should migrate legacy session files without version')
+  writeFileSync(join(session.outputDir, 'session.json'), `${JSON.stringify(saved, null, 2)}\n`)
 
   const transcript = await readJsonLines(session.transcriptPath)
   assert.deepEqual(transcript.map((entry) => entry.type), [
@@ -136,6 +142,9 @@ try {
   assert.equal(completionGate.decision.action, 'allow')
   assert.equal(completionGate.decision.recommendedStatus, 'completed')
   assert.deepEqual(completionGate.decision.evidenceIds, ['store-workflow-evidence'])
+  const legacyEntry = { ...transcript[0] }
+  delete legacyEntry.version
+  assert.equal(migrateTranscriptEntry(legacyEntry).version, 1, 'transcript migration should default legacy entries to v1')
 
   const events = await readJsonLines(session.eventsPath)
   assert(events.some((event) => event.type === 'session_created'), 'events should include session_created')

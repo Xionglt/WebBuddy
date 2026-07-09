@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { isPermissionMode, type PermissionMode } from '../permission/permission-types.js'
 
@@ -104,6 +105,11 @@ export interface AgentConfig {
   auth: { storageStatePath: string }
   /** Agent loop tuning. */
   agent: { maxSteps: number }
+  /** User-scoped runtime memory files. */
+  memory: {
+    answerStorePath: string
+    permissionRulesPath: string
+  }
 }
 
 const REPO_ROOT = resolve(
@@ -279,7 +285,23 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     matchThreshold: overrides.matchThreshold ?? numEnv(env, 'AGENT_MATCH_THRESHOLD', 0.45),
     auth: { storageStatePath: env.PLAYWRIGHT_STORAGE_STATE ?? '' },
     agent: { maxSteps: numEnv(env, 'AGENT_MAX_STEPS', 16) },
+    memory: {
+      answerStorePath: resolve(
+        overrides.memory?.answerStorePath ??
+          env.WEB_BUDDY_ANSWER_STORE_PATH ??
+          join(defaultMemoryDir(env), 'answers.json'),
+      ),
+      permissionRulesPath: resolve(
+        overrides.memory?.permissionRulesPath ??
+          env.WEB_BUDDY_PERMISSION_RULES_PATH ??
+          join(defaultMemoryDir(env), 'permission-rules.json'),
+      ),
+    },
   }
+}
+
+function defaultMemoryDir(env: Record<string, string | undefined>): string {
+  return env.WEB_BUDDY_MEMORY_DIR ?? join(homedir(), '.web-buddy', 'memory')
 }
 
 /** True when the user has supplied a model API key. Drives the LLM-enhanced path. */

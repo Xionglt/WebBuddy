@@ -1,9 +1,11 @@
 import { defaultPermissionRules, type PermissionRule } from './permission-rules.js'
 import type { PermissionDecision, PermissionMode, PermissionRequest } from './permission-types.js'
+import { persistentPermissionRuleSet, type PersistentPermissionRule } from './persistent-rules.js'
 
 export interface PermissionEngineOptions {
   now?: () => Date
   rules?: PermissionRule[]
+  persistentRules?: PersistentPermissionRule[]
   permissionMode?: PermissionMode
   allowFinalSubmit?: boolean
 }
@@ -16,7 +18,10 @@ export class PermissionEngine {
 
   constructor(options: PermissionEngineOptions = {}) {
     this.now = options.now ?? (() => new Date())
-    this.rules = options.rules ?? defaultPermissionRules()
+    this.rules = options.rules ?? [
+      ...(options.persistentRules?.length ? [persistentPermissionRuleSet(options.persistentRules)] : []),
+      ...defaultPermissionRules(),
+    ]
     this.permissionMode = options.permissionMode ?? 'safe'
     this.allowFinalSubmit = options.allowFinalSubmit ?? false
   }

@@ -1,3 +1,4 @@
+import type { ChatMessage } from '../sdk/llm.js'
 import type { CompletionGateDecision } from '../workflow/completion-gate.js'
 import type {
   WorkflowBlocker,
@@ -8,6 +9,7 @@ import type { WorkflowEvidence } from '../workflow/workflow-evidence.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import type { AgentSession, FinalResultEntry, SessionStore, TranscriptEntry } from './session-types.js'
 import { readJsonLines } from './transcript.js'
+import { migrateTranscriptEntries } from './migrations.js'
 
 export interface RestoredSessionState {
   schemaVersion: 'restored-session-state/v1'
@@ -19,6 +21,7 @@ export interface RestoredSessionState {
   latestWorkflowEvaluation?: WorkflowEngineEvaluation
   latestCompletionGate?: CompletionGateDecision
   latestFinalResult?: FinalResultEntry
+  restoredMessages: ChatMessage[]
   missingCriteria: WorkflowCriterionMissing[]
   blockers: WorkflowBlocker[]
 }
@@ -37,15 +40,24 @@ export type RestoreSessionStateInput =
 
 export async function restoreSessionState(input: RestoreSessionStateInput): Promise<RestoredSessionState> {
   const session = await resolveSession(input)
-  const transcript = await readJsonLines<TranscriptEntry>(session.transcriptPath)
+  const transcript = migrateTranscriptEntries(await readJsonLines<unknown>(session.transcriptPath))
 
   let latestWorkflowState: WorkflowState | undefined
   let latestWorkflowEvaluation: WorkflowEngineEvaluation | undefined
   let latestCompletionGate: CompletionGateDecision | undefined
   let latestFinalResult: FinalResultEntry | undefined
   const workflowEvidence: WorkflowEvidence[] = []
+  let restoredMessages: ChatMessage[] = []
 
   for (const entry of transcript) {
+    const restoredMessage = chatMessageFromTranscriptEntry(entry)
+    if (restoredMessage) restoredMessages.push(restoredMessage)
+
+    if (entry.type === 'context_compaction') {
+      restoredMessages = compactedRestoreMessages(entry)
+      continue
+    }
+
     if (entry.type === 'workflow_snapshot') {
       latestWorkflowState = workflowStateFromUnknown(entry.workflowState)
       continue
@@ -81,6 +93,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
     ...(latestWorkflowEvaluation ? { latestWorkflowEvaluation } : {}),
     ...(latestCompletionGate ? { latestCompletionGate } : {}),
     ...(latestFinalResult ? { latestFinalResult } : {}),
+    restoredMessages,
     missingCriteria:
       arrayProperty<WorkflowCriterionMissing>(latestWorkflowEvaluation, 'missingCriteria') ??
       arrayProperty<WorkflowCriterionMissing>(latestCompletionGate, 'missingCriteria') ??
@@ -89,6 +102,87 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
       arrayProperty<WorkflowBlocker>(latestWorkflowEvaluation, 'blockers') ??
       arrayProperty<WorkflowBlocker>(latestCompletionGate, 'blockers') ??
       [],
+  }
+}
+
+function chatMessageFromTranscriptEntry(entry: TranscriptEntry): ChatMessage | undefined {
+  if (entry.type === 'user_message') {
+    return { role: 'user', content: entry.content }
+  }
+  if (entry.type === 'assistant_message') {
+    return assistantMessageFromUnknown(entry.content)
+  }
+  if (entry.type === 'tool_call') {
+    return {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: entry.toolCallId,
+          type: 'function',
+          function: {
+            name: entry.name,
+            arguments: stringifyJson(entry.args),
+          },
+        },
+      ],
+    }
+  }
+  if (entry.type === 'tool_result') {
+    return {
+      role: 'tool',
+      tool_call_id: entry.toolCallId,
+      name: entry.name,
+      content: stringifyJson(entry.ok ? entry.result : { error: entry.error, result: entry.result }),
+    }
+  }
+  return undefined
+}
+
+function compactedRestoreMessages(entry: Extract<TranscriptEntry, { type: 'context_compaction' }>): ChatMessage[] {
+  return [
+    {
+      role: 'system',
+      content: 'RESTORED_COMPACTED_RUN_CONTEXT',
+    },
+    {
+      role: 'user',
+      content: stringifyJson({
+        schemaVersion: 'restored-compacted-run-context/v1',
+        summaryId: entry.summaryId,
+        reason: entry.reason,
+        summary: entry.summary,
+      }),
+    },
+  ]
+}
+
+function assistantMessageFromUnknown(value: unknown): ChatMessage {
+  if (typeof value === 'string') return { role: 'assistant', content: value }
+  if (isRecord(value)) {
+    const content = typeof value.content === 'string' ? value.content : stringifyJson(value)
+    const toolCalls = Array.isArray(value.tool_calls) ? value.tool_calls.filter(isChatToolCall) : undefined
+    return {
+      role: 'assistant',
+      content,
+      ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+    }
+  }
+  return { role: 'assistant', content: stringifyJson(value) }
+}
+
+function isChatToolCall(value: unknown): value is NonNullable<ChatMessage['tool_calls']>[number] {
+  if (!isRecord(value) || value.type !== 'function' || typeof value.id !== 'string' || !isRecord(value.function)) return false
+  return typeof value.function.name === 'string' && typeof value.function.arguments === 'string'
+}
+
+function stringifyJson(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === undefined) return ''
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
   }
 }
 

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import { AnswerStore } from '../dist/context/answer-store.js'
 import {
   createRunMemory,
   renderRunMemory,
@@ -92,5 +96,30 @@ const rendered = renderRunMemory(memory)
 assert(rendered.includes('emptyResultKeywords: React'))
 assert(rendered.includes('candidateJobs:'))
 assert(rendered.includes('currentBestCandidate:'))
+
+const root = mkdtempSync(join(tmpdir(), 'mfa-answer-store-'))
+try {
+  const answerPath = join(root, 'answers.json')
+  const answerStore = new AnswerStore()
+  answerStore.put({
+    field: 'Expected salary',
+    question: 'What salary do you expect?',
+    answer: 'Negotiable',
+    at: '2026-07-06T00:00:07.000Z',
+    source: 'ask_user',
+    options: ['Negotiable', '30k'],
+  })
+  await answerStore.save(answerPath, '2026-07-06T00:00:08.000Z')
+  assert(readFileSync(answerPath, 'utf8').includes('"schemaVersion": "answer-store/v1"'))
+
+  const restoredAnswers = await AnswerStore.load(answerPath)
+  assert.equal(restoredAnswers.get('expected salary')?.answer, 'Negotiable')
+  assert.deepEqual(restoredAnswers.get('EXPECTED SALARY')?.options, ['Negotiable', '30k'])
+
+  const missingAnswers = await AnswerStore.load(join(root, 'missing.json'))
+  assert.deepEqual(missingAnswers.all(), [])
+} finally {
+  rmSync(root, { recursive: true, force: true })
+}
 
 console.log('run-memory-test: PASS')

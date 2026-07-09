@@ -92,11 +92,12 @@ function hasExternalBlocker(input: ObservationPhaseInput): boolean {
 function hasFinalSubmitBoundary(input: ObservationPhaseInput): boolean {
   if (hasVisibleFinalSubmitDialog(input)) return true
   if (actionableDialogPresent({ page: input.page, form: input.form }).present) return false
-  if ((input.form?.missingRequired.length ?? 0) > 0) return false
-  if (input.form && hasUnfilledRealFields(input.form)) return false
   if (input.blockers?.some(isFinalSubmitBlocker)) return true
   if (factsAsBlockers(input.policyFacts).some(isFinalSubmitBlocker)) return true
   if (factsAsBlockers(input.permissionFacts).some(isFinalSubmitBlocker)) return true
+
+  if ((input.form?.missingRequired.length ?? 0) > 0) return false
+  if (input.form && hasUnfilledRealFields(input.form)) return false
 
   if ((input.form?.submitCandidates ?? []).some(isFinalSubmitCandidate)) return true
   if ((input.page?.facts?.likelyFinalSubmitButtons ?? []).some((button) => button.visible !== false && FINAL_SUBMIT_TEXT.test(button.text))) {

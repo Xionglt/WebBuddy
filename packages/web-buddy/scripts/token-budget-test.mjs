@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_MAX_INPUT_TOKENS,
   TokenBudget,
   createTokenBudgetSnapshot,
   estimateChatMessages,
@@ -18,11 +19,14 @@ inputBudget.recordInputText('abcd')
 inputBudget.recordInputText('abcde')
 assert.deepEqual(inputBudget.snapshot(), {
   version: 1,
+  maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
   compactThresholdRatio: 0.8,
+  compactThresholdTokens: Math.ceil(DEFAULT_MAX_INPUT_TOKENS * 0.8),
   estimatedInputTokens: 3,
   estimatedToolResultTokens: 0,
   estimatedTotalTokens: 3,
   compactRecommended: false,
+  usingDefaultMaxInputTokens: true,
 })
 
 const toolBudget = new TokenBudget()
@@ -89,7 +93,12 @@ assert.equal(ratioThreshold.compactRecommended, true)
 
 const noMax = estimateTokenBudget([{ role: 'tool', content: 'B'.repeat(8000), tool_call_id: 'call_2' }])
 assert(noMax.estimatedTotalTokens > 1000, 'messages should still be estimated without maxInputTokens')
-assert.equal(noMax.compactRecommended, false, 'unset maxInputTokens should never recommend compact')
+assert.equal(noMax.maxInputTokens, DEFAULT_MAX_INPUT_TOKENS)
+assert.equal(noMax.compactRecommended, false, 'default maxInputTokens should avoid compacting small transcripts')
+
+const defaultThresholdHit = estimateTokenBudget([{ role: 'tool', content: 'B'.repeat(DEFAULT_MAX_INPUT_TOKENS * 4), tool_call_id: 'call_default' }])
+assert.equal(defaultThresholdHit.usingDefaultMaxInputTokens, true)
+assert.equal(defaultThresholdHit.compactRecommended, true, 'unset maxInputTokens should still compact very large transcripts')
 
 const longObservation = estimateChatMessages([{ role: 'tool', content: 'C'.repeat(4000), tool_call_id: 'call_3' }])
 const shortObservation = estimateChatMessages([{ role: 'tool', content: 'ok', tool_call_id: 'call_4' }])
@@ -99,11 +108,14 @@ assert.equal(estimateToolObservationTokens({ observation: 'D'.repeat(40) }), est
 
 assert.deepEqual(createTokenBudgetSnapshot(), {
   version: 1,
+  maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
   compactThresholdRatio: 0.8,
+  compactThresholdTokens: Math.ceil(DEFAULT_MAX_INPUT_TOKENS * 0.8),
   estimatedInputTokens: 0,
   estimatedToolResultTokens: 0,
   estimatedTotalTokens: 0,
   compactRecommended: false,
+  usingDefaultMaxInputTokens: true,
 })
 
 console.log('token-budget-test: PASS')

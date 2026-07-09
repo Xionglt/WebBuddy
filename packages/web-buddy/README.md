@@ -133,6 +133,31 @@ npm run test:session
 The research benchmark validates `metrics.json`, `page-state-latest.json`,
 `research-summary.json`, and `safety-report.json`.
 
+## Runtime Memory And Resume
+
+Web Buddy keeps run recovery and user memory separate:
+
+- `output/sessions/<sessionId>/transcript.jsonl` is the append-only run fact
+  source. `restoreSessionState()` rebuilds workflow facts and `restoredMessages`
+  from this transcript so resume flows can inspect both state and message
+  causality.
+- `~/.web-buddy/memory/answers.json` stores user answers collected through
+  `ask_user`, such as stable application preferences.
+- `~/.web-buddy/memory/permission-rules.json` stores remembered permission rules
+  that are matched before default permission rules.
+
+Override memory paths when running tests or isolated profiles:
+
+```bash
+WEB_BUDDY_MEMORY_DIR=/tmp/web-buddy-memory npm run fill -- https://example.com/apply
+WEB_BUDDY_ANSWER_STORE_PATH=/tmp/answers.json npm run demo:form
+WEB_BUDDY_PERMISSION_RULES_PATH=/tmp/permission-rules.json npm run demo:form
+```
+
+The default token budget guard is also enabled without explicit configuration.
+Token budget events in `events.jsonl` show the current estimate, threshold, and
+whether the default max input window is being used.
+
 ## Artifacts
 
 Primary run review artifacts live under `output/traces/<sessionId>/artifacts/`.

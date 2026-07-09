@@ -44,6 +44,10 @@ try {
 
   const completedTranscript = await readJsonLines(doneSession.transcriptPath)
   assert.deepEqual(completedTranscript.map((entry) => entry.type), [
+    'user_message',
+    'assistant_message',
+    'tool_call',
+    'tool_result',
     'workflow_snapshot',
     'workflow_evidence',
     'workflow_evaluation',
@@ -74,6 +78,7 @@ try {
   assert.equal(completedFinal.status, 'completed')
   assert.equal(completedFinal.result.confirmationId, completed.confirmation.id)
   assert.equal(completedFinal.result.completionGate.action, 'allow')
+  assert.equal(completedFinal.result.restoredMessageCount, 4)
 
   const completedEvents = await readJsonLines(doneSession.eventsPath)
   assert.deepEqual(
@@ -85,6 +90,7 @@ try {
   assert.equal(restoredEvent.data.workflowPhase, 'done')
   assert.equal(restoredEvent.data.observationPhase, 'done')
   assert.equal(restoredEvent.data.workflowEvidenceCount, 1)
+  assert.equal(restoredEvent.data.restoredMessageCount, 4)
   const userConfirmedEvent = completedEvents.find((event) => event.type === 'user_confirmed')
   assert.equal(userConfirmedEvent.data.confirmationId, completed.confirmation.id)
   assert.equal(userConfirmedEvent.data.evidenceId, completed.confirmation.evidence.id)
@@ -267,6 +273,21 @@ async function createBlockedDoneSession(store, ids) {
     evidenceIds: [evidence.id],
   }
 
+  await recorder.transcript({ type: 'user_message', content: 'Please resume the completed workflow.' })
+  await recorder.transcript({ type: 'assistant_message', content: 'I will verify the latest page state.' })
+  await recorder.transcript({
+    type: 'tool_call',
+    toolCallId: 'session_completion_snapshot',
+    name: 'browser_snapshot',
+    args: { includeText: true },
+  })
+  await recorder.transcript({
+    type: 'tool_result',
+    toolCallId: 'session_completion_snapshot',
+    name: 'browser_snapshot',
+    ok: true,
+    result: { observation: 'The application completion page is visible.' },
+  })
   await recorder.transcript({ type: 'workflow_snapshot', workflowState: state })
   await recorder.transcript({ type: 'workflow_evidence', evidence })
   await recorder.transcript({

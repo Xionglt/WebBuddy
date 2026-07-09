@@ -33,6 +33,7 @@ import {
 import { attemptApply, scrapeJobDetail, scrapeJobList, waitForAlibabaLoginClear, type ScrapedJob } from './alibaba.js'
 import { TraceRecorder, type TraceSummary } from './trace.js'
 import type { RunSource } from '../metrics/trace-inputs.js'
+import { PermissionEngine, loadPersistentPermissionRules } from '../permission/index.js'
 import { detectDirectSubmitReview, type DirectSubmitReview } from '../workflow/direct-submit.js'
 import {
   FileSessionRecorder,
@@ -715,7 +716,13 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
         gate, extraContext: llmExtraContext,
         safetyMode: mode === 'raw' ? 'raw' : 'guarded',
         permissionMode: config.human.permissionMode,
+        permissionEngine: new PermissionEngine({
+          permissionMode: config.human.permissionMode,
+          allowFinalSubmit: config.human.allowFinalSubmit,
+          persistentRules: await loadPersistentPermissionRules(config.memory.permissionRulesPath),
+        }),
         allowFinalSubmit: config.human.allowFinalSubmit,
+        persistentAnswerStore: { path: config.memory.answerStorePath },
         maxSteps: config.agent.maxSteps,
         taskType,
         requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,

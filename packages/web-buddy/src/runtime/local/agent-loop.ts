@@ -132,8 +132,10 @@ export interface AgentLoopInput {
   permissionEngine?: AgentLoopPermissionEngine
   /** Optional in-memory approval queue for tests or embedding runtimes. */
   approvalQueue?: AgentLoopApprovalQueue
-  /** Optional context budget. When maxInputTokens is unset, the loop estimates but does not compact. */
+  /** Context budget. When maxInputTokens is unset, a conservative default window is used. */
   contextBudget?: ContextBudgetOptions
+  /** Optional user-scoped answer memory persisted across runs. */
+  persistentAnswerStore?: PersistentAnswerStoreOptions
   /** Optional deterministic compactor for tests or alternate local runtimes. */
   contextCompactor?: AgentLoopContextCompactor
   /** Optional workflow evaluator for tests or alternate local runtimes. */
@@ -168,6 +170,10 @@ export interface ContextBudgetOptions extends TokenBudgetOptions {
   keepRecentMessages?: number
 }
 
+export interface PersistentAnswerStoreOptions {
+  path: string
+}
+
 export interface AgentLoopContextCompactor {
   compact(input: ContextCompactionInput): ContextCompactionResult
 }
@@ -197,7 +203,9 @@ export const RAW_MODE_EXCLUDED_TOOLS = [
 export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResult> {
   const { llm, registry, gate, resume, goal, onEvent } = input
   const profileStore = new ProfileStore(resume, input.resumeV2)
-  const answerStore = new AnswerStore()
+  const answerStore = input.ctx.answerStore ?? (input.persistentAnswerStore
+    ? await AnswerStore.load(input.persistentAnswerStore.path)
+    : new AnswerStore())
   const fillLedger = createFillLedger({
     fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
     summary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary,
@@ -208,7 +216,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const ctx: ToolContext = {
     ...input.ctx,
     profileStore: input.ctx.profileStore ?? profileStore,
-    answerStore: input.ctx.answerStore ?? answerStore,
+    answerStore,
     fieldPlan: input.ctx.fieldPlan ?? input.fieldPlan,
     fillLedgerSummary: fillLedger.summary(),
     humanInput: input.ctx.humanInput ?? gate,
@@ -1489,14 +1497,22 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })) {
         await recordRunMemorySnapshot(`Run memory updated from ${call.name}.`, step, turnId, call.id)
       }
+      const resultArtifact = maybeWriteToolResultArtifact({
+        trace: ctx.trace.agentTrace,
+        toolName: call.name,
+        toolCallId: call.id,
+        step,
+        result,
+      })
       const compactResult = compactToolResult(result)
+      const transcriptResult = attachToolResultArtifact(compactResult, resultArtifact)
       await sessionTranscript({
         type: 'tool_result',
         turnId,
         toolCallId: call.id,
         name: call.name,
         ok: toolOk,
-        result: compactResult,
+        result: transcriptResult,
         ...(!toolOk ? { error: result.observation } : {}),
       })
       await sessionEvent({
@@ -1504,10 +1520,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         turnId,
         toolCallId: call.id,
         message: `${call.name} ${toolOk ? 'completed' : 'failed'}.`,
-        data: { name: call.name, result: compactResult },
+        data: { name: call.name, result: transcriptResult },
       })
       const userAnswer = userAnswerFromToolResult(result)
       if (call.name === 'ask_user' && userAnswer) {
+        if (input.persistentAnswerStore && !toolResultReusedSavedAnswer(result)) {
+          await ctx.answerStore?.save(input.persistentAnswerStore.path, userAnswer.at)
+        }
         await sessionTranscript({
           type: 'user_answer',
           turnId,
@@ -1684,7 +1703,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         const snap = await browserSnapshot({ sessionId: ctx.sessionId })
         if (snap.ok) observation = `${observation}\n\n[updated page]\n${pageView(snap.data)}`
       }
-      messages.push(toolMessage(call.id, observation.slice(0, 6000)))
+      messages.push(toolMessage(call.id, toolMessageContentWithArtifact(observation, resultArtifact)))
       emit('observe', result.observation.replace(/\s+/g, ' ').slice(0, 160), step)
 
       if (done) break
@@ -1999,6 +2018,8 @@ function taskStateForLoop(input: AgentLoopInput, workflowState: WorkflowState) {
           : input.requiresCurrentResumeUpload
             ? 'filling' as const
             : 'observing' as const,
+    source: 'derived_from_workflow' as const,
+    sourceWorkflowPhase: workflowState.phase,
     knownBlockers: blockers,
     completionCriteria: criteria,
     updatedAt: workflowState.updatedAt,
@@ -2015,6 +2036,12 @@ function summarizeAnswerStore(answerStore: ToolContext['answerStore']): string |
       return `- field=${compactAnswerText(answer.field)} | answer=${compactAnswerText(answer.answer)} | source=${answer.source}${options} | at=${answer.at}`
     })
     .join('\n')
+}
+
+function toolResultReusedSavedAnswer(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false
+  const data = (result as { data?: unknown }).data
+  return Boolean(data && typeof data === 'object' && (data as { reused?: unknown }).reused === true)
 }
 
 function compactAnswerText(value: string): string {
@@ -2348,6 +2375,81 @@ function rememberUniqueBlocker(blockers: string[], blocker: string, maxBlockers 
 
 function toolMessage(toolCallId: string, content: string): ChatMessage {
   return { role: 'tool', tool_call_id: toolCallId, content }
+}
+
+interface ToolResultArtifactRef {
+  path: string
+  originalBytes: number
+}
+
+const TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES = 12 * 1024
+const TOOL_MESSAGE_OBSERVATION_CHARS = 6000
+
+function maybeWriteToolResultArtifact(input: {
+  trace?: { writeArtifact(name: string, content: string | Buffer): string; recordEvent(event: string, data?: unknown): void }
+  toolName: string
+  toolCallId: string
+  step: number
+  result: unknown
+}): ToolResultArtifactRef | undefined {
+  const content = stringifyPretty(input.result)
+  const originalBytes = Buffer.byteLength(content, 'utf8')
+  if (!input.trace || originalBytes <= TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES) return undefined
+
+  const name = `tool-result-step-${String(input.step).padStart(3, '0')}-${safeArtifactName(input.toolName)}-${safeArtifactName(input.toolCallId)}.json`
+  const path = input.trace.writeArtifact(name, `${content}\n`)
+  input.trace.recordEvent('tool_result_artifact', {
+    path,
+    toolName: input.toolName,
+    toolCallId: input.toolCallId,
+    step: input.step,
+    originalBytes,
+  })
+  return { path, originalBytes }
+}
+
+function attachToolResultArtifact(result: unknown, artifact: ToolResultArtifactRef | undefined): unknown {
+  if (!artifact) return result
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    return {
+      ...result,
+      artifact: {
+        kind: 'persisted_tool_result',
+        path: artifact.path,
+        originalBytes: artifact.originalBytes,
+      },
+    }
+  }
+  return {
+    value: result,
+    artifact: {
+      kind: 'persisted_tool_result',
+      path: artifact.path,
+      originalBytes: artifact.originalBytes,
+    },
+  }
+}
+
+function toolMessageContentWithArtifact(observation: string, artifact: ToolResultArtifactRef | undefined): string {
+  const visible = observation.slice(0, TOOL_MESSAGE_OBSERVATION_CHARS)
+  if (!artifact) return visible
+  return [
+    visible,
+    '',
+    `<persisted_tool_result path="${artifact.path}" originalBytes="${artifact.originalBytes}" />`,
+  ].join('\n')
+}
+
+function stringifyPretty(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function safeArtifactName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'item'
 }
 
 function workflowRecentActions(

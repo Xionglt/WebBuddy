@@ -227,6 +227,8 @@ function renderTaskState(taskState: TaskState): string {
     `schemaVersion: ${taskState.schemaVersion}`,
     `goal: ${taskState.goal}`,
     `phase: ${taskState.phase}`,
+    taskState.source ? `source: ${taskState.source}` : undefined,
+    taskState.sourceWorkflowPhase ? `sourceWorkflowPhase: ${taskState.sourceWorkflowPhase}` : undefined,
     'knownBlockers:',
     renderStringList(taskState.knownBlockers),
     '',

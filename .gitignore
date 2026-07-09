@@ -21,6 +21,7 @@ yarn-debug.log*
 yarn-error.log*
 *.log
 .session_tmps/
+docs/
 output/
 tmp/
 

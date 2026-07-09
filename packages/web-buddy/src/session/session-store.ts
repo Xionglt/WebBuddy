@@ -3,6 +3,7 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { KernelEvent } from '../kernel/kernel-events.js'
 import { appendJsonLine } from './transcript.js'
+import { migrateAgentSession } from './migrations.js'
 import type {
   AgentSession,
   AgentSessionStatus,
@@ -63,7 +64,7 @@ export class FileSessionStore implements SessionStore {
 
   async get(sessionId: string): Promise<AgentSession | undefined> {
     try {
-      return JSON.parse(await readFile(this.sessionJsonPath(sessionId), 'utf8')) as AgentSession
+      return migrateAgentSession(JSON.parse(await readFile(this.sessionJsonPath(sessionId), 'utf8')))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error

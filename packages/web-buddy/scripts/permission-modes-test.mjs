@@ -5,10 +5,26 @@ import { loadConfig } from '../dist/sdk/config.js'
 
 const fixedDate = new Date('2026-07-01T00:00:00.000Z')
 const originalPermissionMode = process.env.PERMISSION_MODE
+const originalMemoryDir = process.env.WEB_BUDDY_MEMORY_DIR
+const originalAnswerStorePath = process.env.WEB_BUDDY_ANSWER_STORE_PATH
+const originalPermissionRulesPath = process.env.WEB_BUDDY_PERMISSION_RULES_PATH
 
 process.env.PERMISSION_MODE = 'review'
 assert.equal(loadConfig().human.permissionMode, 'review')
 restorePermissionMode()
+
+process.env.WEB_BUDDY_MEMORY_DIR = '/tmp/web-buddy-memory-test'
+const memoryConfig = loadConfig()
+assert.equal(memoryConfig.memory.answerStorePath, '/tmp/web-buddy-memory-test/answers.json')
+assert.equal(memoryConfig.memory.permissionRulesPath, '/tmp/web-buddy-memory-test/permission-rules.json')
+restoreMemoryEnv()
+
+process.env.WEB_BUDDY_ANSWER_STORE_PATH = '/tmp/web-buddy-custom-answers.json'
+process.env.WEB_BUDDY_PERMISSION_RULES_PATH = '/tmp/web-buddy-custom-permissions.json'
+const explicitMemoryConfig = loadConfig()
+assert.equal(explicitMemoryConfig.memory.answerStorePath, '/tmp/web-buddy-custom-answers.json')
+assert.equal(explicitMemoryConfig.memory.permissionRulesPath, '/tmp/web-buddy-custom-permissions.json')
+restoreMemoryEnv()
 
 const safe = new PermissionEngine({ now: () => fixedDate, permissionMode: 'safe' })
 const safeApplyEntry = safe.evaluate(applyEntryRequest('safe-apply-entry'))
@@ -60,6 +76,15 @@ console.log('permission-modes-test: PASS')
 function restorePermissionMode() {
   if (originalPermissionMode === undefined) delete process.env.PERMISSION_MODE
   else process.env.PERMISSION_MODE = originalPermissionMode
+}
+
+function restoreMemoryEnv() {
+  if (originalMemoryDir === undefined) delete process.env.WEB_BUDDY_MEMORY_DIR
+  else process.env.WEB_BUDDY_MEMORY_DIR = originalMemoryDir
+  if (originalAnswerStorePath === undefined) delete process.env.WEB_BUDDY_ANSWER_STORE_PATH
+  else process.env.WEB_BUDDY_ANSWER_STORE_PATH = originalAnswerStorePath
+  if (originalPermissionRulesPath === undefined) delete process.env.WEB_BUDDY_PERMISSION_RULES_PATH
+  else process.env.WEB_BUDDY_PERMISSION_RULES_PATH = originalPermissionRulesPath
 }
 
 function applyEntryRequest(id) {

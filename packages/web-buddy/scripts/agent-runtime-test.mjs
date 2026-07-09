@@ -61,8 +61,11 @@ class RuntimeMockLlm {
     const rendered = JSON.stringify(messages)
     assert(!rendered.includes('POISON ARTIFACT'), 'AgentRuntime must not read trace artifact files into prompts')
     this.sawPoisonFreePrompt = true
-    if (rendered.includes('## TASK_STATE') && rendered.includes('phase: in_target_flow')) {
+    if (rendered.includes('## TASK_STATE') && rendered.includes('source: derived_from_workflow')) {
       this.sawTaskStatePrompt = true
+    }
+    if (rendered.includes('PREMATURE_AGENT_DONE_REJECTED')) {
+      return { content: 'No further safe work.', toolCalls: [] }
     }
 
     this.turn += 1
@@ -93,7 +96,10 @@ class DoneOnlyMockLlm {
     this.label = 'done-only-mock-llm'
   }
 
-  async chatWithTools() {
+  async chatWithTools(messages) {
+    if (JSON.stringify(messages).includes('PREMATURE_AGENT_DONE_REJECTED')) {
+      return { content: 'Direct loop acknowledged completion rejection.', toolCalls: [] }
+    }
     return {
       content: 'Direct loop still works.',
       toolCalls: [{ id: 'loop-done', name: 'agent_done', arguments: { summary: 'Old runAgentLoop entry works.', blocked: false } }],
@@ -132,15 +138,15 @@ try {
   assert(result.steps > 0, 'AgentRuntime result should include steps > 0')
   assert(result.toolCalls > 0, 'AgentRuntime result should include toolCalls > 0')
   assert.equal(result.done, true)
-  assert.equal(result.blocked, true)
-  assert.equal(result.stopReason, 'blocked')
-  assert.match(result.summary, /completion gate blocked/i)
+  assert.equal(result.blocked, false)
+  assert.equal(result.stopReason, 'agent_done')
+  assert.match(result.summary, /No further safe work/i)
   assert(runtimeMock.sawPoisonFreePrompt, 'mock should have inspected runtime prompts')
-  assert(runtimeMock.sawTaskStatePrompt, 'PromptAssembler should add default in_target_flow TaskState to runtime prompts')
+  assert(runtimeMock.sawTaskStatePrompt, 'PromptAssembler should mark loop TaskState as derived from WorkflowState')
   assert(events.some((event) => event.schemaVersion === 'agent-runtime-event/v1'), 'runtime events should be wrapped')
   assert(
-    events.some((event) => event.level === 'gate' && /completion_gate blocked/i.test(event.message)),
-    'runtime events should surface completion gate blocks',
+    events.some((event) => event.level === 'gate' && /completion_gate rejected/i.test(event.message)),
+    'runtime events should surface completion gate rejections',
   )
 
   const directLoopResult = await runAgentLoop({
@@ -153,8 +159,8 @@ try {
     maxSteps: 2,
   })
   assert.equal(directLoopResult.done, true, 'runAgentLoop old entry should still return done=true')
-  assert.equal(directLoopResult.blocked, true, 'runAgentLoop should block agent_done when completion evidence is missing')
-  assert.match(directLoopResult.summary, /completion gate blocked/i)
+  assert.equal(directLoopResult.blocked, false, 'runAgentLoop should return control after completion evidence is missing')
+  assert.match(directLoopResult.summary, /acknowledged completion rejection/i)
   assert(directLoopResult.toolCalls > 0, 'runAgentLoop old entry should still dispatch tools')
 
   trace.finish()
