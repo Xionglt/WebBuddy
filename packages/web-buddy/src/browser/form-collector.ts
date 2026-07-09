@@ -165,6 +165,17 @@ export async function collectFormSnapshotFromPage(page: Page, input: { maxFields
           }))
           .slice(0, 80)
       }
+      const isSelectPlaceholderText = (value: string) =>
+        /^(?:[-–—\s]*|请选择.*|請選擇.*|选择.*|選擇.*|please\s+(?:select|choose)(?:\s+.*)?|select(?:\s+(?:one|an?|your|the|option|status|authorization\s+status))?|choose(?:\s+(?:one|an?|your|the|option))?)$/i.test(
+          normalize(value),
+        )
+      const selectedOptionIsFilled = (option: { value?: string; label?: string; selected?: boolean }) => {
+        if (!option.selected) return false
+        const optionValue = normalize(option.value)
+        const optionLabel = normalize(option.label)
+        if (!optionValue) return false
+        return !isSelectPlaceholderText(optionValue) && !isSelectPlaceholderText(optionLabel)
+      }
       const fieldValue = (el: Element, kind: string) => {
         const input = (el.matches('input,textarea,select') ? el : el.querySelector('input,textarea,select')) as HTMLInputElement | HTMLSelectElement | null
         if (kind === 'checkbox' || kind === 'radio') return input && (input as HTMLInputElement).checked ? normalize(nearbyText(el) || input.value) : ''
@@ -196,8 +207,8 @@ export async function collectFormSnapshotFromPage(page: Page, input: { maxFields
       const fieldFilled = (kind: string, value: string, checked: boolean | undefined, options: ReturnType<typeof fieldOptions>) => {
         if (kind === 'checkbox' || kind === 'radio') return Boolean(checked)
         if (kind === 'select_native' || kind === 'select_custom' || kind === 'cascader') {
-          if (options?.some((option) => option.selected && (normalize(option.value) || normalize(option.label)))) return true
-          return value.length > 0 && !/^(请选择|please select|select|choose)$/i.test(value)
+          if (options?.some(selectedOptionIsFilled)) return true
+          return value.length > 0 && !isSelectPlaceholderText(value)
         }
         return value.length > 0
       }
@@ -375,12 +386,31 @@ export async function collectFormSnapshotFromPage(page: Page, input: { maxFields
         .filter(Boolean)
         .slice(0, 40)
 
+      const updatedAt = new Date().toISOString()
+      const scrollBottom = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
+      const viewportBottom = window.scrollY + (window.innerHeight || document.documentElement.clientHeight || 0)
+      const fieldKeysSeen = fields.map((field) => field.fieldKey).filter((key): key is string => Boolean(key))
+
       return {
         fields,
         uploadHints,
         submitCandidates,
         visibleErrors,
         totalControls: controls.length,
+        formCoverage: {
+          schemaVersion: 'form-coverage/v1' as const,
+          scope: 'viewport' as const,
+          complete: false,
+          scrolledTop: window.scrollY <= 2,
+          scrolledBottom: viewportBottom >= scrollBottom - 2,
+          segments: 1,
+          totalFieldsSeen: fields.length,
+          fieldKeysSeen,
+          fieldLimit: limit,
+          fieldLimitReached: fields.length >= limit,
+          auditTool: 'browser_form_snapshot' as const,
+          updatedAt,
+        },
       }
     },
     { selector: CONTROL_SELECTOR, limit: maxFields },
@@ -444,13 +474,18 @@ export async function auditFormSnapshotFromPage(page: Page, input: { maxFields?:
 
   const fields = Array.from(merged.values()).slice(0, maxFields).map((field, index) => ({ ...field, index }))
   const updatedAt = new Date().toISOString()
+  const fieldLimitReached = merged.size >= maxFields
   const formCoverage: FormCoverage = {
     schemaVersion: 'form-coverage/v1',
+    scope: 'full_audit',
+    complete: positions.includes(0) && (maxY === 0 || positions.some((position) => position >= maxY - 2)) && !fieldLimitReached,
     scrolledTop: positions.includes(0),
     scrolledBottom: maxY === 0 || positions.some((position) => position >= maxY - 2),
     segments: positions.length,
     totalFieldsSeen: fields.length,
     fieldKeysSeen: fields.map((field) => field.fieldKey).filter((key): key is string => Boolean(key)),
+    fieldLimit: maxFields,
+    fieldLimitReached,
     auditTool: 'browser_form_audit',
     updatedAt,
   }

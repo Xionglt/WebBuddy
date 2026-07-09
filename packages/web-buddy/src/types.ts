@@ -56,6 +56,7 @@ export interface ToolFailure {
     message: string
     recoverable: boolean
     suggestedNextActions?: string[]
+    data?: unknown
   }
 }
 
@@ -69,6 +70,7 @@ export type ToolErrorCode =
   | 'PAGE_CRASHED'
   | 'INVALID_ARGUMENT'
   | 'CONFIRMATION_REQUIRED'
+  | 'ACTIONABLE_DIALOG_PRESENT'
   | 'SESSION_NOT_FOUND'
   | 'UNKNOWN'
 

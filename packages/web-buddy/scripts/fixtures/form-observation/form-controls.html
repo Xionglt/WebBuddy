@@ -123,6 +123,16 @@
           <option value="search">搜索引擎</option>
         </select>
       </div>
+
+      <div class="field">
+        <label for="authorization-status">授权状态 *</label>
+        <select id="authorization-status" name="authorization_status" required aria-invalid="true">
+          <option value="" selected>Select authorization status</option>
+          <option value="authorized">已授权</option>
+          <option value="sponsorship">需要雇主支持</option>
+        </select>
+        <div class="ant-form-item-explain-error">授权状态不能为空</div>
+      </div>
     </form>
 
     <script>

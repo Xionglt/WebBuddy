@@ -7,6 +7,7 @@ export function toolFailure(
     recoverable?: boolean
     suggestedNextActions?: string[]
     observation?: string
+    data?: unknown
   },
 ): ToolFailure {
   return {
@@ -17,6 +18,7 @@ export function toolFailure(
       message,
       recoverable: options?.recoverable ?? code !== 'NAVIGATION_BLOCKED',
       suggestedNextActions: options?.suggestedNextActions,
+      ...(options?.data !== undefined ? { data: options.data } : {}),
     },
   }
 }

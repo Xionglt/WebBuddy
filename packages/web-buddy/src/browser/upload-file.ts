@@ -366,7 +366,7 @@ async function verifyUploadAcknowledged(page: Page, filePath: string, locator?: 
     })
     return {
       fileNameVisible: Boolean(name) && text.includes(name),
-      uploadStatusVisible: /uploaded|uploading|attached|processing|解析|上传成功|已上传|附件|简历/i.test(text),
+      uploadStatusVisible: /uploaded|uploading|attached|processing|upload complete|upload successful|解析中|解析完成|上传成功|上传完成|已上传|附件已上传|简历已上传/i.test(text),
       fileInputsWithFiles,
     }
   }, fileName).catch(() => ({

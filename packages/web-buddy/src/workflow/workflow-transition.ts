@@ -93,7 +93,7 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule {
   })
 
   if (phase === 'external_blocker') {
-    const blockerGateKind = blockers.find((blocker) => blocker.gateKind === 'login' || blocker.gateKind === 'captcha')?.gateKind
+    const blockerGateKind = blockers.find((blocker) => externalGateKind(blocker.gateKind))?.gateKind
     const gateKind = input.page?.pageType === 'captcha'
       ? 'captcha'
       : input.page?.pageType === 'login'
@@ -155,7 +155,7 @@ function blockersFor(input: WorkflowTransitionInput, directSubmitDetected: boole
     blockers.push({
       gateKind: input.gateKind,
       message: input.policyDecision?.reason,
-      unresolved: input.gateDecision !== 'approve',
+      unresolved: true,
     })
   }
   if (directSubmitDetected) {
@@ -209,7 +209,7 @@ function buildState(
   }
 }
 
-function externalGateKind(gateKind: GateKind | undefined): Extract<GateKind, 'login' | 'captcha'> | undefined {
+function externalGateKind(gateKind: GateKind | string | undefined): Extract<GateKind, 'login' | 'captcha'> | undefined {
   return gateKind === 'login' || gateKind === 'captcha' ? gateKind : undefined
 }
 

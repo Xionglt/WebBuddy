@@ -1,5 +1,5 @@
 import type { FillLedgerSummary } from '../fill/fill-ledger.js'
-import type { FormCoverage, FormState } from '../observation/form-state.js'
+import type { FormCoverage, FormFieldState, FormState } from '../observation/form-state.js'
 import type { PageState, PageType } from '../observation/page-state.js'
 import type { WebBuddyTaskType } from './completion-gate.js'
 import type { EvidenceStoreSnapshot, WorkflowEvidence } from './workflow-evidence.js'
@@ -88,7 +88,8 @@ function evaluateFillForm(ctx: TaskCompletionContext): Pick<TaskCompletionVerdic
   const ledger = ctx.fillLedgerSummary
   const visibleErrors = (ctx.form?.visibleErrors ?? []).filter((error) => /\S/.test(error))
   const missingEvidence = [
-    ...(coverage?.scrolledBottom === true ? [] : ['Form coverage must show scrolledBottom=true.']),
+    ...(hasCompleteFormCoverage(coverage) ? [] : [formCoverageMissingEvidence(coverage)]),
+    ...formRequiredCompletenessMissingEvidence(ctx.form),
     ...(ledger ? [] : ['Missing fill ledger summary.']),
     ...(ledger && ledger.pendingRequired !== 0 ? [`Fill ledger pendingRequired must be 0, currently ${ledger.pendingRequired}.`] : []),
     ...(ledger && ledger.failed !== 0 ? [`Fill ledger failed must be 0, currently ${ledger.failed}.`] : []),
@@ -103,18 +104,106 @@ function evaluateFillForm(ctx: TaskCompletionContext): Pick<TaskCompletionVerdic
   }
 }
 
+function hasCompleteFormCoverage(coverage: FormCoverage | undefined): boolean {
+  return (
+    coverage?.scope === 'full_audit' &&
+    coverage.complete === true &&
+    coverage.auditTool === 'browser_form_audit' &&
+    coverage.scrolledTop === true &&
+    coverage.scrolledBottom === true &&
+    coverage.fieldLimitReached !== true
+  )
+}
+
+function formCoverageMissingEvidence(coverage: FormCoverage | undefined): string {
+  if (!coverage) return 'Form coverage must come from browser_form_audit with scope=full_audit and complete=true.'
+  return [
+    'Form coverage must come from browser_form_audit with scope=full_audit and complete=true.',
+    `Current coverage: scope=${coverage.scope ?? '(unknown)'}, complete=${coverage.complete === true}, auditTool=${coverage.auditTool ?? '(unknown)'}, scrolledTop=${coverage.scrolledTop}, scrolledBottom=${coverage.scrolledBottom}, fieldLimitReached=${coverage.fieldLimitReached === true}.`,
+  ].join(' ')
+}
+
+function formRequiredCompletenessMissingEvidence(form: FormState | undefined): string[] {
+  if (!form) return []
+
+  const missingRequired = missingRequiredFields(form)
+  return [
+    ...(form.missingRequiredMayBeIncomplete === true
+      ? ['Form missingRequired may be incomplete; continue browser_form_audit, then fill any missing required fields before agent_done.']
+      : []),
+    ...(missingRequired.length > 0
+      ? [`Form still has ${missingRequired.length} missing required field(s): ${fieldLabelSummary(missingRequired)}. Continue filling and auditing before agent_done.`]
+      : []),
+  ]
+}
+
+function missingRequiredFields(form: FormState): FormFieldState[] {
+  return uniqueFields([
+    ...(form.missingRequired ?? []),
+    ...form.fields.filter((field) => field.required && field.disabled !== true && fieldShouldBlockCompletion(field)),
+  ])
+}
+
+function fieldShouldBlockCompletion(field: FormFieldState): boolean {
+  if (field.readonly === true) return false
+  return field.filled !== true || isRequiredSelectPlaceholder(field)
+}
+
+function isRequiredSelectPlaceholder(field: FormFieldState): boolean {
+  if (!field.required || !isSelectControl(field)) return false
+  const selectedOption = field.options?.find((option) => option.selected)
+  if (selectedOption) {
+    return !selectedOption.value || isSelectPlaceholderText(selectedOption.value) || isSelectPlaceholderText(selectedOption.label)
+  }
+  return isSelectPlaceholderText(field.value)
+}
+
+function isSelectControl(field: FormFieldState): boolean {
+  return field.controlKind === 'select_native' || field.controlKind === 'select_custom' || field.controlKind === 'cascader'
+}
+
+function isSelectPlaceholderText(value: string | undefined): boolean {
+  const normalized = normalize(value)
+  if (!normalized) return true
+  return /^(?:[-–—\s]*|请选择.*|請選擇.*|选择.*|選擇.*|please\s+(?:select|choose)(?:\s+.*)?|select(?:\s+(?:one|an?|your|the|option|status|authorization\s+status))?|choose(?:\s+(?:one|an?|your|the|option))?)$/i.test(normalized)
+}
+
+function uniqueFields(fields: FormFieldState[]): FormFieldState[] {
+  const seen = new Set<string>()
+  const result: FormFieldState[] = []
+  for (const field of fields) {
+    const id = field.fieldKey ?? `${field.index}:${field.label}:${field.name ?? ''}:${field.id ?? ''}`
+    if (seen.has(id)) continue
+    seen.add(id)
+    result.push(field)
+  }
+  return result
+}
+
+function fieldLabelSummary(fields: FormFieldState[]): string {
+  return fields
+    .slice(0, 6)
+    .map((field) => field.label || field.placeholder || field.name || field.id || `field-${field.index + 1}`)
+    .join(', ')
+}
+
 function evaluateFinalReview(ctx: TaskCompletionContext): Pick<TaskCompletionVerdict, 'targetStateReached' | 'missingEvidence'> {
+  const coverage = ctx.formCoverage ?? ctx.form?.formCoverage
   return {
     targetStateReached: false,
-    missingEvidence: isFinalSubmitBoundary(ctx)
-      ? ['Final submit boundary reached; human takeover is required.']
-      : ['final_review never auto-completes; human review is required.'],
+    missingEvidence: [
+      ...(ctx.form && !hasCompleteFormCoverage(coverage) ? [formCoverageMissingEvidence(coverage)] : []),
+      ...(isFinalSubmitBoundary(ctx)
+        ? ['Final submit boundary reached; human takeover is required.']
+        : ['final_review never auto-completes; human review is required.']),
+    ],
   }
 }
 
 function externalBlockerVisibleFor(ctx: TaskCompletionContext, taskType: WebBuddyTaskType): boolean {
   const text = blockerVisibleText(ctx)
   if (ctx.page?.pageType === 'login' || ctx.page?.pageType === 'captcha') return true
+  if (taskType === 'final_review' && isFinalSubmitBoundary(ctx)) return true
   if (taskType === 'fill_form') return containsLoginOrCaptcha(text)
   if (containsLoginCaptchaSsoOrPermissionWall(text)) return true
   if (taskType === 'apply_entry' && containsUnavailableTarget(text)) return true
@@ -172,7 +261,7 @@ function containsLoginCaptchaSsoOrPermissionWall(text: string): boolean {
 }
 
 function containsLoginOrCaptcha(text: string): boolean {
-  return /\b(login|log in|sign in|captcha|verify your identity)\b|登录|登陆|验证码|身份验证/i.test(text)
+  return /\b(login|log in|sign in|captcha|verify your identity|human verification|verification code|security code|one[-\s]?time code|otp)\b|登录|登陆|验证码|身份验证|人机验证/i.test(text)
 }
 
 function containsUnavailableTarget(text: string): boolean {

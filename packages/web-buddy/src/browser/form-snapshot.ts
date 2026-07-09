@@ -33,7 +33,10 @@ export async function browserFormSnapshot(input: {
       // Observation artifacts are best-effort diagnostics.
     }
 
-    return toolSuccess(`Form snapshot captured ${result.fields?.length ?? 0} fields and ${result.uploadHints.length} upload hints.`, data)
+    return toolSuccess(
+      `Form snapshot captured ${result.fields?.length ?? 0} viewport fields and ${result.uploadHints.length} upload hints; scope=viewport, complete=false.`,
+      data,
+    )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return toolFailure('PAGE_CRASHED', `Failed to capture form snapshot: ${message}`, {

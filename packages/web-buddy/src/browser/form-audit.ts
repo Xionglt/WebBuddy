@@ -39,7 +39,7 @@ export async function browserFormAudit(input: {
     }
 
     return toolSuccess(
-      `Form audit scanned ${result.formCoverage.segments} segments and found ${result.fields?.length ?? 0} unique fields.`,
+      `Form audit scanned ${result.formCoverage.segments} segments and found ${result.fields?.length ?? 0} unique fields; scope=full_audit, complete=${result.formCoverage.complete === true}.`,
       data,
     )
   } catch (error) {

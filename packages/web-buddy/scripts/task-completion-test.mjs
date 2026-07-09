@@ -89,10 +89,58 @@ const fillFormMissingResumeAndErrors = evaluateTaskCompletion({
   ]),
 })
 assert.equal(fillFormMissingResumeAndErrors.targetStateReached, false)
-assert.match(fillFormMissingResumeAndErrors.missingEvidence.join(' '), /scrolledBottom=true/)
+assert.match(fillFormMissingResumeAndErrors.missingEvidence.join(' '), /scope=full_audit and complete=true/)
 assert.match(fillFormMissingResumeAndErrors.missingEvidence.join(' '), /pendingRequired/)
 assert.match(fillFormMissingResumeAndErrors.missingEvidence.join(' '), /Current resume/)
 assert.match(fillFormMissingResumeAndErrors.missingEvidence.join(' '), /Phone is required/)
+
+const fillFormViewportCoverageIncomplete = evaluateTaskCompletion({
+  taskType: 'fill_form',
+  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
+  form: formState({ visibleErrors: [], formCoverage: coverage(true, { scope: 'viewport', complete: false, auditTool: 'browser_form_snapshot' }) }),
+  fillLedgerSummary: ledger({ total: 1, verified: 1 }),
+  evidenceSnapshot: evidenceSnapshot([
+    pageEvidence({ summary: 'Only viewport form snapshot was captured.', pageType: 'form' }),
+  ]),
+})
+assert.equal(fillFormViewportCoverageIncomplete.targetStateReached, false)
+assert.match(fillFormViewportCoverageIncomplete.missingEvidence.join(' '), /scope=viewport/)
+assert.match(fillFormViewportCoverageIncomplete.missingEvidence.join(' '), /complete=false/)
+
+const fillFormUntrustedMissingRequired = evaluateTaskCompletion({
+  taskType: 'fill_form',
+  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
+  form: formState({
+    visibleErrors: [],
+    formCoverage: coverage(true),
+    missingRequiredMayBeIncomplete: true,
+  }),
+  fillLedgerSummary: ledger({ total: 1, verified: 1 }),
+  evidenceSnapshot: evidenceSnapshot([
+    pageEvidence({ summary: 'Application form audited, but required-field coverage is untrusted.', pageType: 'form' }),
+  ]),
+})
+assert.equal(fillFormUntrustedMissingRequired.targetStateReached, false)
+assert.match(fillFormUntrustedMissingRequired.missingEvidence.join(' '), /missingRequired may be incomplete/)
+assert.match(fillFormUntrustedMissingRequired.missingEvidence.join(' '), /browser_form_audit/)
+
+const fillFormRequiredSelectPlaceholder = evaluateTaskCompletion({
+  taskType: 'fill_form',
+  page: pageState({ pageType: 'form', textSummary: 'Application form' }),
+  form: formState({
+    visibleErrors: [],
+    formCoverage: coverage(true),
+    fields: [requiredSelectPlaceholder('Preferred role track *')],
+    missingRequired: [requiredSelectPlaceholder('Preferred role track *')],
+    filledFields: [],
+  }),
+  fillLedgerSummary: ledger({ total: 1, verified: 1 }),
+  evidenceSnapshot: evidenceSnapshot([
+    pageEvidence({ summary: 'Application form audited to bottom.', pageType: 'form' }),
+  ]),
+})
+assert.equal(fillFormRequiredSelectPlaceholder.targetStateReached, false)
+assert.match(fillFormRequiredSelectPlaceholder.missingEvidence.join(' '), /Preferred role track/)
 
 const fillFormPermissionTextIsNotExternalBlocker = evaluateTaskCompletion({
   taskType: 'fill_form',
@@ -116,7 +164,7 @@ const finalReviewBoundary = evaluateTaskCompletion({
   ]),
 })
 assert.equal(finalReviewBoundary.targetStateReached, false)
-assert.equal(finalReviewBoundary.externalBlockerVisible, false)
+assert.equal(finalReviewBoundary.externalBlockerVisible, true)
 assert.match(finalReviewBoundary.missingEvidence.join(' '), /human takeover/i)
 
 console.log('task-completion tests passed')
@@ -165,14 +213,40 @@ function field(label) {
   }
 }
 
-function coverage(scrolledBottom) {
+function requiredSelectPlaceholder(label) {
+  return {
+    index: 0,
+    fieldKey: label.toLowerCase().replace(/\W+/g, '-'),
+    controlKind: 'select_native',
+    tag: 'select',
+    label,
+    value: 'Select one',
+    required: true,
+    filled: false,
+    disabled: false,
+    readonly: false,
+    invalid: false,
+    options: [
+      { value: '', label: 'Select one', selected: true },
+      { value: 'frontend', label: 'Frontend' },
+    ],
+  }
+}
+
+function coverage(scrolledBottom, overrides = {}) {
   return {
     schemaVersion: 'form-coverage/v1',
+    scope: 'full_audit',
+    complete: scrolledBottom,
     scrolledTop: true,
     scrolledBottom,
     segments: 2,
     totalFieldsSeen: 3,
+    fieldLimit: 240,
+    fieldLimitReached: false,
+    auditTool: 'browser_form_audit',
     updatedAt: '2026-07-07T00:00:00.000Z',
+    ...overrides,
   }
 }
 

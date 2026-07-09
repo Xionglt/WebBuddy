@@ -77,6 +77,61 @@ const allowedDespiteDonePhaseNotPresent = CompletionGate.evaluate({
 assert.equal(allowedDespiteDonePhaseNotPresent.action, 'allow')
 assert.equal(allowedDespiteDonePhaseNotPresent.workflowPhase, 'in_target_flow')
 
+const rejectedFillFormViewportCoverage = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  form: formState({
+    formCoverage: scrolledBottomCoverage({
+      scope: 'viewport',
+      complete: false,
+      auditTool: 'browser_form_snapshot',
+      scrolledBottom: false,
+    }),
+  }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  taskType: 'fill_form',
+  source: 'agent_done',
+})
+assert.equal(rejectedFillFormViewportCoverage.action, 'reject')
+assert.notEqual(rejectedFillFormViewportCoverage.recommendedStatus, 'completed')
+assert.match(rejectedFillFormViewportCoverage.reason, /scope=viewport/)
+
+const rejectedUntrustedMissingRequired = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  form: formState({
+    formCoverage: scrolledBottomCoverage(),
+    missingRequiredMayBeIncomplete: true,
+  }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  taskType: 'fill_form',
+  source: 'agent_done',
+})
+assert.equal(rejectedUntrustedMissingRequired.action, 'reject')
+assert.equal(rejectedUntrustedMissingRequired.recommendedStatus, 'unchanged')
+assert.match(rejectedUntrustedMissingRequired.reason, /missingRequired may be incomplete/)
+assert.match(rejectedUntrustedMissingRequired.reason, /continue browser_form_audit/i)
+
+const rejectedRequiredSelectPlaceholder = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  form: formState({
+    formCoverage: scrolledBottomCoverage(),
+    fields: [requiredSelectPlaceholder('Preferred role track *')],
+    missingRequired: [requiredSelectPlaceholder('Preferred role track *')],
+    filledFields: [],
+  }),
+  fillLedgerSummary: ledgerSummary({ total: 1, verified: 1 }),
+  taskType: 'fill_form',
+  source: 'agent_done',
+})
+assert.equal(rejectedRequiredSelectPlaceholder.action, 'reject')
+assert.notEqual(rejectedRequiredSelectPlaceholder.recommendedStatus, 'completed')
+assert.match(rejectedRequiredSelectPlaceholder.reason, /Preferred role track/)
+
 const allowedExploreFromTaskEvidence = CompletionGate.evaluate({
   done: true,
   blocked: false,
@@ -189,6 +244,25 @@ assert.equal(rejectedFinalReviewWithoutExternalBlocker.action, 'reject')
 assert.equal(rejectedFinalReviewWithoutExternalBlocker.recommendedStatus, 'unchanged')
 assert.match(rejectedFinalReviewWithoutExternalBlocker.reason, /final_review never auto-completes/i)
 
+const rejectedFinalReviewIncompleteCoverage = CompletionGate.evaluate({
+  done: true,
+  blocked: false,
+  workflowEvaluation: evaluation({ phase: 'in_target_flow' }),
+  form: formState({
+    formCoverage: scrolledBottomCoverage({
+      scope: 'viewport',
+      complete: false,
+      auditTool: 'browser_form_snapshot',
+      scrolledBottom: false,
+    }),
+  }),
+  taskType: 'final_review',
+  source: 'agent_done',
+})
+assert.equal(rejectedFinalReviewIncompleteCoverage.action, 'reject')
+assert.notEqual(rejectedFinalReviewIncompleteCoverage.recommendedStatus, 'completed')
+assert.match(rejectedFinalReviewIncompleteCoverage.reason, /scope=viewport/)
+
 const rejectedResumeNotUploaded = CompletionGate.evaluate({
   done: true,
   blocked: false,
@@ -265,10 +339,14 @@ function formState(overrides = {}) {
 function scrolledBottomCoverage(overrides = {}) {
   return {
     schemaVersion: 'form-coverage/v1',
+    scope: 'full_audit',
+    complete: true,
     scrolledTop: true,
     scrolledBottom: true,
     segments: 2,
     totalFieldsSeen: 1,
+    fieldLimit: 240,
+    fieldLimitReached: false,
     auditTool: 'browser_form_audit',
     updatedAt: '2026-06-30T00:00:00.000Z',
     ...overrides,
@@ -291,6 +369,26 @@ function ledgerSummary(overrides = {}) {
 
 function submitCandidate(text) {
   return { tag: 'button', text, visible: true, risk: 'L1' }
+}
+
+function requiredSelectPlaceholder(label) {
+  return {
+    index: 0,
+    fieldKey: label.toLowerCase().replace(/\W+/g, '-'),
+    controlKind: 'select_native',
+    tag: 'select',
+    label,
+    value: 'Select one',
+    required: true,
+    filled: false,
+    disabled: false,
+    readonly: false,
+    invalid: false,
+    options: [
+      { value: '', label: 'Select one', selected: true },
+      { value: 'frontend', label: 'Frontend' },
+    ],
+  }
 }
 
 function missingUserConfirmCriterion() {

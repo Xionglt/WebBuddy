@@ -27,11 +27,15 @@ export interface FieldLocatorHints {
 
 export interface FormCoverage {
   schemaVersion: 'form-coverage/v1'
+  scope?: 'viewport' | 'full_audit' | (string & {})
+  complete?: boolean
   scrolledTop: boolean
   scrolledBottom: boolean
   segments: number
   totalFieldsSeen: number
   fieldKeysSeen?: FieldKey[]
+  fieldLimit?: number
+  fieldLimitReached?: boolean
   auditTool?: 'browser_form_snapshot' | 'browser_form_audit' | (string & {})
   updatedAt: string
 }
@@ -94,5 +98,8 @@ export interface FormState {
   visibleErrors?: string[]
   facts?: PageFacts
   formCoverage?: FormCoverage
+  coverageScope?: FormCoverage['scope']
+  completeCoverage?: boolean
+  missingRequiredMayBeIncomplete?: boolean
   updatedAt: string
 }

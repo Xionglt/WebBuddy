@@ -92,7 +92,33 @@ function readbackMismatchReason(readback: Readback | undefined, intended: Intend
   if (kind === 'radio') {
     return `RADIO_NOT_SELECTED expected="${flattenIntended(intended).join(' / ')}" actual="${normalizeText(readback?.text ?? readback?.value)}"`
   }
+  if (kind === 'select_native' || kind === 'select_custom' || kind === 'cascader') {
+    return `SELECT_VALUE_MISMATCH expected="${flattenIntended(intended).join(' / ')}" actual="${normalizeText(readback?.text ?? readback?.value)}"`
+  }
   return `VALUE_MISMATCH expected="${flattenIntended(intended).join(' / ')}" actual="${normalizeText(readback?.value)}"`
+}
+
+function setFieldFailureMessage(input: {
+  label: string | undefined
+  match: FieldMatch
+  ref?: string
+  selector?: string
+  kind: SetFieldKind
+  intendedValue: IntendedValue
+  reason?: string
+}): string {
+  const target = input.label ?? input.match.label ?? input.ref ?? input.selector ?? 'unknown field'
+  const expected = flattenIntended(input.intendedValue).join(' / ')
+  if (input.kind === 'checkbox') {
+    return `Failed to set checkbox field "${target}": expected checked state ${expected || String(input.intendedValue)}, but verification failed (${input.reason ?? 'CHECKED_STATE_MISMATCH'}).`
+  }
+  if (input.kind === 'radio') {
+    return `Failed to set radio field "${target}": expected option "${expected}", but no selected radio readback matched (${input.reason ?? 'RADIO_NOT_SELECTED'}).`
+  }
+  if (input.kind === 'select_native' || input.kind === 'select_custom' || input.kind === 'cascader') {
+    return `Failed to set select field "${target}": expected option "${expected}", but selected-option readback did not match (${input.reason ?? 'SELECT_VALUE_MISMATCH'}).`
+  }
+  return `Failed to set text field "${target}": expected value "${expected}", but value readback did not match (${input.reason ?? 'VALUE_MISMATCH'}).`
 }
 
 function inferKind(match: FieldMatch, requested?: string): SetFieldKind {
@@ -628,7 +654,15 @@ export async function browserSetField(input: {
     await locator.evaluate((el) => el.removeAttribute('data-mfa-set-field-target')).catch(() => {})
     return toolFailure(
       'UNKNOWN',
-      `Failed to set field "${label ?? match.label ?? input.ref ?? input.selector}": ${last?.reason ?? 'readback did not match intendedValue'}`,
+      setFieldFailureMessage({
+        label,
+        match,
+        ref: input.ref,
+        selector: input.selector,
+        kind: actualKind,
+        intendedValue,
+        reason: last?.reason,
+      }),
       {
         recoverable: true,
         observation: JSON.stringify(

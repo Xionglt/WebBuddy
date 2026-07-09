@@ -99,7 +99,7 @@ export const TOOL_CATALOG: ToolDef[] = [
     name: 'browser_form_snapshot',
     mcpName: 'browser_form_snapshot',
     description:
-      'Capture form-specific state: labels, placeholders, required flags, current values, validation errors, select options, and upload hints. Use this before uploading a resume or filling complex application forms.',
+      'Capture viewport-only form state: labels, placeholders, required flags, current values, validation errors, select options, and upload hints. Contract: scope=viewport and complete=false; use browser_form_audit for full-form coverage.',
     category: 'observation',
     risk: 'L0',
     parameters: {
@@ -117,7 +117,7 @@ export const TOOL_CATALOG: ToolDef[] = [
     name: 'browser_form_audit',
     mcpName: 'browser_form_audit',
     description:
-      'Scroll the whole page, merge visible form fields across segments, and return formCoverage evidence. Read-only observation; restores scroll position when done.',
+      'Scroll the whole page, merge visible form fields across segments, and return full_audit formCoverage evidence. Read-only observation; restores scroll position when done.',
     category: 'observation',
     risk: 'L0',
     parameters: {

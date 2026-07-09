@@ -67,6 +67,10 @@ try {
         { value: 'shanghai', label: 'Shanghai', selected: false },
       ] },
       { index: 3, label: 'Portfolio', tag: 'input', type: 'url', value: '', required: false },
+      { index: 4, label: 'Work authorization', tag: 'select', value: 'Select authorization status', required: true, filled: true, options: [
+        { value: '', label: 'Select authorization status', selected: true },
+        { value: 'authorized', label: 'Authorized', selected: false },
+      ] },
     ],
     submitCandidates: [{ tag: 'button', type: 'submit', text: 'Submit application', risk: 'L3', visible: true }],
     uploadHints: [{ tag: 'input', type: 'file', text: '', visible: true, accept: '.pdf' }],
@@ -74,10 +78,12 @@ try {
     facts: pageFacts,
   }, '2026-06-24T00:00:00.000Z')
   assert.equal(formState.schemaVersion, 'form-state/v1')
-  assert.equal(formState.fields.length, 4)
+  assert.equal(formState.fields.length, 5)
   assert.equal(formState.filledFields.length, 2)
-  assert.equal(formState.missingRequired.length, 1)
+  assert.equal(formState.missingRequired.length, 2)
   assert.equal(formState.missingRequired[0].label, 'Email')
+  assert(formState.missingRequired.some((field) => field.label === 'Work authorization'))
+  assert.equal(formState.fields[4].filled, false)
   assert.equal(formState.submitCandidates[0].risk, 'L3')
   assert.equal(formState.fields[2].options.length, 2)
   assert.equal(formState.fields[2].options[0].selected, true)
@@ -105,7 +111,7 @@ try {
   })
 
   assert.equal(observedPage.pageType, 'form')
-  assert.equal(observedForm.missingRequired.length, 1)
+  assert.equal(observedForm.missingRequired.length, 2)
 
   const artifactsDir = join(root, 'obs_test', 'artifacts')
   const pageArtifact = join(artifactsDir, 'page-state-latest.json')

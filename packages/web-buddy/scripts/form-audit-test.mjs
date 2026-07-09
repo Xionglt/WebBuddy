@@ -27,10 +27,12 @@ async function main() {
   if (!audit.ok) throw new Error(audit.error.message)
 
   assert.equal(audit.data.formCoverage.schemaVersion, 'form-coverage/v1')
+  assert.equal(audit.data.formCoverage.scope, 'full_audit')
+  assert.equal(audit.data.formCoverage.complete, true)
   assert.equal(audit.data.formCoverage.scrolledTop, true)
   assert.equal(audit.data.formCoverage.scrolledBottom, true)
   assert(audit.data.formCoverage.segments >= 2, 'expected multi-segment audit')
-  assert(audit.data.formCoverage.totalFieldsSeen >= 6, 'expected merged fields from top and bottom')
+  assert(audit.data.formCoverage.totalFieldsSeen >= 7, 'expected merged fields from top and bottom')
 
   const fields = audit.data.fields
   const byLabel = (text) => fields.find((field) => field.label.includes(text))
@@ -39,6 +41,7 @@ async function main() {
   const agreement = byLabel('协议')
   const portfolio = byLabel('作品链接')
   const source = byLabel('信息来源')
+  const authorizationStatus = byLabel('授权状态')
 
   assert(city, 'expected Ant Select city field')
   assert.equal(city.controlKind, 'select_custom')
@@ -67,11 +70,21 @@ async function main() {
   assert.equal(source.filled, true)
   assert(source.options.some((option) => option.label === '朋友推荐' && option.selected))
 
+  assert(authorizationStatus, 'expected required native select placeholder regression field')
+  assert.equal(authorizationStatus.controlKind, 'select_native')
+  assert.equal(authorizationStatus.required, true)
+  assert.equal(authorizationStatus.filled, false)
+  assert(authorizationStatus.options.some((option) => option.value === '' && /Select authorization status/.test(option.label) && option.selected))
+
   const formState = observationManager.getFormState('default')
   assert(formState, 'expected observation manager form state')
+  assert.equal(formState.coverageScope, 'full_audit')
+  assert.equal(formState.completeCoverage, true)
   assert.equal(formState.formCoverage.scrolledBottom, true)
   assert(formState.missingRequired.some((field) => field.label.includes('作品链接')))
+  assert(formState.missingRequired.some((field) => field.label.includes('授权状态')))
   assert(formState.filledFields.some((field) => field.label.includes('协议')))
+  assert(!formState.filledFields.some((field) => field.label.includes('授权状态')))
 
   console.log('form-audit-test: PASS')
 }

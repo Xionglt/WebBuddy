@@ -243,8 +243,8 @@ function profileFromStore(store: ProfileStore | undefined): PlannerProfile {
     location: fieldString(objectValue(contact.location)),
     summary: fieldString(objectValue(summary.summary)),
     seniority: fieldString(objectValue(summary.seniority)),
-    targetRoles: fieldArray(all.targetRoles),
-    skills: fieldArray(all.skills),
+    targetRoles: stringArrayField(all.targetRoles),
+    skills: stringArrayField(all.skills),
     experience: fieldArray(all.experience) as ResumeExperience[],
     projects: fieldArray(all.projects) as ResumeProjectExperience[],
     education: fieldArray(all.education) as ResumeEducation[],
@@ -259,6 +259,13 @@ function fieldArray(value: unknown): unknown[] {
   if (Array.isArray(value)) return value
   const object = objectValue(value)
   return Array.isArray(object.value) ? object.value : []
+}
+
+function stringArrayField(value: unknown): string[] {
+  return fieldArray(value)
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 function objectValue(value: unknown): Record<string, unknown> {

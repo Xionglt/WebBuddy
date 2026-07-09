@@ -17,6 +17,7 @@ export interface PostconditionSnapshot {
   targetChecked: boolean | null
   targetDisabled: boolean | null
   targetValue: string | null
+  captureError?: string
 }
 
 export interface PostconditionResult {
@@ -77,7 +78,13 @@ export async function capturePostconditionSnapshot(
       }
       return String(hash >>> 0)
     }
-  })
+  }).catch((error) => ({
+    bodyTextHash: '',
+    interactiveCount: -1,
+    dialogOpen: false,
+    focusedSelector: null,
+    captureError: error instanceof Error ? error.message : String(error),
+  }))
 
   const targetState = options.targetLocator && options.captureTargetState
     ? await readTargetState(options.targetLocator)
@@ -96,6 +103,7 @@ export function diffPostcondition(
 ): PostconditionResult {
   const changedSignals: string[] = []
   if (before.url !== after.url) changedSignals.push('url')
+  if (before.captureError || after.captureError) changedSignals.push('captureError')
   if (before.dialogOpen !== after.dialogOpen) changedSignals.push('dialogOpen')
   if (before.targetChecked !== after.targetChecked) changedSignals.push('targetChecked')
   if (before.targetDisabled !== after.targetDisabled) changedSignals.push('targetDisabled')
@@ -104,15 +112,22 @@ export function diffPostcondition(
   if (before.bodyTextHash !== after.bodyTextHash) changedSignals.push('bodyTextHash')
   if (before.focusedSelector !== after.focusedSelector) changedSignals.push('focusedSelector')
 
+  const materialStateSignals = changedSignals.filter((signal) =>
+    signal !== 'focusedSelector' && signal !== 'captureError'
+  )
   let outcome: PostconditionOutcome = 'no_op'
   if (before.url !== after.url) {
     outcome = 'navigation'
+  } else if (before.captureError || after.captureError) {
+    outcome = 'uncertain'
   } else if (!before.dialogOpen && after.dialogOpen) {
     outcome = 'dialog_opened'
   } else if (before.dialogOpen && !after.dialogOpen) {
     outcome = 'dialog_closed'
-  } else if (changedSignals.length > 0) {
+  } else if (materialStateSignals.length > 0) {
     outcome = 'state_changed'
+  } else if (changedSignals.length > 0) {
+    outcome = 'uncertain'
   }
 
   return { outcome, before, after, changedSignals }
