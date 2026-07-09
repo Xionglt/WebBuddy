@@ -88,6 +88,8 @@
     "test:session-completion": "npm run build && node ./scripts/session-completion-test.mjs",
     "test:mvp": "npm run build && npm run test:token-budget && npm run test:context-compaction && npm run test:context && npm run test:prompt-sections && npm run test:metrics && npm run test:tool-execution && npm run test:tool-execution-service && npm run test:policy && npm run test:policy-engine && npm run test:permission-engine && npm run test:approval-queue && npm run test:workflow && npm run test:agent-runtime && npm run test:kernel && npm run test:agent-runtime-workflow && npm run test:agent-loop && npm run test:session && npm run benchmark:simple && npm run benchmark:complex && npm run benchmark:research && npm run test:tool-catalog && npm run test:observation && npm run test:safety-report",
     "test:alibaba-probe": "node ./scripts/alibaba-application-probe.mjs",
+    "delivery:probe": "node ./scripts/delivery-probe.mjs",
+    "delivery:compare": "node ./scripts/delivery-compare.mjs",
     "benchmark:simple": "npm run build && node ./scripts/benchmark-simple.mjs",
     "benchmark:complex": "npm run build && node ./scripts/benchmark-complex.mjs",
     "benchmark:research": "npm run build && node ./scripts/benchmark-research.mjs",
