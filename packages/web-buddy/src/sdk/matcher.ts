@@ -327,7 +327,7 @@ export function decideMatchThreshold(
     return {
       threshold: safeThreshold,
       shouldApply: false,
-      reason: `No candidates available; threshold is ${safeThreshold.toFixed(2)}.`,
+      reason: `No candidates available; inclusive threshold requires score >= threshold (${safeThreshold.toFixed(2)}).`,
     }
   }
   if (best.score < safeThreshold) {
@@ -335,14 +335,14 @@ export function decideMatchThreshold(
       threshold: safeThreshold,
       shouldApply: false,
       best,
-      reason: `Best score ${best.score.toFixed(2)} is below threshold ${safeThreshold.toFixed(2)}.`,
+      reason: `Best score ${best.score.toFixed(2)} is below threshold ${safeThreshold.toFixed(2)}; requires score >= threshold.`,
     }
   }
   return {
     threshold: safeThreshold,
     shouldApply: true,
     best,
-    reason: `Best score ${best.score.toFixed(2)} meets threshold ${safeThreshold.toFixed(2)}.`,
+    reason: `Best score ${best.score.toFixed(2)} satisfies inclusive threshold ${safeThreshold.toFixed(2)} (score >= threshold).`,
   }
 }
 

@@ -23,6 +23,8 @@ const DEFAULT_LIST_URL = 'https://talent-holding.alibaba.com/off-campus/position
 export interface ScrapedJob extends JobPosting {
   detailUrl?: string
   positionId?: string
+  /** ISO timestamp/date derived from Alibaba modifyTime/publishTime or card updated text. */
+  updatedAt?: string
   /** Original list URL supplied to the crawler; used to replay SPA pagination from page 1. */
   sourceRootListUrl?: string
   /** List page/batch URL where this card was observed; used as a safe click fallback when detailUrl is absent. */
@@ -49,39 +51,6 @@ function extractLines(text: string): string[] {
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
-}
-
-interface ParsedList {
-  total: number
-  jobs: Array<{ title: string; updated?: string; category?: string; location?: string }>
-}
-
-/** Parse the position-list body text into cards. Mirrors the proven probe logic. */
-function parseList(lines: string[]): ParsedList {
-  const jobs: ParsedList['jobs'] = []
-  const totalLine = lines.find((line) => /在招职位.*共\d+个岗位/.test(line)) || ''
-  const total = Number(totalLine.match(/共(\d+)个岗位/)?.[1] || 0)
-  const start = lines.findIndex((line) => line.includes('在招职位'))
-
-  for (let index = Math.max(start + 1, 0); index < lines.length - 3; index += 1) {
-    const title = lines[index]
-    const updated = lines[index + 1]
-    if (title === '你可能有兴趣的职位' || /^\d+\/\d+$/.test(title)) break
-    if (!updated?.startsWith('更新于')) continue
-
-    jobs.push({
-      title,
-      updated,
-      category: lines[index + 2] || '',
-      location: lines[index + 3] || '',
-    })
-    index += 3
-  }
-  return { total, jobs }
-}
-
-async function readLines(page: Page): Promise<string[]> {
-  return extractLines(await page.locator('body').innerText({ timeout: 15000 }))
 }
 
 /** Click a job card by walking the DOM to the nearest clickable ancestor/card root. */
@@ -326,9 +295,10 @@ async function clickJobCard(page: Page, job: Pick<ScrapedJob, 'title' | 'sourceT
     }
 
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT)
-    let node: Element | null
-    while ((node = walker.nextNode())) {
-      if (isLikelyTarget(node) && clickCandidate(node)) return true
+    let node = walker.nextNode()
+    while (node) {
+      if (node instanceof Element && isLikelyTarget(node) && clickCandidate(node)) return true
+      node = walker.nextNode()
     }
     return false
   }, target)
@@ -352,6 +322,7 @@ function positionIdFromUrl(url?: string): string | undefined {
 interface StructuredListJob {
   title: string
   updated?: string
+  updatedAt?: string
   category?: string
   location?: string
   positionId?: string
@@ -376,6 +347,14 @@ async function extractAlibabaApiJobs(page: Page, pageIndex: number): Promise<{ t
       const text = String(value ?? '').replace(/\s+/g, ' ').trim()
       return text || undefined
     }
+    const isoFromEpochMs = (value: unknown): string | undefined => {
+      const timestamp = Number(value || 0)
+      if (!Number.isFinite(timestamp) || timestamp <= 0) return undefined
+      const date = new Date(timestamp)
+      return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+    }
+    const updatedLabelFromIso = (value: string | undefined): string | undefined =>
+      value ? `更新于 ${value.slice(0, 10)}` : undefined
     const resourceUrl = performance
       .getEntriesByType('resource')
       .map((entry) => entry.name)
@@ -416,13 +395,12 @@ async function extractAlibabaApiJobs(page: Page, pageIndex: number): Promise<{ t
         const categories = Array.isArray(item.categories) ? item.categories.map(clean).filter(Boolean) : []
         const locations = Array.isArray(item.workLocations) ? item.workLocations.map(clean).filter(Boolean) : []
         const tags = Array.isArray(item.tags) ? item.tags.map(clean).filter(Boolean) : []
-        const updatedMs = Number(item.modifyTime || item.publishTime || 0)
-        const updated = Number.isFinite(updatedMs) && updatedMs > 0
-          ? `更新于 ${new Date(updatedMs).toISOString().slice(0, 10)}`
-          : undefined
+        const updatedAt = isoFromEpochMs(item.modifyTime || item.publishTime)
+        const updated = updatedLabelFromIso(updatedAt)
         return {
           title: clean(item.name) || `job-${id || ''}`,
           updated,
+          updatedAt,
           category: categories.join(' / ') || undefined,
           location: locations.join(' / ') || undefined,
           positionId: id,
@@ -436,11 +414,26 @@ async function extractAlibabaApiJobs(page: Page, pageIndex: number): Promise<{ t
   }, { pageIndex }).catch(() => ({ total: 0, jobs: [] }))
 }
 
-async function extractStructuredJobs(page: Page): Promise<StructuredListJob[]> {
+async function extractStructuredJobs(page: Page): Promise<{ total: number; jobs: StructuredListJob[] }> {
   return page.evaluate(() => {
     const clean = (value: string | null | undefined): string | undefined => {
       const text = (value || '').replace(/\s+/g, ' ').trim()
       return text || undefined
+    }
+    const textParts = (root: Element): string[] => {
+      const parts: string[] = []
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+      let node = walker.nextNode()
+      while (node) {
+        const value = clean(node.nodeValue)
+        if (value) parts.push(value)
+        node = walker.nextNode()
+      }
+      return parts
+    }
+    const updatedAtFromText = (value: string | undefined): string | undefined => {
+      const date = value?.match(/更新于\s*(\d{4}-\d{2}-\d{2})/)?.[1]
+      return date ? `${date}T00:00:00.000Z` : undefined
     }
     const safeDecode = (value: string): string => {
       try { return decodeURIComponent(value) } catch { return value }
@@ -518,6 +511,10 @@ async function extractStructuredJobs(page: Page): Promise<StructuredListJob[]> {
       url.searchParams.set('lang', lang)
       return url.toString()
     }
+    const looksLikeCategory = (value: string | undefined): boolean =>
+      Boolean(value && /类-|运营|风险管理|技术|产品|设计|数据|市场|销售|外贸|综合|客服|游戏|金融/.test(value))
+    const looksLikeLocation = (value: string | undefined): boolean =>
+      Boolean(value && /北京|杭州|上海|深圳|广州|成都|重庆|南京|武汉|西安|苏州|中国香港|\/| /.test(value) && !looksLikeCategory(value))
     const cardSelector = [
       '[data-job-card]',
       '[data-position-id]',
@@ -572,13 +569,42 @@ async function extractStructuredJobs(page: Page): Promise<StructuredListJob[]> {
         candidates.add(promoteRoot(el))
       }
     }
+    const compactCardFor = (el: Element): Element | undefined => {
+      let root: Element | undefined
+      let current: Element | null = el
+      for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+        const text = clean(current.textContent) || ''
+        const updateCount = text.match(/更新于\s*\d{4}-\d{2}-\d{2}/g)?.length || 0
+        if (updateCount !== 1) continue
+        if (/^更新于\s*\d{4}-\d{2}-\d{2}/.test(text) || text.length > 400) continue
+        root = current
+      }
+      return root
+    }
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      const text = clean(el.textContent) || ''
+      if (!/更新于\s*\d{4}-\d{2}-\d{2}/.test(text)) continue
+      const root = compactCardFor(el)
+      if (root) candidates.add(root)
+    }
 
-    return Array.from(candidates).map((card, index) => {
+    const bodyText = clean(document.body?.innerText) || ''
+    const total = Number(bodyText.match(/在招职位\s*共\s*(\d+)\s*个岗位/)?.[1] || 0)
+    const jobs = Array.from(candidates).map((card, index) => {
       const scoped = scopedValues(card)
       const link =
         card.querySelector<HTMLAnchorElement>('a[href*="position-detail"],a[href*="positionId"],a[href]') ||
         (card instanceof HTMLAnchorElement ? card : null)
       const linkUrl = usefulDetailUrl(absolute(link?.getAttribute('href')))
+      const parts = textParts(card)
+      const inlineUpdated = parts.find((part) => /^更新于\s*\d{4}-\d{2}-\d{2}/.test(part)) || textOf(card, '[data-updated]')
+      const inlineUpdatedIndex = inlineUpdated ? parts.findIndex((part) => part === inlineUpdated) : -1
+      const splitUpdatedIndex = inlineUpdated
+        ? -1
+        : parts.findIndex((part, partIndex) => part === '更新于' && /^\d{4}-\d{2}-\d{2}$/.test(parts[partIndex + 1] || ''))
+      const updated = inlineUpdated || (splitUpdatedIndex >= 0 ? `更新于 ${parts[splitUpdatedIndex + 1]}` : undefined)
+      const titleEndIndex = inlineUpdatedIndex >= 0 ? inlineUpdatedIndex : splitUpdatedIndex
+      const metadataStartIndex = inlineUpdatedIndex >= 0 ? inlineUpdatedIndex + 1 : splitUpdatedIndex >= 0 ? splitUpdatedIndex + 2 : -1
       const rawPositionId =
         explicitPositionId(card) ||
         (linkUrl ? new URL(linkUrl).searchParams.get('positionId') || undefined : undefined) ||
@@ -589,6 +615,7 @@ async function extractStructuredJobs(page: Page): Promise<StructuredListJob[]> {
         textOf(card, '.job-title,.position-title') ||
         textOf(card, 'h1,h2,h3') ||
         clean(link?.textContent) ||
+        (titleEndIndex > 0 ? parts.slice(0, titleEndIndex).join(' ') : undefined) ||
         clean(card.textContent)?.split(/\s+更新于|Updated/i)[0] ||
         `job-${index + 1}`
       const detailUrl =
@@ -606,11 +633,15 @@ async function extractStructuredJobs(page: Page): Promise<StructuredListJob[]> {
         attr(card, 'data-job-tags') ||
         textOf(card, '[data-job-tags],[data-tags]') ||
         ''
+      const metadata = metadataStartIndex >= 0 ? parts.slice(metadataStartIndex).filter(Boolean) : []
+      const category = attr(card, 'data-category') || textOf(card, '[data-category],.category') || metadata.find(looksLikeCategory)
+      const location = attr(card, 'data-location') || textOf(card, '[data-location],.location') || metadata.find((part) => part !== category && looksLikeLocation(part))
       return {
         title,
-        updated: attr(card, 'data-updated') || textOf(card, '[data-updated]'),
-        category: attr(card, 'data-category') || textOf(card, '[data-category],.category'),
-        location: attr(card, 'data-location') || textOf(card, '[data-location],.location'),
+        updated,
+        updatedAt: updatedAtFromText(updated),
+        category,
+        location,
         positionId,
         detailUrl,
         tags: rawTags.split(/[,\s，、]+/).map((tag) => tag.trim()).filter(Boolean),
@@ -618,18 +649,21 @@ async function extractStructuredJobs(page: Page): Promise<StructuredListJob[]> {
     }).filter((job) => {
       const title = clean(job.title)
       if (!title || /在招职位|筛选|职位类别|清除/.test(title)) return false
-      return Boolean(job.detailUrl || job.positionId || job.updated || job.category || job.location || job.tags.length > 0)
+      if (isAlibaba) return Boolean(job.positionId && job.detailUrl && job.updatedAt)
+      return Boolean(job.detailUrl || job.positionId || job.updatedAt || job.category || job.location || job.tags.length > 0)
     })
+    return { total, jobs }
   })
 }
 
-async function extractJobsOnCurrentPage(page: Page, pageIndex: number, offset: number): Promise<{ total: number; jobs: ScrapedJob[]; source: 'alibaba-api' | 'dom' | 'text' }> {
+async function extractJobsOnCurrentPage(page: Page, pageIndex: number, offset: number): Promise<{ total: number; jobs: ScrapedJob[]; source: 'alibaba-api' | 'dom' }> {
   const api = await extractAlibabaApiJobs(page, pageIndex)
-  const structured = api.jobs.length > 0 ? api.jobs : await extractStructuredJobs(page).catch(() => [])
+  const dom = api.jobs.length > 0 ? { total: 0, jobs: [] } : await extractStructuredJobs(page).catch(() => ({ total: 0, jobs: [] }))
+  const structured = api.jobs.length > 0 ? api.jobs : dom.jobs
   if (structured.length > 0) {
     const jobs = structured.map((job, index): ScrapedJob => {
       const positionId = job.positionId || positionIdFromUrl(job.detailUrl)
-      const searchText = [job.title, job.category, job.location, job.updated, job.description, job.requirement, ...(job.tags || [])]
+      const searchText = [job.title, job.category, job.location, job.updatedAt || job.updated, job.description, job.requirement, ...(job.tags || [])]
         .filter(Boolean)
         .join(' ')
       return {
@@ -638,6 +672,7 @@ async function extractJobsOnCurrentPage(page: Page, pageIndex: number, offset: n
         category: job.category,
         location: job.location,
         updated: job.updated,
+        updatedAt: job.updatedAt,
         detailUrl: job.detailUrl,
         positionId,
         sourcePageIndex: pageIndex,
@@ -648,31 +683,9 @@ async function extractJobsOnCurrentPage(page: Page, pageIndex: number, offset: n
         tags: [...new Set([...(job.tags || []), ...tokenize(searchText)])],
       }
     })
-    return { total: api.total || jobs.length, jobs, source: api.jobs.length > 0 ? 'alibaba-api' : 'dom' }
+    return { total: api.total || dom.total || jobs.length, jobs, source: api.jobs.length > 0 ? 'alibaba-api' : 'dom' }
   }
-
-  const lines = await readLines(page)
-  const { total, jobs } = parseList(lines)
-  return {
-    total,
-    jobs: jobs.map((job, index) => {
-      const searchText = [job.title, job.category, job.location, job.updated].filter(Boolean).join(' ')
-      return {
-        id: `alibaba-${pageIndex}-${offset + index + 1}`,
-        title: job.title,
-        category: job.category,
-        location: job.location,
-        updated: job.updated,
-        sourcePageIndex: pageIndex,
-        sourceCardIndex: index + 1,
-        sourceTitle: job.title,
-        sourceListSnapshotKey: `page-${pageIndex}-card-${index + 1}`,
-        searchText,
-        tags: tokenize(searchText),
-      }
-    }),
-    source: 'text',
-  }
+  return { total: api.total || dom.total || 0, jobs: [], source: 'dom' }
 }
 
 async function waitForListRender(page: Page): Promise<void> {

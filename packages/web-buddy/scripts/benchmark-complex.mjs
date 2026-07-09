@@ -9,6 +9,7 @@ import {
   renderSystemContext,
   renderUserContext,
 } from '../dist/agent/prompt-assembler.js'
+import { browserFormAudit } from '../dist/browser/form-audit.js'
 import { browserFormSnapshot } from '../dist/browser/form-snapshot.js'
 import { browserOpen } from '../dist/browser/open.js'
 import { browserSnapshot } from '../dist/browser/snapshot.js'
@@ -121,6 +122,8 @@ let report = {
     formStatePath: '',
     pageState: null,
     formState: null,
+    snapshotContract: null,
+    auditContract: null,
   },
   context: null,
   summary: null,
@@ -199,16 +202,16 @@ try {
 
   const firstFormSnapshot = await browserFormSnapshot({ sessionId: SESSION_ID })
   const pageSnapshot = await browserSnapshot({ sessionId: SESSION_ID })
-  const finalFormSnapshot = await browserFormSnapshot({ sessionId: SESSION_ID })
+  const fullFormAudit = await browserFormAudit({ sessionId: SESSION_ID, maxFields: 240, waitMs: 40 })
   trace.record({
     phase: 'observation',
-    action: 'Refreshed complex PageState/FormState artifacts.',
+    action: 'Refreshed complex PageState/FormState artifacts with viewport snapshot and full form audit.',
     url: sessionManager.get(SESSION_ID)?.page.url(),
-    status: firstFormSnapshot.ok || pageSnapshot.ok || finalFormSnapshot.ok ? 'ok' : 'warn',
+    status: firstFormSnapshot.ok || pageSnapshot.ok || fullFormAudit.ok ? 'ok' : 'warn',
     observation: [
       `browser_form_snapshot=${firstFormSnapshot.ok ? 'ok' : 'failed'}`,
       `browser_snapshot=${pageSnapshot.ok ? 'ok' : 'failed'}`,
-      `final_browser_form_snapshot=${finalFormSnapshot.ok ? 'ok' : 'failed'}`,
+      `browser_form_audit=${fullFormAudit.ok ? 'ok' : 'failed'}`,
     ].join(', '),
   })
 
@@ -257,10 +260,10 @@ try {
       },
       {
         step: 3,
-        toolName: 'browser_form_snapshot',
+        toolName: 'browser_form_audit',
         argumentsSummary: 'sessionId=default',
-        status: finalFormSnapshot.ok ? 'ok' : 'warn',
-        observation: finalFormSnapshot.ok ? finalFormSnapshot.observation : finalFormSnapshot.error.message,
+        status: fullFormAudit.ok ? 'ok' : 'warn',
+        observation: fullFormAudit.ok ? fullFormAudit.observation : fullFormAudit.error.message,
         at: new Date().toISOString(),
       },
     ],
@@ -303,6 +306,8 @@ try {
       formStatePath: outputs.formStatePath,
       pageState: outputs.pageState,
       formState: outputs.formState,
+      snapshotContract: coverageContract(firstFormSnapshot),
+      auditContract: coverageContract(fullFormAudit),
     },
     metrics: outputs.metrics,
     agentState: outputs.agentState,
@@ -336,6 +341,8 @@ try {
           formStatePath: outputs.formStatePath,
           pageState: outputs.pageState,
           formState: outputs.formState,
+          snapshotContract: report.observationArtifacts.snapshotContract,
+          auditContract: report.observationArtifacts.auditContract,
         },
         metrics: outputs.metrics,
         agentState: outputs.agentState,
@@ -362,8 +369,20 @@ function validateBenchmarkReport(value) {
 
   const pageState = value.observationArtifacts?.pageState
   const formState = value.observationArtifacts?.formState
+  const snapshotContract = value.observationArtifacts?.snapshotContract
+  const auditContract = value.observationArtifacts?.auditContract
   assert.equal(pageState?.schemaVersion, 'page-state/v1', 'benchmark expected page-state-latest.json')
   assert.equal(formState?.schemaVersion, 'form-state/v1', 'benchmark expected form-state-latest.json')
+  assert.equal(snapshotContract?.scope, 'viewport', 'browser_form_snapshot contract should be viewport scoped')
+  assert.equal(snapshotContract?.complete, false, 'browser_form_snapshot must not claim full coverage')
+  assert.equal(snapshotContract?.auditTool, 'browser_form_snapshot', 'browser_form_snapshot should identify its source')
+  assert.equal(auditContract?.scope, 'full_audit', 'browser_form_audit contract should be full_audit scoped')
+  assert.equal(auditContract?.complete, true, 'browser_form_audit should provide complete coverage for the complex fixture')
+  assert.equal(auditContract?.auditTool, 'browser_form_audit', 'browser_form_audit should identify its source')
+  assert.equal(formState.coverageScope, 'full_audit', 'FormState should be refreshed from full_audit coverage')
+  assert.equal(formState.completeCoverage, true, 'FormState should expose complete coverage signal')
+  assert.equal(formState.formCoverage?.scope, 'full_audit', 'FormState.formCoverage should preserve full_audit scope')
+  assert.equal(formState.formCoverage?.complete, true, 'FormState.formCoverage should preserve complete=true')
   assert.match(pageState.title || '', /Complex Apply Benchmark/, 'PageState should describe the complex page')
   assert(['form', 'captcha'].includes(pageState.pageType), `PageState should classify the complex page, got ${pageState.pageType}`)
 
@@ -382,6 +401,16 @@ function validateBenchmarkReport(value) {
 
   const optionRichFields = fields.filter((field) => (field.options || []).length >= 16)
   assert(optionRichFields.length >= 2, 'FormState should capture select fields with many options')
+  const preferredRole = fields.find((field) => /Preferred role track/i.test(field.label))
+  const workAuthorization = fields.find((field) => /Work authorization/i.test(field.label))
+  assert(preferredRole, 'FormState should include Preferred role track')
+  assert(workAuthorization, 'FormState should include Work authorization')
+  assert.equal(preferredRole.filled, false, 'Required select placeholder should not count as filled')
+  assert.equal(workAuthorization.filled, false, 'Required select placeholder should not count as filled')
+  assert(
+    !(formState.filledFields || []).some((field) => /Preferred role track|Work authorization/i.test(field.label)),
+    'Required select placeholders should not enter filledFields',
+  )
   assert(
     (formState.uploadHints || []).some((hint) => /resume|upload|pdf/i.test(`${hint.text} ${hint.accept || ''}`)),
     'FormState should capture upload hints',
@@ -418,4 +447,20 @@ function validateBenchmarkReport(value) {
   assert.equal(value.agentState.runId, value.runId, 'agent-state should share the benchmark run id')
   assert.equal(value.agentState.source, 'benchmark', 'agent-state should preserve benchmark source')
   assert.equal(value.agentState.scenario, 'complex-apply', 'agent-state should preserve scenario')
+}
+
+function coverageContract(toolResult) {
+  if (!toolResult?.ok) return { ok: false }
+  const coverage = toolResult.data?.formCoverage
+  return {
+    ok: true,
+    scope: coverage?.scope,
+    complete: coverage?.complete,
+    scrolledTop: coverage?.scrolledTop,
+    scrolledBottom: coverage?.scrolledBottom,
+    segments: coverage?.segments,
+    totalFieldsSeen: coverage?.totalFieldsSeen,
+    fieldLimitReached: coverage?.fieldLimitReached,
+    auditTool: coverage?.auditTool,
+  }
 }

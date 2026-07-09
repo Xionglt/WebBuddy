@@ -1,7 +1,8 @@
 /**
  * Job match threshold test:
  *   low-score jobs stop before apply; high-score jobs enter the local sandbox
- *   apply decision; a stricter configured threshold can stop the same high job.
+ *   apply decision; score >= threshold is eligible; a stricter configured
+ *   threshold can stop the same high job without relying on the equality edge.
  */
 import assert from 'node:assert'
 import { createServer } from 'node:http'
@@ -149,13 +150,16 @@ try {
   const lowFinal = JSON.parse(readFileSync(join(low.config.trace.outDir, 'job-match-threshold-low', 'job-candidates-final.json'), 'utf8'))
   assert.strictEqual(lowFinal.decision.shouldApply, false)
   assert.strictEqual(lowFinal.threshold, 0.45)
+  assert(lowFinal.decision.reason.includes('score >= threshold'), 'low artifact should state inclusive comparison semantics')
 
-  const strict = await runAutoApply('job-match-threshold-strict', '/jobs/high', 0.95)
+  const strict = await runAutoApply('job-match-threshold-strict', '/jobs/high', 0.96)
   assert.strictEqual(strict.result.finalState, 'no_match')
   assert.strictEqual(applyHits.get('frontend') || 0, 0, 'configured high threshold should stop before apply')
   const strictFinal = JSON.parse(readFileSync(join(strict.config.trace.outDir, 'job-match-threshold-strict', 'job-candidates-final.json'), 'utf8'))
   assert.strictEqual(strictFinal.decision.shouldApply, false)
-  assert.strictEqual(strictFinal.threshold, 0.95)
+  assert.strictEqual(strictFinal.threshold, 0.96)
+  assert(strictFinal.candidates[0].score < strictFinal.threshold, 'strict fixture must stay below threshold, not equal to it')
+  assert(strictFinal.decision.reason.includes('score >= threshold'), 'strict artifact should state inclusive comparison semantics')
 
   const high = await runAutoApply('job-match-threshold-high', '/jobs/high', 0.45)
   assert.strictEqual(high.result.finalState, 'submitted')
@@ -167,9 +171,11 @@ try {
   const highFinal = JSON.parse(readFileSync(join(high.config.trace.outDir, 'job-match-threshold-high', 'job-candidates-final.json'), 'utf8'))
   assert.strictEqual(highFinal.decision.shouldApply, true)
   assert(highFinal.candidates[0].score >= 0.45, 'high candidate should meet default apply threshold')
+  assert(highFinal.decision.reason.includes('score >= threshold'), 'high artifact should state inclusive comparison semantics')
 
   console.log('job-match-threshold-test: PASS')
   console.log(`  low trace: ${low.result.summary.tracePath}`)
+  console.log(`  strict trace: ${strict.result.summary.tracePath}`)
   console.log(`  high trace: ${high.result.summary.tracePath}`)
 } finally {
   await sessionManager.closeAll()

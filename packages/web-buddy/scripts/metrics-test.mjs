@@ -42,15 +42,17 @@ try {
       startedAt: '2026-06-23T00:00:00.000Z',
       endedAt: '2026-06-23T00:00:02.500Z',
       totals: {
-        spans: 5,
+        spans: 6,
         llmCalls: 1,
         toolCalls: 1,
         mcpToolCalls: 2,
+        skillCalls: 1,
         screenshots: 1,
       },
     }))
     writeFileSync(spansJsonl, [
       span({ spanType: 'llm_call', name: 'llm.chat' }),
+      span({ spanType: 'skill_call', name: 'skill.resolve', skillName: 'web-buddy.core-safety' }),
       span({ spanType: 'tool_call', name: 'browser_snapshot', toolName: 'browser_snapshot' }),
       span({ spanType: 'mcp_tool_call', name: 'browser_click', toolName: 'browser_click' }),
       span({ spanType: 'mcp_tool_call', name: 'browser_wait', toolName: 'browser_wait' }),
@@ -58,6 +60,74 @@ try {
     ].join('\n') + '\n')
     writeFileSync(eventsJsonl, [
       JSON.stringify({ event: 'WEB_HANDOFF_WAITING', data: {} }),
+      JSON.stringify({
+        event: 'skill_resolution',
+        data: {
+          kind: 'json',
+          value: {
+            schemaVersion: 'skill-resolution-event/v1',
+            skillHits: 2,
+            skills: [
+              { id: 'web-buddy.core-safety' },
+              { id: 'web-buddy.task-form-fill' },
+            ],
+          },
+        },
+      }),
+      JSON.stringify({
+        event: 'memory_updated',
+        data: {
+          kind: 'json',
+          value: { reason: 'Run memory updated from model message.' },
+        },
+      }),
+      JSON.stringify({
+        event: 'memory_retrieved',
+        data: {
+          kind: 'json',
+          value: { source: 'memdir', chars: 120 },
+        },
+      }),
+      JSON.stringify({
+        event: 'tool_result',
+        data: {
+          kind: 'json',
+          value: { toolName: 'browser_snapshot', toolCallId: 'call-1', ok: true },
+        },
+      }),
+      JSON.stringify({
+        event: 'tool_result_artifact',
+        data: {
+          kind: 'json',
+          value: {
+            toolName: 'browser_snapshot',
+            toolCallId: 'call-1',
+            artifact: {
+              schemaVersion: 'tool-result-artifact-ref/v1',
+              artifactId: 'artifact-1',
+              runId,
+              sessionId,
+              toolCallId: 'call-1',
+              toolName: 'browser_snapshot',
+              kind: 'page_snapshot',
+              uri: '/tmp/artifact-1.json',
+              mediaType: 'application/json',
+              bytes: 18000,
+              sha256: 'a'.repeat(64),
+              createdAt: '2026-06-23T00:00:00.000Z',
+              retention: { scope: 'run', deleteWithSession: true },
+              sensitivity: 'internal',
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        event: 'context_compacted',
+        data: {
+          kind: 'json',
+          value: { summaryId: 'summary-1' },
+        },
+      }),
       JSON.stringify({
         event: 'context_selection',
         data: {
@@ -222,6 +292,17 @@ try {
     assert.equal(result.metrics.llmCalls, 1)
     assert.equal(result.metrics.toolCalls, 1)
     assert.equal(result.metrics.mcpToolCalls, 2)
+    assert.equal(result.metrics.skillCalls, 1)
+    assert.equal(result.metrics.skillHits, 2)
+    assert.equal(result.metrics.memoryEvents, 2)
+    assert.equal(result.metrics.memoryUpdates, 1)
+    assert.equal(result.metrics.memoryRetrievals, 1)
+    assert.equal(result.metrics.toolResults, 1)
+    assert.equal(result.metrics.toolResultArtifacts, 1)
+    assert.equal(result.metrics.toolResultArtifactBytes, 18000)
+    assert.deepEqual(result.metrics.toolResultArtifactKindCounts, { page_snapshot: 1 })
+    assert.deepEqual(result.metrics.toolResultArtifactHashCounts, { ['a'.repeat(64)]: 1 })
+    assert.equal(result.metrics.contextCompactions, 1)
     assert.equal(result.metrics.observationToolCalls, 1)
     assert.equal(result.metrics.actionToolCalls, 2)
     assert.equal(result.metrics.humanToolCalls, 0)
@@ -337,6 +418,17 @@ try {
     assert.equal(metrics.actionToolCalls, 0)
     assert.equal(metrics.humanToolCalls, 0)
     assert.equal(metrics.evalToolCalls, 0)
+    assert.equal(metrics.skillCalls, 0)
+    assert.equal(metrics.skillHits, 0)
+    assert.equal(metrics.memoryEvents, 0)
+    assert.equal(metrics.memoryUpdates, 0)
+    assert.equal(metrics.memoryRetrievals, 0)
+    assert.equal(metrics.toolResults, 0)
+    assert.equal(metrics.toolResultArtifacts, 0)
+    assert.equal(metrics.toolResultArtifactBytes, 0)
+    assert.deepEqual(metrics.toolResultArtifactKindCounts, {})
+    assert.deepEqual(metrics.toolResultArtifactHashCounts, {})
+    assert.equal(metrics.contextCompactions, 0)
     assert.equal(metrics.contextBuilds, 0)
     assert.equal(metrics.contextChars, 0)
     assert.equal(metrics.contextTruncations, 0)

@@ -51,6 +51,17 @@ export interface RunMetrics {
   browserWaits: number
   screenshots: number
   manualHandoffs: number
+  skillCalls: number
+  skillHits: number
+  memoryEvents: number
+  memoryUpdates: number
+  memoryRetrievals: number
+  toolResults: number
+  toolResultArtifacts: number
+  toolResultArtifactBytes: number
+  toolResultArtifactKindCounts: Record<string, number>
+  toolResultArtifactHashCounts: Record<string, number>
+  contextCompactions: number
   contextBuilds: number
   contextChars: number
   contextTruncations: number
@@ -107,6 +118,17 @@ export function emptyRunMetrics(input: {
     browserWaits: 0,
     screenshots: 0,
     manualHandoffs: 0,
+    skillCalls: 0,
+    skillHits: 0,
+    memoryEvents: 0,
+    memoryUpdates: 0,
+    memoryRetrievals: 0,
+    toolResults: 0,
+    toolResultArtifacts: 0,
+    toolResultArtifactBytes: 0,
+    toolResultArtifactKindCounts: {},
+    toolResultArtifactHashCounts: {},
+    contextCompactions: 0,
     contextBuilds: 0,
     contextChars: 0,
     contextTruncations: 0,

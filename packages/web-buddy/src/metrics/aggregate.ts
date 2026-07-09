@@ -88,6 +88,7 @@ function applySessionJson(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
     metrics.llmCalls = Math.max(metrics.llmCalls, totals.llmCalls || 0)
     metrics.toolCalls = Math.max(metrics.toolCalls, totals.toolCalls || 0)
     metrics.mcpToolCalls = Math.max(metrics.mcpToolCalls, totals.mcpToolCalls || 0)
+    metrics.skillCalls = Math.max(metrics.skillCalls, totals.skillCalls || 0)
     metrics.screenshots = Math.max(metrics.screenshots, totals.screenshots || 0)
   }
 }
@@ -100,6 +101,7 @@ function applySpansJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void
   let llmCalls = 0
   let toolCalls = 0
   let mcpToolCalls = 0
+  let skillCalls = 0
   let screenshots = 0
 
   for (const span of readJsonl<AgentTraceSpanJson>(spansFile, metrics)) {
@@ -115,6 +117,7 @@ function applySpansJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void
       mcpToolCalls += 1
       incrementToolCategory(metrics, resolveToolCategory(toolName, span.toolCategory))
     }
+    if (spanType === 'skill_call') skillCalls += 1
     if (spanType === 'screenshot') screenshots += 1
 
     if (isBrowserTool(toolName, 'snapshot')) metrics.browserSnapshots += 1
@@ -130,6 +133,7 @@ function applySpansJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void
   metrics.llmCalls = Math.max(metrics.llmCalls, llmCalls)
   metrics.toolCalls = Math.max(metrics.toolCalls, toolCalls)
   metrics.mcpToolCalls = Math.max(metrics.mcpToolCalls, mcpToolCalls)
+  metrics.skillCalls = Math.max(metrics.skillCalls, skillCalls)
   metrics.screenshots = Math.max(metrics.screenshots, screenshots)
 }
 
@@ -144,6 +148,10 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
     applyPolicyDecisionEvent(metrics, event)
     applyPermissionDecisionEvent(metrics, event)
     applyContextSelectionEvent(metrics, event)
+    applySkillEvent(metrics, event)
+    applyMemoryEvent(metrics, event)
+    applyToolResultEvent(metrics, event)
+    applyContextCompactionEvent(metrics, event)
   }
 }
 
@@ -231,6 +239,50 @@ function applyContextSelectionEvent(metrics: RunMetrics, event: AgentTraceEventJ
     const id = sectionId as PromptSectionId
     metrics.promptSectionChars[id] = (metrics.promptSectionChars[id] ?? 0) + value
   }
+}
+
+function applySkillEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event !== 'skill_resolution') return
+
+  const data = tracePayloadValue(event.data)
+  metrics.skillHits += skillHitCount(data)
+}
+
+function skillHitCount(data: unknown): number {
+  if (!isRecord(data)) return 1
+  const explicit = numberValue(data.skillHits)
+  if (explicit !== undefined) return explicit
+  if (Array.isArray(data.skills)) return data.skills.length
+  return 1
+}
+
+function applyMemoryEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event !== 'memory_updated' && event.event !== 'memory_retrieved') return
+  metrics.memoryEvents += 1
+  if (event.event === 'memory_updated') metrics.memoryUpdates += 1
+  if (event.event === 'memory_retrieved') metrics.memoryRetrievals += 1
+}
+
+function applyToolResultEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event === 'tool_result') {
+    metrics.toolResults += 1
+    return
+  }
+  if (event.event === 'tool_result_artifact') {
+    metrics.toolResultArtifacts += 1
+    const data = tracePayloadValue(event.data)
+    const artifact = toolResultArtifactData(data)
+    const bytes = numberValue(artifact?.bytes) ?? numberValue(dataRecord(data)?.bytes) ?? numberValue(dataRecord(data)?.originalBytes)
+    if (bytes !== undefined) metrics.toolResultArtifactBytes += bytes
+    const kind = stringValue(artifact?.kind) ?? stringValue(dataRecord(data)?.kind)
+    if (kind) incrementCount(metrics.toolResultArtifactKindCounts, kind)
+    const sha256 = stringValue(artifact?.sha256) ?? stringValue(dataRecord(data)?.sha256) ?? stringValue(dataRecord(data)?.hash)
+    if (sha256) incrementCount(metrics.toolResultArtifactHashCounts, sha256)
+  }
+}
+
+function applyContextCompactionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event === 'context_compacted') metrics.contextCompactions += 1
 }
 
 function applyLegacyTraceJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void {
@@ -368,6 +420,18 @@ function tracePayloadValue(value: unknown): unknown {
     return value.value
   }
   return value
+}
+
+function toolResultArtifactData(value: unknown): Record<string, unknown> | undefined {
+  const data = dataRecord(value)
+  if (!data) return undefined
+  if (isRecord(data.artifact)) return data.artifact
+  if (isRecord(data.ref)) return data.ref
+  return data
+}
+
+function dataRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined
 }
 
 function numberValue(value: unknown): number | undefined {

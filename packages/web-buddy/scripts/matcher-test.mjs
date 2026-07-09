@@ -77,6 +77,15 @@ const reranked = [
 const decision = decideMatchThreshold(reranked, 0.45)
 assert.strictEqual(decision.shouldApply, true, 'threshold decision should use the highest-score candidate, not only the first item')
 assert.strictEqual(decision.best?.job.id, 'perfect')
+assert(decision.reason.includes('score >= threshold'), 'threshold decision reason should state inclusive comparison semantics')
+
+const equalBoundary = decideMatchThreshold([{ ...matches[0], score: 0.45 }], 0.45)
+assert.strictEqual(equalBoundary.shouldApply, true, 'score exactly equal to threshold should be eligible to apply')
+assert(equalBoundary.reason.includes('score >= threshold'), 'equal-boundary reason should state score >= threshold semantics')
+
+const belowBoundary = decideMatchThreshold([{ ...matches[0], score: 0.44 }], 0.45)
+assert.strictEqual(belowBoundary.shouldApply, false, 'score below threshold should not be eligible to apply')
+assert(belowBoundary.reason.includes('score >= threshold'), 'below-boundary reason should state score >= threshold semantics')
 
 console.log('matcher-test: PASS')
 for (const m of matches) {

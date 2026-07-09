@@ -17,6 +17,34 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function argValue(name) {
+  const index = process.argv.indexOf(name)
+  return index === -1 ? '' : process.argv[index + 1] || ''
+}
+
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function compactText(value) {
+  return normalizeText(value).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+function normalizePositionId(value) {
+  return normalizeText(value).replace(/^alibaba-/i, '')
+}
+
+const targetPositionId =
+  argValue('--target-position-id') ||
+  process.env.DELIVERY_TARGET_POSITION_ID ||
+  process.env.ALIBABA_PROBE_POSITION_ID ||
+  ''
+const targetJobTitle =
+  argValue('--target-job-title') ||
+  process.env.DELIVERY_TARGET_JOB_TITLE ||
+  process.env.ALIBABA_PROBE_JOB_TITLE ||
+  ''
+
 function writeJson(path, value) {
   return writeFile(path, `${JSON.stringify(value, null, 2)}\n`)
 }
@@ -31,21 +59,47 @@ function parseProbeJson(stdout) {
 function runProbe() {
   return new Promise((resolveRun) => {
     const startedAt = new Date()
-    const child = spawn(process.execPath, [resolve(__dirname, 'alibaba-application-probe.mjs')], {
+    const waitOnLogin = process.env.DELIVERY_WAIT_ON_LOGIN === 'true'
+    const probeArgs = [resolve(__dirname, 'alibaba-application-probe.mjs')]
+    if (targetPositionId) probeArgs.push('--target-position-id', targetPositionId)
+    if (targetJobTitle) probeArgs.push('--target-job-title', targetJobTitle)
+    const child = spawn(process.execPath, probeArgs, {
       cwd: webBuddyRoot,
       env: {
         ...process.env,
+        DELIVERY_TARGET_POSITION_ID: targetPositionId,
+        DELIVERY_TARGET_JOB_TITLE: targetJobTitle,
+        ALIBABA_PROBE_POSITION_ID: targetPositionId,
+        ALIBABA_PROBE_JOB_TITLE: targetJobTitle,
         PLAYWRIGHT_HEADLESS: 'false',
         PLAYWRIGHT_KEEP_BROWSER_OPEN: 'false',
         KEEP_BROWSER_OPEN: 'false',
         HUMAN_GATE_MODE: process.env.HUMAN_GATE_MODE || 'cli',
         PERMISSION_MODE: process.env.PERMISSION_MODE || 'safe',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
 
     let stdout = ''
     let stderr = ''
+    if (waitOnLogin) {
+      process.stdin.resume()
+      const forwardInput = (chunk) => {
+        if (!child.killed) {
+          child.stdin.write(chunk)
+          child.stdin.end()
+        }
+        process.stdin.off('data', forwardInput)
+        process.stdin.pause()
+      }
+      process.stdin.on('data', forwardInput)
+      child.on('close', () => {
+        process.stdin.off('data', forwardInput)
+        process.stdin.pause()
+      })
+    } else {
+      child.stdin.end()
+    }
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString()
       stdout += text
@@ -71,6 +125,10 @@ function runProbe() {
 }
 
 async function main() {
+  if (!targetPositionId && !targetJobTitle) {
+    throw new Error('delivery-probe requires --target-position-id or --target-job-title; refusing to default to the live first Alibaba job.')
+  }
+
   const runId = `delivery-probe-${stamp()}`
   const sessionId = `run_${runId}`
   const traceDir = resolve(repoRoot, 'output/traces', sessionId)
@@ -90,10 +148,18 @@ async function main() {
     finalSubmit ||
     Boolean(result?.safety?.uploadedResume) ||
     /upload(ed)?Resume.*true|上传简历成功/i.test(run.stdout + run.stderr)
+  const targetDrift = Boolean(
+    result?.target?.drift ||
+      (targetPositionId && normalizePositionId(result?.detail?.positionId) !== normalizePositionId(targetPositionId)) ||
+      (targetJobTitle && compactText(result?.chosenJob?.title) !== compactText(targetJobTitle)),
+  )
+  const fieldAssertionsPassed = Boolean(result?.fieldAssertions?.passed)
 
   const status =
     finalSubmit || irreversibleSideEffect
       ? 'unsafe_side_effect'
+      : targetDrift
+        ? 'target_drift'
       : run.code === 0 && result?.ok
         ? 'safe_blocked_or_presubmit'
         : 'probe_failed'
@@ -113,11 +179,18 @@ async function main() {
     processSignal: run.signal,
     headful: true,
     savedProfileData: false,
+    targetPositionId,
+    targetJobTitle,
+    targetMatchedBy: targetPositionId ? 'positionId' : 'jobTitle',
+    targetDrift,
+    fieldAssertionsPassed,
     finalSubmit,
     irreversibleSideEffect,
     reachedLogin: Boolean(result?.afterApply?.reachedLogin),
     loginRequested: Boolean(result?.afterApply?.loginRequested),
     reachedApplicationForm: Boolean(result?.afterApply?.reachedApplicationForm),
+    manualLoginHandoff: Boolean(result?.afterApply?.manualLoginHandoff),
+    manualLoginContinued: Boolean(result?.afterApply?.manualLoginContinued),
     advertisedTotal: result?.list?.advertisedTotal ?? null,
     sampledJobs: result?.list?.sampledJobs?.length ?? 0,
     hasApplyButton: Boolean(result?.detail?.hasApplyButton),
@@ -125,6 +198,10 @@ async function main() {
     noticeGate: Boolean(result?.detail?.noticeGate),
     positionId: result?.detail?.positionId || '',
     chosenJobTitle: result?.chosenJob?.title || '',
+    detailUrl: result?.detail?.urlBeforeApply || '',
+    extractorSource: result?.list?.extractorSource || '',
+    domCardCount: result?.list?.domCardCount ?? null,
+    apiPagesScanned: result?.list?.apiPagesScanned ?? null,
     networkEvents: result?.recentNetworkEvents?.length ?? 0,
     stdoutBytes: Buffer.byteLength(run.stdout),
     stderrBytes: Buffer.byteLength(run.stderr),
@@ -156,6 +233,11 @@ async function main() {
       noCaptchaBypass: true,
       noProfileSaveByDefault: true,
     },
+    target: {
+      positionId: targetPositionId,
+      jobTitle: targetJobTitle,
+      matchedBy: targetPositionId ? 'positionId' : 'jobTitle',
+    },
   }
 
   const session = {
@@ -181,6 +263,7 @@ async function main() {
       traceDir,
       sessionDir,
       metrics,
+      target: manifest.target,
     },
   }
 
@@ -214,6 +297,10 @@ async function main() {
         status,
         finalSubmit,
         irreversibleSideEffect,
+        targetPositionId,
+        targetJobTitle,
+        targetDrift,
+        fieldAssertionsPassed,
       },
       null,
       2,
@@ -221,7 +308,7 @@ async function main() {
   )
 
   if (status === 'unsafe_side_effect') process.exitCode = 2
-  else if (status === 'probe_failed') process.exitCode = 1
+  else if (status === 'probe_failed' || status === 'target_drift') process.exitCode = 1
 }
 
 main().catch((error) => {
