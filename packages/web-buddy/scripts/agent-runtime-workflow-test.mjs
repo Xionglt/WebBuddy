@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentRuntime } from '../dist/agent/agent-runtime.js'
 import { browserOpen } from '../dist/browser/open.js'
 import { AutoHumanGate } from '../dist/sdk/human.js'
 import { TraceRecorder } from '../dist/sdk/trace.js'
+import { FileSessionRecorder, FileSessionStore } from '../dist/session/index.js'
 import { sessionManager } from '../dist/session/manager.js'
 
 process.env.PLAYWRIGHT_HEADLESS = 'true'
@@ -27,7 +28,12 @@ const profile = {
   source: 'json',
 }
 
-const traceRoot = mkdtempSync(join(tmpdir(), 'mfa-agent-runtime-workflow-'))
+const keepOutput = process.env.KEEP_AGENT_RUNTIME_WORKFLOW_TEST_OUTPUT === '1'
+const evidenceRoot = join(process.cwd(), 'output', 'qa', 'agent-runtime-workflow-test')
+if (keepOutput && !existsSync(evidenceRoot)) {
+  mkdirSync(evidenceRoot, { recursive: true })
+}
+const traceRoot = mkdtempSync(join(keepOutput ? evidenceRoot : tmpdir(), 'mfa-agent-runtime-workflow-'))
 const trace = new TraceRecorder(traceRoot, {
   runId: 'agent-runtime-workflow-test',
   source: 'local-runtime',
@@ -37,6 +43,7 @@ const trace = new TraceRecorder(traceRoot, {
 })
 
 const runtime = new AgentRuntime()
+const sessionStore = new FileSessionStore({ rootDir: join(traceRoot, 'sessions') })
 
 class UnexpectedLlm {
   constructor() {
@@ -303,6 +310,7 @@ try {
     ctx: { sessionId: 'workflow-login', highlight: false, trace },
     gate: new BlockingWorkflowHandoffGate(),
     maxSteps: 3,
+    session: await createSessionRecorder('workflow-login', 'Fill the current application.'),
   })
   assert.equal(loginResult.done, true)
   assert.equal(loginResult.blocked, true)
@@ -327,6 +335,7 @@ try {
     gate: new LoginClearingGate(),
     taskType: 'apply_entry',
     maxSteps: 5,
+    session: await createSessionRecorder('workflow-login-resume', 'Fill the current application after login clears.'),
   })
   assert.equal(loginResumeLlm.calls >= 2, true, 'runtime should continue after premature blocked=true once login is cleared')
   assert.equal(loginResumeResult.done, true)
@@ -344,6 +353,7 @@ try {
     ctx: { sessionId: 'workflow-captcha', highlight: false, trace },
     gate: new BlockingWorkflowHandoffGate(),
     maxSteps: 3,
+    session: await createSessionRecorder('workflow-captcha', 'Fill the current application behind captcha.'),
   })
   assert.equal(captchaResult.done, true)
   assert.equal(captchaResult.blocked, true)
@@ -365,6 +375,7 @@ try {
     ctx: { sessionId: 'workflow-final-submit', highlight: false, trace },
     gate: new ApprovingFinalSubmitGate(),
     maxSteps: 4,
+    session: await createSessionRecorder('workflow-final-submit', 'Submit the current application.'),
   })
   assert.equal(finalLlm.calls, 0, 'runtime should stop at initial final-submit boundary before asking the model to click')
   assert.equal(finalResult.done, true)
@@ -393,6 +404,7 @@ try {
     gate: new AutoHumanGate(),
     taskType: 'apply_entry',
     maxSteps: 5,
+    session: await createSessionRecorder('workflow-actionable-dialog', 'Continue the application flow.'),
   })
   assert.equal(dialogDoneLlm.calls >= 2, true, 'runtime should continue after premature dialog agent_done')
   assert.equal(await dialogPage.locator('[role="dialog"]').count(), 0, 'test model should get a chance to resolve the dialog')
@@ -430,6 +442,7 @@ try {
     },
     gate: new AutoHumanGate(),
     maxSteps: 7,
+    session: await createSessionRecorder('workflow-premature-fill-done', 'Fill the current application form.'),
   })
   assert.equal(prematureFillLlm.calls >= 4, true, 'runtime should continue after premature fill agent_done')
   assert.equal(prematureFillResult.done, false)
@@ -458,6 +471,7 @@ try {
     ctx: { sessionId: 'workflow-required-select-placeholder', highlight: false, trace },
     gate: new AutoHumanGate(),
     maxSteps: 7,
+    session: await createSessionRecorder('workflow-required-select-placeholder', 'Fill the current application form with a required select.'),
   })
   assert.equal(requiredSelectLlm.calls >= 5, true, 'runtime should continue after required select placeholder agent_done')
   assert.equal(requiredSelectResult.done, false)
@@ -470,7 +484,11 @@ try {
 } finally {
   trace.finish()
   await sessionManager.closeAll().catch(() => {})
-  rmSync(traceRoot, { recursive: true, force: true })
+  if (keepOutput) {
+    console.log(`agent-runtime-workflow-test: evidence ${traceRoot}`)
+  } else {
+    rmSync(traceRoot, { recursive: true, force: true })
+  }
 }
 
 async function openHtml(sessionId, html) {
@@ -480,4 +498,16 @@ async function openHtml(sessionId, html) {
     waitUntil: 'domcontentloaded',
   })
   assert.equal(result.ok, true, result.observation)
+}
+
+async function createSessionRecorder(sessionId, goal) {
+  const session = await sessionStore.create({
+    sessionId,
+    runId: trace.runId,
+    source: 'test',
+    goal,
+    mode: 'test',
+    traceRunId: trace.runId,
+  })
+  return new FileSessionRecorder(sessionStore, session)
 }

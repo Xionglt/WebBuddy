@@ -289,11 +289,11 @@ function renderFormState(form: FormState | undefined, freshness: ContextFreshnes
 
   return normalizeLines([
     `schemaVersion: ${form.schemaVersion}`,
-    `formCoverage: scope=${form.coverageScope ?? form.formCoverage?.scope ?? '(unknown)'}, complete=${form.completeCoverage === true}, scrolledBottom=${form.formCoverage?.scrolledBottom ?? '(unknown)'}, segments=${form.formCoverage?.segments ?? '(unknown)'}, totalFieldsSeen=${form.formCoverage?.totalFieldsSeen ?? '(unknown)'}`,
-    `missingRequiredMayBeIncomplete: ${form.missingRequiredMayBeIncomplete === true}`,
     `missingRequiredCount: ${form.missingRequired.length}`,
     'missingRequired:',
     renderFieldList(form.missingRequired),
+    `missingRequiredMayBeIncomplete: ${form.missingRequiredMayBeIncomplete === true}`,
+    `formCoverage: scope=${form.coverageScope ?? form.formCoverage?.scope ?? '(unknown)'}, complete=${form.completeCoverage === true}, scrolledBottom=${form.formCoverage?.scrolledBottom ?? '(unknown)'}, segments=${form.formCoverage?.segments ?? '(unknown)'}, totalFieldsSeen=${form.formCoverage?.totalFieldsSeen ?? '(unknown)'}`,
     '',
     `url: ${form.url || '(unknown)'}`,
     `fieldCount: ${form.fields.length}`,

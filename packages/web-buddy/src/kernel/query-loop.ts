@@ -200,6 +200,7 @@ function inferStopReason(result: AgentLoopResult, status: AgentKernelStatus, max
   if (status === 'aborted') return 'aborted'
   if (summary.includes('llm error')) return 'llm_error'
   if (result.blocked) return 'blocked'
+  if (status === 'blocked' && !summary.includes('step budget')) return 'blocked'
   if (result.done) return 'agent_done'
   if (summary.includes('step budget') || (maxSteps !== undefined && result.steps >= maxSteps)) return 'step_budget'
   return 'unknown'

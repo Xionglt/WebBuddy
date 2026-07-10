@@ -22,6 +22,16 @@ yarn-error.log*
 *.log
 .session_tmps/
 docs/
+# Track the two maintained runtime design notes while leaving other new docs ignored.
+!docs/
+docs/*
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/web-buddy-async-task-orchestration-plan.md
+!docs/architecture/web-buddy-async-task-multi-agent-delivery-plan.md
+!docs/interview/
+docs/interview/*
+!docs/interview/web-buddy-async-task-orchestration-star.md
 output/
 tmp/
 

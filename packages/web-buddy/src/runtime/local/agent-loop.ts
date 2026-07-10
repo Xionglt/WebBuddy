@@ -12,9 +12,10 @@ import {
   type ContextCompactionWorkflowEvaluation,
 } from '../../context/compaction.js'
 import type { ContextCompactionResult } from '../../context/run-summary.js'
-import { COMPACTED_RUN_CONTEXT_PREFIX } from '../../context/run-summary.js'
 import {
   compactContextIfNeeded,
+  isCompactedRunContextSystemMarker,
+  sanitizeMessageBoundary,
   type SemanticCompactionPipelineOptions,
 } from '../../context/compaction-pipeline.js'
 import type { MicroCompactionOptions } from '../../context/micro-compaction.js'
@@ -197,7 +198,10 @@ export interface AgentLoopApprovalQueue {
 }
 
 export interface ContextBudgetOptions extends TokenBudgetOptions {
+  /** Legacy fixed-count override for the raw tail retained after compaction. */
   keepRecentMessages?: number
+  /** Fraction of the model input window retained as verbatim recent history. Defaults to 0.2. */
+  recentRawTokenRatio?: number
 }
 
 export interface PersistentAnswerStoreOptions {
@@ -239,7 +243,6 @@ interface RememberingHumanGate extends HumanGate {
 }
 
 const DEFAULT_MAX_STEPS = 16
-const DEFAULT_KEEP_RECENT_MESSAGES = 6
 export const RAW_MODE_EXCLUDED_TOOLS = [
   'job_match_candidates',
   'plan_form_fill',
@@ -312,6 +315,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let workflowHandoffAttempt = 0
   let lastRecordedSkillContextSignature = ''
   let lastRecordedRelevantMemorySignature = ''
+  let consecutiveRejectedAgentDoneToolCalls = 0
+  let lastRejectedAgentDoneGateSummary: string | undefined
+  let lastRejectedAgentDoneGateReason: string | undefined
   const riskDecisions = createRiskDecisionsArtifact({
     runId: ctx.trace.runId,
     sessionId: ctx.trace.agentTrace?.sessionId ?? ctx.sessionId,
@@ -562,6 +568,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       message: `Completion gate ${decision.action}: ${decision.recommendedStatus}.`,
       data,
     })
+  }
+  const rememberRejectedAgentDoneGate = (decision: CompletionGateDecision, gateSummary: string) => {
+    consecutiveRejectedAgentDoneToolCalls += 1
+    lastRejectedAgentDoneGateSummary = gateSummary
+    lastRejectedAgentDoneGateReason = decision.reason
+  }
+  const clearRejectedAgentDoneGateStreak = () => {
+    consecutiveRejectedAgentDoneToolCalls = 0
+    lastRejectedAgentDoneGateSummary = undefined
+    lastRejectedAgentDoneGateReason = undefined
   }
   const recordWorkflowSnapshot = async (state: WorkflowState, currentStep: number, reason: string) => {
     await sessionTranscript({ type: 'workflow_snapshot', turnId: turnIdForStep(currentStep), workflowState: state })
@@ -1029,7 +1045,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       messages,
       systemContent: renderSystemContext(latestContext),
       tokenBudgetOptions: tokenBudgetOptionsForLoop(input),
-      keepRecentMessages: input.contextBudget?.keepRecentMessages ?? DEFAULT_KEEP_RECENT_MESSAGES,
+      keepRecentMessages: input.contextBudget?.keepRecentMessages,
+      recentRawTokenRatio: input.contextBudget?.recentRawTokenRatio,
       latestContext,
       workflowState,
       recentActions,
@@ -1092,6 +1109,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       postCompactionTokenBudget: compaction.postCompactionTokenBudget,
       mode: compaction.compaction.summary.compactMode ?? 'structured',
       microCompaction: compaction.microCompaction?.stats,
+      recentRawRetention: compaction.recentRawRetention,
       ...(compaction.semanticError ? { semanticError: compaction.semanticError } : {}),
       summary: compaction.compaction.summary,
     })
@@ -1107,6 +1125,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       semanticError: compaction.semanticError,
       stats: compaction.compaction.stats,
       microCompaction: compaction.microCompaction?.stats,
+      recentRawRetention: compaction.recentRawRetention,
     })
     await sessionEvent({
       type: 'context_compacted',
@@ -1122,6 +1141,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         semanticError: compaction.semanticError,
         stats: compaction.compaction.stats,
         microCompaction: compaction.microCompaction?.stats,
+        recentRawRetention: compaction.recentRawRetention,
       },
     })
 
@@ -1250,6 +1270,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     for (const call of completion.toolCalls) {
       const abortedBeforeTool = await checkAbort(turnId)
       if (abortedBeforeTool) return abortedBeforeTool
+      if (call.name !== 'agent_done') clearRejectedAgentDoneGateStreak()
       toolCalls += 1
       const tool = registry.get(call.name)
       const toolCategory = tool?.category
@@ -1840,6 +1861,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           blocked = false
           summary = 'no summary'
           completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+          rememberRejectedAgentDoneGate(completionGateDecision, completionGateBlockSummary)
           rememberUniqueBlocker(blockers, completionGateBlockSummary)
           emit('gate', completionGateBlockSummary, step)
           ctx.trace.record({
@@ -1896,6 +1918,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             blocked = false
             summary = 'no summary'
             completionGateBlockSummary = completionGateBlockerSummary(completionGateDecision)
+            rememberRejectedAgentDoneGate(completionGateDecision, completionGateBlockSummary)
             rememberUniqueBlocker(blockers, completionGateBlockSummary)
             emit('gate', completionGateBlockSummary, step)
             ctx.trace.record({
@@ -2008,9 +2031,27 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
 
   if (!done) {
-    summary = `Reached step budget (${maxSteps}) without agent_done.`
-    emit('warn', summary, step)
-    ctx.trace.record({ phase: 'agent_loop', action: summary, status: 'warn' })
+    if (
+      consecutiveRejectedAgentDoneToolCalls > 0 &&
+      consecutiveRejectedAgentDoneToolCalls === toolCalls &&
+      lastRejectedAgentDoneGateSummary
+    ) {
+      done = true
+      blocked = true
+      summary = `Completion gate blocked: ${lastRejectedAgentDoneGateSummary.replace(/^completion_gate rejected:\s*/i, '')}`
+      const gateMessage = lastRejectedAgentDoneGateSummary.replace(/^completion_gate rejected/i, 'completion_gate blocked')
+      emit('gate', gateMessage, step)
+      ctx.trace.record({
+        phase: 'agent_loop',
+        action: gateMessage,
+        status: 'blocked',
+        observation: (lastRejectedAgentDoneGateReason ?? summary).slice(0, 300),
+      })
+    } else {
+      summary = `Reached step budget (${maxSteps}) without agent_done.`
+      emit('warn', summary, step)
+      ctx.trace.record({ phase: 'agent_loop', action: summary, status: 'warn' })
+    }
   }
 
   await finalizeSession(
@@ -2055,102 +2096,6 @@ function tokenBudgetOptionsForLoop(input: AgentLoopInput): TokenBudgetOptions {
     ...input.contextBudget,
     modelName: input.contextBudget?.modelName ?? input.llm.label,
   }
-}
-
-function compactReason(tokenBudget: TokenBudgetSnapshot): string {
-  const estimated = tokenBudget.estimatedTotalTokens ?? 0
-  const threshold = tokenBudget.compactThresholdTokens
-  if (threshold !== undefined) {
-    return `Estimated context ${estimated} tokens reached compaction threshold ${threshold}.`
-  }
-  return `Estimated context ${estimated} tokens reached compaction threshold.`
-}
-
-function compactedMessageSet(
-  messages: ChatMessage[],
-  input: {
-    systemContent: string
-    compactedMessage: ChatMessage
-    keepRecentMessages: number
-  },
-): ChatMessage[] {
-  return [
-    { role: 'system', content: input.systemContent },
-    input.compactedMessage,
-    ...recentMessagesForCompaction(messages, input.keepRecentMessages),
-  ]
-}
-
-function recentMessagesForCompaction(messages: ChatMessage[], keepRecentMessages: number): ChatMessage[] {
-  const keep = normalizeKeepRecentMessages(keepRecentMessages)
-  if (keep === 0) return []
-  const candidates = messages.filter((message) => (
-    message.role !== 'system' && !isCompactedRunContextMessage(message)
-  ))
-  return boundedMessageTail(candidates, keep)
-}
-
-function boundedMessageTail(messages: ChatMessage[], keepRecentMessages: number): ChatMessage[] {
-  const groups = messageBoundaryGroups(messages)
-  const selected: ChatMessage[][] = []
-  let selectedCount = 0
-
-  for (let index = groups.length - 1; index >= 0 && selectedCount < keepRecentMessages; index -= 1) {
-    selected.unshift(groups[index])
-    selectedCount += groups[index].length
-  }
-
-  return sanitizeMessageBoundary(selected.flat())
-}
-
-function sanitizeMessageBoundary(messages: ChatMessage[]): ChatMessage[] {
-  return messageBoundaryGroups(messages).flat()
-}
-
-function messageBoundaryGroups(messages: ChatMessage[]): ChatMessage[][] {
-  const groups: ChatMessage[][] = []
-  let index = 0
-  while (index < messages.length) {
-    const message = messages[index]
-    if (message.role === 'tool') {
-      index += 1
-      continue
-    }
-
-    if (message.role === 'assistant' && message.tool_calls?.length) {
-      const expectedToolCallIds = new Set(message.tool_calls.map((toolCall) => toolCall.id))
-      const group: ChatMessage[] = [message]
-      let cursor = index + 1
-      while (cursor < messages.length && messages[cursor].role === 'tool') {
-        const toolMessage = messages[cursor]
-        if (toolMessage.tool_call_id && expectedToolCallIds.has(toolMessage.tool_call_id)) {
-          group.push(toolMessage)
-          expectedToolCallIds.delete(toolMessage.tool_call_id)
-        }
-        cursor += 1
-      }
-      if (expectedToolCallIds.size === 0) groups.push(group)
-      index = cursor
-      continue
-    }
-
-    groups.push([message])
-    index += 1
-  }
-  return groups
-}
-
-function normalizeKeepRecentMessages(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_KEEP_RECENT_MESSAGES
-  return Math.max(0, Math.floor(value))
-}
-
-function isCompactedRunContextMessage(message: ChatMessage): boolean {
-  return message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
-}
-
-function isCompactedRunContextSystemMarker(message: ChatMessage): boolean {
-  return message.role === 'system' && message.content === 'RESTORED_COMPACTED_RUN_CONTEXT'
 }
 
 function skillContextSessionSignature(context: NonNullable<ContextSnapshot['resolvedSkillContext']>): string {

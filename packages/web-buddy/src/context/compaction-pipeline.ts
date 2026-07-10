@@ -17,14 +17,22 @@ import {
   type SemanticCompactionLlm,
   type SemanticCompactor,
 } from './semantic-compactor.js'
-import { estimateTokenBudget, type TokenBudgetOptions, type TokenBudgetSnapshot } from '../kernel/token-budget.js'
+import {
+  estimateChatMessages,
+  estimateTokenBudget,
+  type TokenBudgetOptions,
+  type TokenBudgetSnapshot,
+} from '../kernel/token-budget.js'
 import type { ChatMessage } from '../sdk/llm.js'
 
 export interface ContextCompactionPipelineInput extends Omit<ContextCompactionInput, 'messages' | 'semanticSummary' | 'compactMode'> {
   messages: ChatMessage[]
   systemContent: string
   tokenBudgetOptions?: TokenBudgetOptions
+  /** Legacy fixed-count override. The default path retains a token-budgeted raw tail. */
   keepRecentMessages?: number
+  /** Fraction of the model input window reserved for verbatim recent history after full compaction. */
+  recentRawTokenRatio?: number
   compactor?: AgentLoopContextCompactorLike
   semanticLlm?: SemanticCompactionLlm
   semanticCompaction?: SemanticCompactionPipelineOptions
@@ -46,8 +54,23 @@ export interface ContextCompactionPipelineResult {
   tokenBudget: TokenBudgetSnapshot
   postMicroTokenBudget?: TokenBudgetSnapshot
   postCompactionTokenBudget?: TokenBudgetSnapshot
+  recentRawRetention?: RecentRawRetentionStats
   reason?: string
   semanticError?: string
+}
+
+export interface RecentRawRetentionStats {
+  selectionMode: 'token_ratio' | 'message_count'
+  sourceMessageCount: number
+  sourceTokens: number
+  retainedMessageCount: number
+  retainedBoundaryGroupCount: number
+  retainedTokens: number
+  compactedHistoryTokens: number
+  maxInputTokens?: number
+  targetTokens?: number
+  recentRawTokenRatio?: number
+  keepRecentMessages?: number
 }
 
 export interface AgentLoopContextCompactorLike {
@@ -55,6 +78,7 @@ export interface AgentLoopContextCompactorLike {
 }
 
 export const DEFAULT_KEEP_RECENT_MESSAGES = 6
+export const DEFAULT_RECENT_RAW_TOKEN_RATIO = 0.2
 
 export async function compactContextIfNeeded(
   input: ContextCompactionPipelineInput,
@@ -86,6 +110,11 @@ export async function compactContextIfNeeded(
   }
 
   const reason = compactReason(budgetForFullCompact)
+  const recent = recentMessagesForCompaction(workingMessages, {
+    maxInputTokens: budgetForFullCompact.maxInputTokens,
+    ...(input.keepRecentMessages !== undefined ? { keepRecentMessages: input.keepRecentMessages } : {}),
+    recentRawTokenRatio: input.recentRawTokenRatio ?? DEFAULT_RECENT_RAW_TOKEN_RATIO,
+  })
   const baseCompactionInput: ContextCompactionInput = {
     ...input,
     messages: workingMessages,
@@ -105,7 +134,7 @@ export async function compactContextIfNeeded(
       }
       const semantic = await (input.semanticCompaction?.compactor ?? semanticCompactor).summarize({
         llm,
-        messages: workingMessages,
+        messages: recent.historyMessages,
         structuredSummary: structuredOnly.summary,
         createdAt: structuredOnly.summary.createdAt,
       })
@@ -122,7 +151,7 @@ export async function compactContextIfNeeded(
           compactMode: 'structured_semantic',
           semanticSummary: fallbackSemanticSummary({
             error,
-            messages: workingMessages,
+            messages: recent.historyMessages,
             createdAt: structuredOnly.summary.createdAt,
           }),
         }))
@@ -130,11 +159,11 @@ export async function compactContextIfNeeded(
     }
   }
 
-  const compactedMessages = compactedMessageSet(workingMessages, {
-    systemContent: input.systemContent,
-    compactedMessage: finalCompaction.compactedMessage,
-    keepRecentMessages: input.keepRecentMessages ?? DEFAULT_KEEP_RECENT_MESSAGES,
-  })
+  const compactedMessages: ChatMessage[] = [
+    { role: 'system', content: input.systemContent },
+    finalCompaction.compactedMessage,
+    ...recent.messages,
+  ]
   const postCompactionTokenBudget = estimateTokenBudget(compactedMessages, input.tokenBudgetOptions)
   return {
     messages: compactedMessages,
@@ -145,6 +174,7 @@ export async function compactContextIfNeeded(
     tokenBudget,
     ...(postMicroTokenBudget ? { postMicroTokenBudget } : {}),
     postCompactionTokenBudget,
+    recentRawRetention: recent.stats,
     reason,
     ...(semanticError ? { semanticError } : {}),
   }
@@ -155,14 +185,33 @@ export function compactedMessageSet(
   input: {
     systemContent: string
     compactedMessage: ChatMessage
-    keepRecentMessages: number
+    keepRecentMessages?: number
+    maxInputTokens?: number
+    recentRawTokenRatio?: number
   },
 ): ChatMessage[] {
-  return [
-    { role: 'system', content: input.systemContent },
-    input.compactedMessage,
-    ...recentMessagesForCompaction(messages, input.keepRecentMessages),
-  ]
+  return createCompactedMessageSet(messages, input).messages
+}
+
+export function createCompactedMessageSet(
+  messages: ChatMessage[],
+  input: {
+    systemContent: string
+    compactedMessage: ChatMessage
+    keepRecentMessages?: number
+    maxInputTokens?: number
+    recentRawTokenRatio?: number
+  },
+): { messages: ChatMessage[]; recentRawRetention: RecentRawRetentionStats } {
+  const recent = recentMessagesForCompaction(messages, input)
+  return {
+    messages: [
+      { role: 'system', content: input.systemContent },
+      input.compactedMessage,
+      ...recent.messages,
+    ],
+    recentRawRetention: recent.stats,
+  }
 }
 
 export function sanitizeMessageBoundary(messages: ChatMessage[]): ChatMessage[] {
@@ -177,13 +226,91 @@ export function isCompactedRunContextSystemMarker(message: ChatMessage): boolean
   return message.role === 'system' && message.content === 'RESTORED_COMPACTED_RUN_CONTEXT'
 }
 
-function recentMessagesForCompaction(messages: ChatMessage[], keepRecentMessages: number): ChatMessage[] {
-  const keep = normalizeKeepRecentMessages(keepRecentMessages)
-  if (keep === 0) return []
+function recentMessagesForCompaction(
+  messages: ChatMessage[],
+  input: {
+    keepRecentMessages?: number
+    maxInputTokens?: number
+    recentRawTokenRatio?: number
+  },
+): { messages: ChatMessage[]; historyMessages: ChatMessage[]; stats: RecentRawRetentionStats } {
   const candidates = messages.filter((message) => (
     message.role !== 'system' && !isCompactedRunContextMessage(message)
   ))
-  return boundedMessageTail(candidates, keep)
+
+  if (input.keepRecentMessages !== undefined) {
+    const keep = normalizeKeepRecentMessages(input.keepRecentMessages)
+    const selected = keep === 0 ? [] : boundedMessageTail(candidates, keep)
+    return recentMessageSelection(messages, selected, {
+      selectionMode: 'message_count',
+      keepRecentMessages: keep,
+    })
+  }
+
+  if (isPositiveFinite(input.maxInputTokens)) {
+    const ratio = normalizeRecentRawTokenRatio(input.recentRawTokenRatio)
+    const targetTokens = Math.max(1, Math.floor(input.maxInputTokens * ratio))
+    const groups = messageBoundaryGroups(candidates)
+    const selected: ChatMessage[][] = []
+    let retainedTokens = 0
+
+    for (let index = groups.length - 1; index >= 0; index -= 1) {
+      const group = groups[index]
+      const groupTokens = estimateChatMessages(group).totalTokens
+      if (selected.length > 0 && retainedTokens + groupTokens > targetTokens) break
+      selected.unshift(group)
+      retainedTokens += groupTokens
+    }
+
+    const retained = sanitizeMessageBoundary(selected.flat())
+    return recentMessageSelection(messages, retained, {
+      selectionMode: 'token_ratio',
+      maxInputTokens: Math.floor(input.maxInputTokens),
+      targetTokens,
+      recentRawTokenRatio: ratio,
+    })
+  }
+
+  const keep = DEFAULT_KEEP_RECENT_MESSAGES
+  const selected = boundedMessageTail(candidates, keep)
+  return recentMessageSelection(messages, selected, {
+    selectionMode: 'message_count',
+    keepRecentMessages: keep,
+  })
+}
+
+function recentMessageSelection(
+  sourceMessages: ChatMessage[],
+  selected: ChatMessage[],
+  mode: Pick<
+    RecentRawRetentionStats,
+    'selectionMode' | 'keepRecentMessages' | 'maxInputTokens' | 'targetTokens' | 'recentRawTokenRatio'
+  >,
+): { messages: ChatMessage[]; historyMessages: ChatMessage[]; stats: RecentRawRetentionStats } {
+  const retained = sanitizeMessageBoundary(selected)
+  const retainedSet = new Set(retained)
+  const source = sourceMessages.filter((message) => message.role !== 'system')
+  const historyMessages = sanitizeMessageBoundary(source.filter((message) => !retainedSet.has(message)))
+  const sourceTokens = estimateChatMessages(source).totalTokens
+  const retainedTokens = estimateChatMessages(retained).totalTokens
+  const compactedHistoryTokens = estimateChatMessages(historyMessages).totalTokens
+  return {
+    messages: retained,
+    historyMessages,
+    stats: {
+      selectionMode: mode.selectionMode,
+      sourceMessageCount: source.length,
+      sourceTokens,
+      retainedMessageCount: retained.length,
+      retainedBoundaryGroupCount: messageBoundaryGroups(retained).length,
+      retainedTokens,
+      compactedHistoryTokens,
+      ...(mode.maxInputTokens !== undefined ? { maxInputTokens: mode.maxInputTokens } : {}),
+      ...(mode.targetTokens !== undefined ? { targetTokens: mode.targetTokens } : {}),
+      ...(mode.recentRawTokenRatio !== undefined ? { recentRawTokenRatio: mode.recentRawTokenRatio } : {}),
+      ...(mode.keepRecentMessages !== undefined ? { keepRecentMessages: mode.keepRecentMessages } : {}),
+    },
+  }
 }
 
 function boundedMessageTail(messages: ChatMessage[], keepRecentMessages: number): ChatMessage[] {
@@ -235,6 +362,16 @@ function messageBoundaryGroups(messages: ChatMessage[]): ChatMessage[][] {
 function normalizeKeepRecentMessages(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_KEEP_RECENT_MESSAGES
   return Math.max(0, Math.floor(value))
+}
+
+function normalizeRecentRawTokenRatio(value: number | undefined): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 && value < 1
+    ? value
+    : DEFAULT_RECENT_RAW_TOKEN_RATIO
+}
+
+function isPositiveFinite(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value > 0
 }
 
 function compactReason(tokenBudget: TokenBudgetSnapshot): string {

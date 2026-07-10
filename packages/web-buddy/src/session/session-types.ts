@@ -155,6 +155,7 @@ export interface ContextCompactionEntry extends TranscriptEntryBase {
   postCompactionTokenBudget?: unknown
   mode?: string
   microCompaction?: unknown
+  recentRawRetention?: unknown
   semanticError?: string
   summary: unknown
 }

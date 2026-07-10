@@ -569,11 +569,49 @@ function taskCompletionVerdictFor(
     summary: input.summary,
     evidenceSnapshot: evidenceStoreSnapshotFor(evidence, now),
   })
+  const targetStateReached = verdict.targetStateReached ||
+    (verdict.externalBlockerVisible !== true && fillFormTargetReachedFromWorkflowEvidence(input, evidence))
 
   return {
-    targetStateReached: verdict.targetStateReached,
+    targetStateReached,
     externalBlockerVisible: verdict.externalBlockerVisible,
   }
+}
+
+function fillFormTargetReachedFromWorkflowEvidence(input: WorkflowEngineInput, evidence: EvidenceLookup): boolean {
+  if (input.taskType !== 'fill_form') return false
+  if ((evidence.byKind.get('form') ?? []).length === 0) return false
+
+  const ledger = input.fillLedgerSummary ?? input.previous.fillLedgerSummary
+  if (!ledger || ledger.total <= 0) return false
+  if (ledger.pendingRequired !== 0 || ledger.failed !== 0 || ledger.needsUser !== 0) return false
+  if (ledger.verified + ledger.skipped < ledger.total) return false
+
+  const currentResumeUploaded = input.currentResumeUploaded ?? input.previous.currentResumeUploaded
+  if (input.requiresCurrentResumeUpload && currentResumeUploaded !== true) return false
+
+  const form = input.form
+  if (!form) return false
+  if (form.missingRequired.length > 0 || form.missingRequiredMayBeIncomplete === true) return false
+  if ((form.visibleErrors ?? []).some((error) => /\S/.test(error))) return false
+
+  const coverage = input.formCoverage ?? form.formCoverage ?? input.previous.formCoverage
+  return legacyFormCoverageHasNoRequiredGap(coverage)
+}
+
+function legacyFormCoverageHasNoRequiredGap(coverage: FormCoverage | undefined): boolean {
+  const record = asRecord(coverage)
+  const uncoveredRequired = record.uncoveredRequired
+  if (!Array.isArray(uncoveredRequired) || uncoveredRequired.length > 0) return false
+  if (record.scrolledBottom !== true) return false
+
+  const coveredFields = numberValue(record.coveredFields)
+  const visibleFields = numberValue(record.visibleFields)
+  const totalFields = numberValue(record.totalFields)
+  if (coveredFields === undefined) return true
+  if (visibleFields !== undefined && coveredFields < visibleFields) return false
+  if (totalFields !== undefined && coveredFields < totalFields) return false
+  return true
 }
 
 function transitionStatePhase(state: WorkflowState, previous: WorkflowState, phase: WorkflowPhase, now: string): WorkflowState {
@@ -839,6 +877,10 @@ function last<T>(values: T[] | undefined): T | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function cloneEvidence(evidence: WorkflowEvidence): WorkflowEvidence {

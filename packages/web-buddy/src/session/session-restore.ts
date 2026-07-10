@@ -155,6 +155,7 @@ function compactedRestoreMessages(entry: Extract<TranscriptEntry, { type: 'conte
         summaryId: entry.summaryId,
         reason: entry.reason,
         ...(entry.mode ? { mode: entry.mode } : {}),
+        ...(entry.recentRawRetention ? { recentRawRetention: entry.recentRawRetention } : {}),
         ...(entry.semanticError ? { semanticError: entry.semanticError } : {}),
         summary: entry.summary,
       }),

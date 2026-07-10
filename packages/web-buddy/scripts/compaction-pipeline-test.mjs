@@ -119,6 +119,7 @@ assert.equal(full.compaction.summary.permissionContract?.finalSubmitRequiresExpl
 assert.equal(full.compaction.summary.staleRefs?.rule, 'old_browser_refs_are_not_actionable')
 assert.equal(semanticLlm.calls.length, 1, 'semantic LLM should be called once')
 assert(full.microCompaction?.applied, 'old large snapshot should be micro-compacted before full compact')
+assert.equal(full.recentRawRetention?.selectionMode, 'message_count', 'explicit keepRecentMessages should preserve legacy behavior')
 assert(full.messages[0].role === 'system', 'compacted messages should start with system')
 assert(
   full.messages.some((message) => message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)),
@@ -149,6 +150,51 @@ assert.equal(microOnly.messages.length, messages.length, 'micro compact should p
 assert(microOnly.messages[3].content.includes('[micro_compacted_tool_result'), 'old tool result should be replaced with a micro compact marker')
 assert.equal(semanticLlm.calls.length, 1, 'micro-only path should not call semantic LLM')
 assertToolBoundariesIntact(microOnly.messages)
+
+const dynamicSemanticLlm = new SemanticLlm()
+const dynamicMessages = [
+  { role: 'system', content: 'system' },
+  { role: 'user', content: `old-user-1 ${'A'.repeat(1600)}` },
+  { role: 'assistant', content: `old-assistant-1 ${'B'.repeat(1600)}` },
+  { role: 'user', content: `old-user-2 ${'C'.repeat(1600)}` },
+  { role: 'assistant', content: `old-assistant-2 ${'D'.repeat(1600)}` },
+  { role: 'user', content: `recent-user ${'E'.repeat(120)}` },
+  { role: 'assistant', content: `recent-assistant ${'F'.repeat(120)}` },
+]
+const dynamicTail = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_003',
+  step: 9,
+  goal: 'Retain a token-budgeted recent raw tail.',
+  messages: dynamicMessages,
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 2_000,
+    compactThresholdRatio: 0.8,
+  },
+  semanticLlm: dynamicSemanticLlm,
+})
+
+assert.equal(dynamicTail.fullCompactionApplied, true, 'dynamic-tail fixture should cross the 80% full-compaction threshold')
+assert.equal(dynamicTail.recentRawRetention?.selectionMode, 'token_ratio')
+assert.equal(dynamicTail.recentRawRetention?.recentRawTokenRatio, 0.2)
+assert.equal(dynamicTail.recentRawRetention?.targetTokens, 400)
+assert(
+  (dynamicTail.recentRawRetention?.retainedTokens ?? Infinity) <= 400,
+  'recent raw history should stay within 20% of the model input window when boundary groups fit',
+)
+assert(
+  (dynamicTail.recentRawRetention?.compactedHistoryTokens ?? 0) > (dynamicTail.recentRawRetention?.retainedTokens ?? Infinity),
+  'the older history region should be handed to compaction instead of retained verbatim',
+)
+assert(dynamicTail.messages.some((message) => message.content.includes('recent-assistant')), 'latest raw context should remain verbatim')
+assert(!dynamicTail.messages.some((message) => message.content.includes('old-user-1')), 'old raw context should be replaced by the compact summary')
+const dynamicSemanticPrompt = dynamicSemanticLlm.calls[0].messages.map((message) => message.content).join('\n')
+assert(dynamicSemanticPrompt.includes('old-user-1'), 'semantic compaction should consume the older history region')
+assert(!dynamicSemanticPrompt.includes('recent-assistant'), 'semantic compaction should not duplicate the retained recent raw region')
+assertToolBoundariesIntact(dynamicTail.messages)
 
 console.log('compaction-pipeline-test: PASS')
 

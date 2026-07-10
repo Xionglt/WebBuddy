@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentRuntime } from '../dist/agent/agent-runtime.js'
@@ -61,7 +61,12 @@ class AbortBeforeToolLlm {
   }
 }
 
-const root = mkdtempSync(join(tmpdir(), 'mfa-agent-kernel-'))
+const keepOutput = process.env.KEEP_AGENT_KERNEL_TEST_OUTPUT === '1'
+const evidenceRoot = join(process.cwd(), 'output', 'qa', 'agent-kernel-test')
+if (keepOutput && !existsSync(evidenceRoot)) {
+  mkdirSync(evidenceRoot, { recursive: true })
+}
+const root = mkdtempSync(join(keepOutput ? evidenceRoot : tmpdir(), 'mfa-agent-kernel-'))
 const trace = new TraceRecorder(root, {
   runId: 'agent-kernel-test-run',
   source: 'local-runtime',
@@ -201,5 +206,9 @@ try {
   console.log('agent-kernel-test: PASS')
 } finally {
   await sessionManager.closeAll().catch(() => {})
-  rmSync(root, { recursive: true, force: true })
+  if (keepOutput) {
+    console.log(`agent-kernel-test: evidence ${root}`)
+  } else {
+    rmSync(root, { recursive: true, force: true })
+  }
 }

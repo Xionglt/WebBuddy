@@ -106,7 +106,7 @@ function semanticCompactionPrompt(input: {
     'STRUCTURED_SUMMARY:',
     JSON.stringify(stripLargeSummaryFields(input.structuredSummary), null, 2),
     '',
-    'RECENT_HISTORY:',
+    'OLDER_HISTORY_TO_COMPACT:',
     renderMessagesForSemanticSummary(input.messages, input.maxMessages, input.maxMessageChars),
   ].join('\n')
 }
