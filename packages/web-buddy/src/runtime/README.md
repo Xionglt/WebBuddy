@@ -7,6 +7,5 @@ runtime/
 └── local/   # Self-owned Web Agent loop used by CLI/Web UI raw/fill/demo paths.
 ```
 
-The Claude Code path is not implemented here. It lives under
-`scripts/adapters/claude-code/` and calls this package through the MCP server.
-
+The Web Buddy CLI and Web UI both use the self-owned local runtime. External
+agent runtimes are not bundled with this package.

@@ -5,9 +5,8 @@ Playwright 浏览器工具、LLM tool-calling 循环、页面/表单观察、简
 自主填表规划、人类确认 gate、策略引擎、session/trace/metrics/safety
 report 串成一个可以本地运行和复盘的工程。
 
-这个仓库当前的主线包是 `packages/web-buddy`。根目录保留其它历史计划文档
-和可选 adapter，但如果你把这个 README 交给另一个 AI 或新维护者，默认让它
-从 `packages/web-buddy` 开始即可。
+这个仓库只发布 `packages/web-buddy` 主项目。根目录中的 Docker 与配置文件
+用于构建和运行 Web Buddy；本地计划和设计文档不进入远端版本。
 
 ## 当前能力概览
 
@@ -34,7 +33,6 @@ report 串成一个可以本地运行和复盘的工程。
 
 ```text
 packages/web-buddy/        主项目：runtime、CLI、Web UI、MCP、浏览器工具、测试
-packages/claude-code/      可选 Claude Code adapter，用于高级/对比实验
 output/                    运行产物目录，默认不应提交
 tmp/                       demo 简历、临时文件，默认不应提交真实敏感内容
 ```
@@ -295,8 +293,15 @@ http://localhost:5178
 ```
 
 Web UI 用于配置模型、上传简历、跑 demo/fill workflow、查看事件、截图、trace 和
-metrics。`npm run web` 会先 build `packages/web-buddy`，并 build 可选
-`packages/claude-code` adapter。
+metrics。`npm run web` 只构建并启动 Web Buddy 自有 runtime。
+
+### 单 runtime 版本说明
+
+仓库不再捆绑外部 agent runtime。对应的 adapter 源码、`/api/runtime/*` Web
+接口以及旧的 `alibaba:apply` 命令均已移除。Alibaba 场景请使用
+`npm run alibaba:apply:raw`；Web 控制台提供 `Web Buddy Raw` 和
+`Web Buddy Match` 两种入口。模型配置仍支持 Anthropic-compatible API，
+这与是否捆绑外部 runtime 无关。
 
 ## 输出产物
 

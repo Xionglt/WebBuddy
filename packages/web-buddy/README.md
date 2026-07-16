@@ -50,7 +50,7 @@ npm run test:mvp
 | `npm run demo:research` | Read-only page observation, structured summary artifact, trace, metrics, safety report. | Offline fixture; no login, no form submit, no L3/L4 action. |
 | Web console → `Venue` | Compare five venues, choose the only fully compliant option, fill a booking draft, and stop before payment. | Local fixture; uses fake contact data and must leave the payment boundary untouched. |
 | `npm run demo:match` | Read-only Alibaba multi-page list/detail matching for the flagship workflow. | Threshold-gated; does not final-submit. |
-| `npm run alibaba:apply` | Complex flagship workflow through the optional Claude Code adapter. | Requires model and human handoff for login/captcha/final submit. |
+| `npm run alibaba:apply:raw` | Complex flagship workflow through the Web Buddy runtime. | Requires model and human handoff for login/captcha/final submit. |
 
 ## Resume and Matching v2
 
@@ -378,7 +378,6 @@ npm run test:direct-submit-flow    # direct-submit review fixtures
 npm run test:risk-timeline    # risk-decisions artifact and counters
 npm run test:e2e-auto-apply   # localhost sandbox auto-apply
 npm run test:mvp              # full MVP regression entry
-npm run alibaba:apply         # optional Claude Code adapter path
 npm run alibaba:apply:raw     # local raw runtime comparison path
 ```
 

@@ -148,14 +148,13 @@
   <aside>
     <div class="brand">
       <div class="mark"></div>
-      <div><h1>Web Agent Console</h1><p>Claude Code + Web Buddy runtimes</p></div>
+      <div><h1>Web Agent Console</h1><p>Web Buddy runtime</p></div>
     </div>
 
     <div class="group">
       <div class="label"><span>Runtime</span><span>selector</span></div>
       <div class="seg runtime" id="runtimeSeg">
-        <button data-v="claude-code" class="on">Claude Code</button>
-        <button data-v="web-buddy-raw">Web Buddy Raw</button>
+        <button data-v="web-buddy-raw" class="on">Web Buddy Raw</button>
         <button data-v="web-buddy-match">Web Buddy Match</button>
       </div>
     </div>
@@ -193,15 +192,9 @@
       <div class="label"><span>Model endpoint</span><span>Anthropic-compatible</span></div>
       <input id="baseUrl" placeholder="https://open.bigmodel.cn/api/anthropic" />
     </div>
-    <div class="row">
-      <div class="group">
-        <div class="label"><span>Model</span></div>
-        <input id="model" placeholder="glm-4.7" />
-      </div>
-      <div class="group">
-        <div class="label"><span>Max turns</span></div>
-        <input id="maxTurns" placeholder="20" />
-      </div>
+    <div class="group">
+      <div class="label"><span>Model</span></div>
+      <input id="model" placeholder="glm-4.7" />
     </div>
     <div class="group">
       <div class="label"><span>API key</span><span id="keyState">checking</span></div>
@@ -209,14 +202,11 @@
     </div>
 
     <div class="group">
-      <div class="label"><span>Allowed domains</span><span>optional</span></div>
-      <input id="allowedDomains" placeholder="auto from target URL" />
       <label class="check"><input type="checkbox" id="headless" /> Run headless</label>
     </div>
 
     <div class="actions">
       <button class="btn primary" id="runBtn">Run Agent</button>
-      <button class="btn continue" id="continueBtn">Continue After Handoff</button>
       <button class="btn secondary" id="refreshBtn">Refresh Trace</button>
       <button class="btn danger" id="stopBtn" disabled>Stop</button>
     </div>
@@ -290,7 +280,7 @@ const ALIBABA_URL = 'https://talent-holding.alibaba.com/off-campus/position-list
 const VENUE_PROMPT = '请为杭州团队筹备 2026 年 7 月 21 日 13:00–17:00 的 20 人半天工作坊。总预算不超过 4200 元，场地评分至少 4.7，地铁步行不超过 10 分钟，必须有 4K 大屏、可书写白板、20 人茶歇（可加购），并支持活动开始 24 小时前免费取消。请至少比较 3 个场地，选择满足全部条件的最佳方案，然后填写预订信息：联系人林舟，企业杭州栖木科技有限公司，手机号 13800001126，邮箱 linzhou@example.test，发票选择企业增值税普通发票，留言“请将桌椅预设为 4 组岛形布局”，并勾选已核对方案。不要点击任何会创建订单或发起支付的按钮；到达最终支付按钮后停下，汇报最终选择、其他候选项的淘汰原因、总价明细和最终按钮文字，然后输出 AGENT_STATUS=COMPLETED。';
 const venueUrl = () => `${window.location.origin}/fixtures/venue-booking`;
 let preset = 'generic';
-let runtime = 'claude-code';
+let runtime = 'web-buddy-raw';
 let activeRuntime = null;
 let activeMode = null;
 let runId = null;
@@ -299,15 +289,6 @@ let traceTimer = null;
 let riskTimelineKeys = new Set();
 
 const RUNTIMES = {
-  'claude-code': {
-    label: 'Claude Code',
-    mode: () => preset,
-    runPath: '/api/runtime/run',
-    eventsPath: (id) => `/api/runtime/events?id=${encodeURIComponent(id)}`,
-    tracePath: (id) => `/api/runtime/trace?id=${encodeURIComponent(id)}`,
-    stopPath: (id) => `/api/runtime/stop?id=${encodeURIComponent(id)}`,
-    continuePath: (id) => `/api/runtime/continue?id=${encodeURIComponent(id)}`,
-  },
   'web-buddy-raw': {
     label: 'Web Buddy Raw',
     mode: () => 'raw',
@@ -327,7 +308,7 @@ const RUNTIMES = {
 };
 
 function runtimeInfo(name = runtime) {
-  return RUNTIMES[name] || RUNTIMES['claude-code'];
+  return RUNTIMES[name] || RUNTIMES['web-buddy-raw'];
 }
 
 function activeRuntimeInfo() {
@@ -339,9 +320,8 @@ function runtimeMode() {
 }
 
 function setRuntime(next) {
-  runtime = RUNTIMES[next] ? next : 'claude-code';
+  runtime = RUNTIMES[next] ? next : 'web-buddy-raw';
   document.querySelectorAll('#runtimeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === runtime));
-  $('continueBtn').style.display = (activeRuntime || runtime) === 'claude-code' && $('runStatus').textContent === 'blocked' ? 'block' : 'none';
   updateRunMeta();
 }
 
@@ -397,7 +377,7 @@ async function loadConfig() {
   $('resumePath').value = cfg.resumePath || '';
   $('keyState').textContent = cfg.hasKey ? 'set' : 'not set';
   setPreset('generic');
-  setRuntime('claude-code');
+  setRuntime('web-buddy-raw');
 }
 
 async function saveConfig() {
@@ -427,7 +407,6 @@ function addEvent(event) {
   timeline.appendChild(row);
   timeline.scrollTop = timeline.scrollHeight;
   if (level === 'gate') {
-    $('continueBtn').style.display = 'block';
     setStatus('blocked');
   }
 }
@@ -443,16 +422,11 @@ async function refreshTrace() {
   renderMetrics(trace.metrics || null);
   renderRiskDecisions(trace.riskDecisions || null);
   appendRiskTimeline(trace.riskDecisions?.decisions || []);
-  if ((activeRuntime || runtime) === 'claude-code' && trace.handoffWaiting) {
-    $('continueBtn').style.display = 'block';
-    setStatus('blocked');
-  }
   renderSpans(trace.spans || []);
 }
 
 function displayRuntime(value) {
   if (value === 'web-buddy') return activeRuntimeInfo().label;
-  if (value === 'claude-code') return 'Claude Code';
   return value || activeRuntimeInfo().label;
 }
 
@@ -690,33 +664,19 @@ $('runBtn').addEventListener('click', async () => {
   riskTimelineKeys = new Set();
   renderMetrics(null);
   renderRiskDecisions(null);
-  $('continueBtn').style.display = 'none';
   setStatus('running');
   setRunControls(true);
 
   try {
     await saveConfig();
     const mode = activeMode;
-    const isClaude = runtime === 'claude-code';
     const prompt = $('prompt').value.trim();
     const url = $('url').value.trim();
     const resumePath = preset === 'venue' ? undefined : ($('resumePath').value.trim() || undefined);
     const started = await api(activeRuntimeInfo().runPath, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(isClaude ? {
-        runtime,
-        mode,
-        preset,
-        url,
-        startUrl: url,
-        prompt,
-        taskPrompt: prompt,
-        resumePath,
-        headless: $('headless').checked,
-        maxTurns: $('maxTurns').value.trim() || undefined,
-        allowedDomains: $('allowedDomains').value.trim() || undefined,
-      } : {
+      body: JSON.stringify({
         runtime,
         mode,
         startUrl: url,
@@ -763,13 +723,6 @@ function finalStatusForEnd(event) {
   if (event.finalState === 'blocked' || event.finalState === 'login_required' || event.finalState === 'direct_submit_review' || event.finalState === 'stopped_at_submit') return 'blocked';
   return 'done';
 }
-
-$('continueBtn').addEventListener('click', async () => {
-  if (!runId || activeRuntime !== 'claude-code') return;
-  await api(activeRuntimeInfo().continuePath(runId), { method: 'POST' });
-  $('continueBtn').style.display = 'none';
-  setStatus('running');
-});
 
 $('stopBtn').addEventListener('click', async () => {
   if (!runId) return;

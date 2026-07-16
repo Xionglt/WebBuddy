@@ -11,8 +11,8 @@ across three stages, fill a booking draft, and stop before a payment boundary.
 npm run web
 ```
 
-Open the console, select **Venue**, keep **Claude Code** as the runtime, and run
-the prefilled task. The fixture itself is available at:
+Open the console, select **Venue** and **Web Buddy Raw**, then run the prefilled
+task. The fixture itself is available at:
 
 ```text
 http://localhost:4317/fixtures/venue-booking

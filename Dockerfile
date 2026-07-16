@@ -14,18 +14,14 @@ ENV CI=true \
     HUMAN_GATE_MODE=auto
 
 COPY packages/web-buddy/package.json packages/web-buddy/package-lock.json ./packages/web-buddy/
-COPY packages/claude-code/package.json packages/claude-code/package-lock.json ./packages/claude-code/
 
-RUN npm --prefix packages/web-buddy ci \
-  && npm --prefix packages/claude-code ci
+RUN npm --prefix packages/web-buddy ci
 
 COPY configs ./configs
 COPY README.md ./README.md
 COPY packages/web-buddy ./packages/web-buddy
-COPY packages/claude-code ./packages/claude-code
 
 RUN npm --prefix packages/web-buddy run build \
-  && npm --prefix packages/claude-code run build \
   && mkdir -p /app/output /app/tmp/pdfs
 
 EXPOSE 5178
