@@ -1,14 +1,22 @@
-## box-allinone 与 multi-functional-agent 架构对比及 multi-functional-agent 优化设计
+## box-allinone 与 Web Buddy Agent Harness 架构对比及演进设计
+
+> **当前定位说明（2026-07）**：Web Buddy 已定位为面向多场景网页任务的通用
+> Web Agent Runtime。本文保留招聘流程作为复杂业务 Skill 和 benchmark 案例，
+> 但招聘不是 Runtime 的产品边界。文中部分“缺少/目标态”描述来自早期架构分析，
+> 当前实现状态应以根目录 `README.md` 和实际代码为准。
 
 ### 0. 文档目标
 
-本文档用于系统性对比 `box-allinone` 与 `multi-functional-agent` 两个项目在 Agent 架构上的差异，并重点说明 `multi-functional-agent` 如何在架构上演进，成为一个更接近 `box-allinone` 的成熟 Agent 平台。
+本文档用于系统性对比 `box-allinone` 与 Web Buddy 在 Agent 架构上的差异，并说明
+Web Buddy 如何在保持浏览器执行优势的同时，形成可承载多类网页任务的 Agent
+Harness。
 
-本文主要回答三个问题：
+本文主要回答四个问题：
 
 - **二者在 Agent 架构上有什么本质区别？**
-- **为什么 `box-allinone` 更像平台级 Agent 系统，而 `multi-functional-agent` 更像垂直场景 Agent runtime？**
-- **`multi-functional-agent` 应该从哪些模块、机制和工程体系上优化，才能成为更好的 Agent 平台？**
+- **通用 Agent 平台与浏览器 Agent Harness 的职责边界是什么？**
+- **Web Buddy 如何通过 Runtime、Skill、Workflow 与 Policy 支持多种网页场景？**
+- **Web Buddy 还应从哪些模块、机制和工程体系上继续演进？**
 
 本文采用如下 Agent Harness 分析框架：
 
@@ -33,13 +41,13 @@ Agent Harness
 
 ### 1.1 一句话结论
 
-**`box-allinone` 是平台型 Agent 操作系统，`multi-functional-agent` 是浏览器垂直场景 Agent runtime。**
+**`box-allinone` 是通用 Agent 平台，Web Buddy 是以浏览器为核心执行环境的通用 Web Agent Harness。**
 
 二者都属于 Agent Harness，但它们构造的“世界模型”不同：
 
 ```text
 box-allinone 构造的是：软件工程与生产力任务世界
-multi-functional-agent 构造的是：浏览器网页操作世界
+Web Buddy 构造的是：可观察、可操作、可治理的网页任务世界
 ```
 
 更具体地说：
@@ -59,20 +67,20 @@ box-allinone
 ```
 
 ```text
-multi-functional-agent
-= 浏览器 ReAct Loop
-+ Playwright 工具
-+ 页面 Snapshot
-+ DOM ref 操作
-+ 风险分级
-+ Human Gate
-+ 简历解析
-+ 岗位匹配
-+ Trace / Screenshot
-+ 求职投递流程编排
+Web Buddy
+= 本地 Agent Loop 与异步任务编排
++ Playwright / MCP 浏览器工具
++ Page / Form Observation
++ Context Selection / Compaction / Session
++ Policy / Permission / Human Gate
++ Workflow / Completion Gate
++ Skill 与场景扩展
++ Trace / Metrics / Safety Report
 ```
 
-因此，`box-allinone` 更像一个可以承载多种任务、多种 Agent、多种工具、多种入口的平台底座；而 `multi-functional-agent` 目前更像一个专注浏览器自动化和求职场景的垂直 Agent runtime。
+因此，`box-allinone` 更像覆盖软件工程与生产力工具的通用平台底座；Web Buddy
+则专注于浏览器这一执行环境，但可以承载网页研究、比较决策、表单处理、预订准备、
+招聘辅助和自定义站点流程等多种业务场景。
 
 ---
 
@@ -80,17 +88,17 @@ multi-functional-agent
 
 | 维度 | `box-allinone` | `multi-functional-agent` |
 |---|---|---|
-| **架构类型** | 平台级 Agent 系统 | 垂直场景 Agent runtime |
-| **主要场景** | 编程、问答、规划、技能调用、知识库、桌面/服务端集成 | 网页浏览、表单填写、求职匹配、自动投递前置流程 |
+| **架构类型** | 平台级 Agent 系统 | 通用 Web Agent Harness |
+| **主要场景** | 编程、问答、规划、技能调用、知识库、桌面/服务端集成 | 网页研究、比较决策、表单、预订、招聘辅助、自定义网页流程 |
 | **核心环境** | 本地项目、代码库、文件系统、Shell、LSP、MCP、技能、知识库 | 浏览器页面、DOM、表单、URL、Cookie、截图 |
-| **Agent Loop** | 通用多模式 Agent Loop | 浏览器 ReAct Loop |
+| **Agent Loop** | 通用多模式 Agent Loop | 浏览器 ReAct Loop + 异步 Task Graph |
 | **工具体系** | 大而全，可扩展，支持 MCP 和 Skills | 小而深，集中在 Playwright 浏览器工具 |
-| **上下文管理** | Token 预算、摘要、归档、会话持久化 | 当前页面 snapshot + tool observation 截断 |
-| **长期记忆** | 有 Memory / Memory Index / 知识库类能力 | 暂无真正长期语义记忆，主要是 trace 和 storage state |
-| **规划能力** | 有 Ask / Craft / Plan 模式与 task/subagent 能力 | 主要由 orchestrator preset workflow + LLM 单步决策构成 |
+| **上下文管理** | Token 预算、摘要、归档、会话持久化 | Context Selection、分层压缩、artifact 外置与 compact/resume |
+| **长期记忆** | 有 Memory / Memory Index / 知识库类能力 | Session facts、Run Memory 与任务恢复；长期语义知识仍可增强 |
+| **规划能力** | Ask / Craft / Plan 模式与 task/subagent 能力 | ReAct、Task Graph、后台任务、Workflow 与 Completion Gate |
 | **安全体系** | 通用工具安全、URL 安全、泄漏检测、审批 | 浏览器动作风险等级 L0-L4 + human gate |
-| **可观测性** | 平台日志、遥测、成本、测试体系 | 单次浏览器任务 trace、screenshot、JSONL，适合复盘网页动作 |
-| **产品化程度** | 高，偏完整产品平台 | 中，偏实验性/垂直任务闭环 |
+| **可观测性** | 平台日志、遥测、成本、测试体系 | session、trace、metrics、screenshot、risk decision 与 safety report |
+| **产品化程度** | 高，偏完整产品平台 | 中，偏可审计的 Web Runtime 与多场景工程基线 |
 
 ---
 
@@ -179,7 +187,8 @@ multi-functional-agent
 
 ### 3.2 `multi-functional-agent` 的定位
 
-`multi-functional-agent` 的核心集中在 `packages/web-buddy`，目前主要围绕浏览器自动化任务展开。
+项目核心集中在 `packages/web-buddy`，面向需要网页观察、推理、操作和风险控制的
+多步骤任务。
 
 它包含的典型能力包括：
 
@@ -209,16 +218,18 @@ multi-functional-agent
   - raw
   - fill
   - match
-  - alibaba-apply
   - demo-form
-  - auto-apply
+  - demo-research
+  - Task Graph / background tasks
+  - compact / resume / cancel
 
-- **求职任务能力**
-  - 简历解析
-  - 岗位抓取
-  - 岗位匹配
-  - 表单填写
-  - 投递前确认
+- **多场景能力**
+  - 网页研究与结构化总结
+  - 候选项比较、约束验证与决策支持
+  - 通用表单规划、填写和回读校验
+  - 预订或交易前流程
+  - 招聘研究、匹配与申请草稿等领域 Skill
+  - 自定义 Prompt / Skill / Workflow 扩展
 
 - **安全与人工确认**
   - 风险等级 L0-L4
@@ -235,13 +246,13 @@ multi-functional-agent
 
 它当前的优势非常明确：
 
-> **让 LLM 通过 Playwright 在真实网页上执行任务，并用 snapshot/ref/risk/gate/trace 保证可控性。**
+> **让 LLM 通过 Playwright 在真实网页上稳定执行多步骤任务，并用
+> snapshot/ref/context/task graph/policy/gate/trace 保证可控性。**
 
 这是一种典型的 Web Agent Harness。
 
-但它的问题也很明确：
-
-> **它现在更像“一个能跑网页任务的 runtime”，还不是“一个能承载多类 Agent、多类技能、多类记忆、多类部署形态的平台”。**
+它的边界也很明确：它不追求覆盖文件、Shell、IDE 等所有执行环境，而是把浏览器
+任务的可靠执行、安全治理、上下文管理和场景扩展做深。
 
 ---
 
@@ -1649,18 +1660,12 @@ AgentCore
 - schedule
 - multi-run tracking
 
-### 15.7 缺少多 Agent 协作
+### 15.7 多 Agent 协作仍需产品化
 
-求职场景天然适合多 Agent：
-
-- Job Search Agent
-- Job Match Agent
-- Form Fill Agent
-- Safety Review Agent
-- Resume Tailor Agent
-- Human Liaison Agent
-
-当前基本还是单 Agent。
+当前已经具备 Task Graph、后台任务、只读子 Agent、通知队列、租约恢复和取消语义。
+后续重点不是把 Runtime 绑定到固定 Agent 名称，而是把这些能力产品化为稳定的
+Research、Comparison、Form、Safety Review 等可组合角色，并补齐统一 Cockpit、
+成本治理和跨进程恢复体验。
 
 ### 15.8 缺少模型 / 工具成本治理
 
@@ -1689,9 +1694,10 @@ Web Agent 很容易被页面变化打断。必须要有：
 
 ### 16.1 目标定位
 
-如果要向 `box-allinone` 靠近，`multi-functional-agent` 不应该只做“自动投递工具”，而应该升级为：
+Web Buddy 的当前定位是：
 
-> **一个以浏览器为核心执行环境的通用 Web Agent 平台。**
+> **一个以浏览器为核心执行环境、通过 Skill 与 Workflow 承载多种场景的通用
+> Web Agent Runtime。**
 
 目标形态：
 
@@ -3168,11 +3174,12 @@ Agent OS for software engineering and productivity
 - Playwright 浏览器执行
 - 页面 snapshot
 - DOM ref 操作
-- 表单填写
-- 简历 / 岗位匹配
-- 风险等级
-- human gate
-- trace / screenshot 复盘
+- 网页研究、比较与决策支持
+- 通用表单与多步骤流程
+- Task Graph、上下文管理与中断恢复
+- Skill / Workflow 场景扩展
+- 风险等级、Permission 与 Human Gate
+- trace / metrics / screenshot / safety report 复盘
 
 它更像：
 
@@ -3205,4 +3212,5 @@ Web Agent Platform
 + Server / Worker / EvalOps
 ```
 
-如果这样演进，`multi-functional-agent` 会从一个“能自动操作网页的求职 Agent”，成长为一个真正可扩展、可治理、可复盘、可产品化的 **浏览器 Agent 平台**。
+沿着这一方向演进，Web Buddy 可以在不绑定单一业务的前提下，成为真正可扩展、
+可治理、可复盘、可产品化的 **多场景浏览器 Agent 平台**。

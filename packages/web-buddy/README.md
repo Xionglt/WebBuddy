@@ -1,14 +1,26 @@
 # Web Buddy Local Web Agent Runtime
 
-`@multi-functional-agent/web-buddy` is the main package for the local,
-auditable Web Agent runtime. It owns the Playwright browser tools, local agent
-loop, MCP server, CLI, Web UI, observation model, context assembly, policy
-boundary, session store, trace, metrics, benchmarks, and safety report helpers.
+`@multi-functional-agent/web-buddy` is a local, auditable, safety-first Web
+Agent Runtime for multi-step browser work. It owns the Playwright tools, local
+agent loop, task orchestration, MCP server, CLI, Web UI, context assembly,
+policy boundary, session store, trace, metrics, benchmarks, and safety reports.
 
-Job application is the flagship workflow, but the runtime is broader than
-recruiting automation. The default demos use local fixtures so a new user can
-verify browser control, observation artifacts, metrics, and safety reports
-without a real account, captcha, or live website.
+The core runtime is scenario-neutral. Research, comparison, form workflows,
+booking preparation, and recruiting assistance all run through the same
+Agent Harness; task prompts, Skills, Policies, and Workflows provide the
+scenario-specific behavior.
+
+## Scenario Coverage
+
+| Scenario | Runtime behavior | Safety boundary |
+| --- | --- | --- |
+| Web research | Navigate, extract evidence, summarize across pages. | Read-only by default. |
+| Comparison and decision support | Validate constraints, compare candidates, preserve rejection reasons. | No purchase or final confirmation. |
+| General form workflows | Inspect fields, plan values, ask for missing data, fill and verify. | Upload, save, and submit remain policy-gated. |
+| Multi-page operations | Carry task state across search, detail, edit, and review pages. | Login, captcha, and identity checks hand off to a human. |
+| Booking preparation | Select an eligible option, fill a draft, verify price and terms. | Stop before order creation or payment. |
+| Recruiting assistance | Research roles, rank candidates, prepare application drafts. | Recruiting is an extension; final application submission remains gated. |
+| Custom site tasks | Use Raw Runtime, MCP, and Skills to add new browser scenarios. | Reuses the same Policy, Permission, and Trace layers. |
 
 ## Safety Contract
 
@@ -26,7 +38,7 @@ state sources.
 npm install
 npm run build
 
-# Local mock form fill. No key, login, or network.
+# Local structured form workflow. No key, login, or network.
 npm run demo:form
 
 # Local read-only web research. No key, login, or network.
@@ -46,13 +58,13 @@ npm run test:mvp
 
 | Entry | What it proves | Safety profile |
 | --- | --- | --- |
-| `npm run demo:form` | Local form observation, resume-based filling, submit-adjacent gate behavior. | Offline fixture; never contacts a real site. |
+| `npm run demo:form` | Local form observation, structured profile filling, and submit-adjacent gate behavior. | Offline fixture; never contacts a real site. |
 | `npm run demo:research` | Read-only page observation, structured summary artifact, trace, metrics, safety report. | Offline fixture; no login, no form submit, no L3/L4 action. |
 | Web console → `Venue` | Compare five venues, choose the only fully compliant option, fill a booking draft, and stop before payment. | Local fixture; uses fake contact data and must leave the payment boundary untouched. |
-| `npm run demo:match` | Read-only Alibaba multi-page list/detail matching for the flagship workflow. | Threshold-gated; does not final-submit. |
-| `npm run alibaba:apply:raw` | Complex flagship workflow through the Web Buddy runtime. | Requires model and human handoff for login/captcha/final submit. |
+| `npm run demo:match` | Read-only Alibaba multi-page list/detail matching as a domain Skill example. | Threshold-gated; does not final-submit. |
+| `npm run alibaba:apply:raw` | Complex recruiting workflow through the same generic Web Buddy runtime. | Requires model and human handoff for login/captcha/final submit. |
 
-## Resume and Matching v2
+## Scenario Extension: Resume and Matching v2
 
 Resume inputs for CLI/Web UI are `.pdf`, `.json`, and `.txt`. The v2 SDK
 parser (`readResumeV2` / `ingestResume`) returns `resume-profile/v2` with
@@ -266,12 +278,12 @@ node dist/cli/demo.js <command> [options]
 | --- | --- | --- |
 | `demo-form` | Local mock form; agent loop or heuristic fallback fills a draft and stops before submit. | No |
 | `demo-research` | Local read-only product/docs page; captures observation and structured research summary. | No |
-| `raw <url>` | LLM drives the browser directly from your prompt and resume. | Yes |
-| `fill <url>` | Cookie-login target site, then LLM-driven form filling from resume. Never final-submits. | Yes |
+| `raw <url>` | LLM plans and executes a general browser task from your prompt and optional profile. | Yes |
+| `fill <url>` | General form understanding and verified draft filling. Never final-submits. | Yes |
 | `login <url>` | Open a visible browser for manual login and save Playwright storage state. | No |
-| `match [--list-url]` | Alibaba list/detail scraping and resume matching, read-only. | Optional |
-| `auto-apply <url>` | Structured local/sandbox job board benchmark flow. | No for local fixtures |
-| `alibaba-apply [url]` | Local raw Alibaba run used by `npm run alibaba:apply:raw`. | Yes |
+| `match [--list-url]` | List/detail extraction and ranking; the bundled example uses the Alibaba Skill. | Optional |
+| `auto-apply <url>` | Structured local/sandbox multi-page form benchmark. | No for local fixtures |
+| `alibaba-apply [url]` | Recruiting extension example used by `npm run alibaba:apply:raw`. | Yes |
 
 Options include `--resume`, `--headful`, `--headless`, `--auto-gate`,
 `--model-key`, `--base-url`, `--model-name`, `--storage-state`, `--prompt`,
@@ -280,9 +292,9 @@ Options include `--resume`, `--headful`, `--headless`, `--auto-gate`,
 
 Permission modes can also be set with `PERMISSION_MODE=safe|review|trusted|autopilot`.
 They affect PermissionEngine decisions for local runtime tool calls. Login,
-captcha, upload, save-resume, and `final_submit` remain sensitive gates by
-default; `HUMAN_GATE_MODE=auto` is a non-interactive handoff mode, not final
-submit authorization.
+captcha, file upload, profile saving, payment, publishing, and `final_submit`
+remain sensitive gates by default; `HUMAN_GATE_MODE=auto` is a non-interactive
+handoff mode, not final-submit authorization.
 
 ## Web UI
 
@@ -290,8 +302,9 @@ submit authorization.
 npm run web
 ```
 
-Open `http://localhost:5178` to configure a model, upload a resume, run demos or
-fill workflows, and inspect live events, screenshots, trace steps, and metrics.
+Open `http://localhost:5178` to configure a model and task, attach optional
+profile data, run Raw/Match workflows, and inspect live events, screenshots,
+trace steps, and metrics.
 
 From the repository root, the same UI and headless local checks can run inside
 Docker:
@@ -331,7 +344,7 @@ Observation is runtime memory first and artifact second. `browser_snapshot` and
 `browser_form_snapshot` refresh PageState/FormState for context and write
 latest artifacts best-effort for trace, benchmarks, and review.
 
-## Generic Fill
+## General Form Workflows
 
 The runtime does not hardcode site-specific field mappings. It snapshots the
 current page into a compact view such as:
@@ -341,9 +354,10 @@ current page into a compact view such as:
 [e4] button "Submit application" risk=L3
 ```
 
-The model receives the page view, selected context, resume profile, and browser
-tools. It chooses tool calls, the runtime applies policy before execution, and
-the loop repeats until the draft is filled, blocked, or handed off.
+The model receives the page view, selected task context, optional structured
+profile, and browser tools. It chooses tool calls, the runtime applies policy
+before execution, and the loop repeats until the requested draft is ready,
+blocked, or handed off.
 
 ## MCP Server
 
@@ -421,8 +435,8 @@ Check model connectivity and function calling:
 npm run test:model
 ```
 
-Do not commit `.env`, cookies, storage state, resume content, or verification
-codes.
+Do not commit `.env`, cookies, storage state, uploaded personal data, or
+verification codes.
 
 ## Troubleshooting
 
