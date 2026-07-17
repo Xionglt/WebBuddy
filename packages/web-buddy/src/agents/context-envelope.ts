@@ -1,5 +1,6 @@
 import type {
   ActionBinding,
+  BuiltInRoleEnvelopeBindingV1,
   ImmutableArtifactRef,
   ReadOnlyArtifactToolName,
   ReadOnlyLlmTaskKind,
@@ -38,6 +39,7 @@ export interface BuildSubagentContextEnvelopeInput {
   currentActionBinding: ActionBinding
   objective: SanitizedTextProjectionV1
   outputSchemaRef: ImmutableArtifactRef<'schema'>
+  builtInRole?: BuiltInRoleEnvelopeBindingV1
   allowedTools: readonly ReadOnlyArtifactToolName[]
   catalog: ContextCatalogV1
   relevanceText: string
@@ -123,6 +125,7 @@ export function buildSubagentContextEnvelope(
     currentActionBinding,
     objective,
     outputSchemaRef,
+    ...(input.builtInRole ? { builtInRole: normalizeBuiltInRoleBinding(input.builtInRole, input.taskKind, allowedTools) } : {}),
     selectorPolicyVersion: 'context-selector-policy/v1',
     catalogManifest: {
       ...selection.catalogManifest,
@@ -171,6 +174,9 @@ function validateBuiltEnvelope(envelope: SubagentContextEnvelopeV1): void {
     || Object.values(envelope.authorityBoundary.gates).some((allowed) => allowed !== false)
   ) {
     throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', 'Built envelope expands Subagent authority or parent history.')
+  }
+  if (envelope.builtInRole) {
+    normalizeBuiltInRoleBinding(envelope.builtInRole, envelope.taskKind, envelope.allowedTools)
   }
   const selectedIds = envelope.selectedContext.map((item) => item.id)
   const omittedIds = envelope.omittedContext.map((item) => item.id)
@@ -236,6 +242,72 @@ function normalizeAllowedTools(values: readonly ReadOnlyArtifactToolName[]): Rea
   return READ_ONLY_TOOL_ORDER.filter((tool) => requested.has(tool))
 }
 
+function normalizeBuiltInRoleBinding(
+  value: BuiltInRoleEnvelopeBindingV1,
+  taskKind: ReadOnlyLlmTaskKind,
+  envelopeTools: readonly ReadOnlyArtifactToolName[],
+): BuiltInRoleEnvelopeBindingV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', 'Built-in role binding must be a closed object.')
+  }
+  const expected = [
+    'schemaVersion',
+    'roleId',
+    'roleVersion',
+    'roleDigest',
+    'authority',
+    'runtimeTaskKind',
+    'allowedTools',
+    'outputArtifactKind',
+    'outputPayloadSchemaVersion',
+    'requiredOutputFields',
+    'browserWrite',
+    'livePageAccess',
+    'canResolveApproval',
+    'canWriteMemory',
+    'authoritativeCompletionEvidence',
+    'requiresMainWorkflowVerification',
+  ]
+  const keys = Object.keys(value)
+  if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) {
+    throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', 'Built-in role binding has missing or forbidden fields.')
+  }
+  requireNonEmptyString(value.roleId, 'builtInRole.roleId')
+  requireNonEmptyString(value.roleVersion, 'builtInRole.roleVersion')
+  requireNonEmptyString(value.outputArtifactKind, 'builtInRole.outputArtifactKind')
+  requireNonEmptyString(value.outputPayloadSchemaVersion, 'builtInRole.outputPayloadSchemaVersion')
+  if (!/^[a-f0-9]{64}$/i.test(value.roleDigest)
+    || (value.authority !== 'read_only' && value.authority !== 'recommend_only')
+    || value.runtimeTaskKind !== taskKind
+    || value.browserWrite !== false
+    || value.livePageAccess !== false
+    || value.canResolveApproval !== false
+    || value.canWriteMemory !== false
+    || value.authoritativeCompletionEvidence !== false
+    || value.requiresMainWorkflowVerification !== true) {
+    throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', 'Built-in role binding expands authority or mismatches the task.')
+  }
+  const allowedTools = normalizeAllowedTools(value.allowedTools)
+  if (canonicalJson(allowedTools) !== canonicalJson(normalizeAllowedTools(envelopeTools))) {
+    throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', 'Built-in role tools must exactly match the Context Envelope tools.')
+  }
+  if (!Array.isArray(value.requiredOutputFields) || value.requiredOutputFields.length === 0) {
+    throw policyViolation('MISSING_REQUIRED_CONTEXT', 'Built-in role output fields must be non-empty.')
+  }
+  const requiredOutputFields = value.requiredOutputFields.map((field) => {
+    requireNonEmptyString(field, 'builtInRole.requiredOutputFields')
+    return field
+  })
+  if (new Set(requiredOutputFields).size !== requiredOutputFields.length) {
+    throw policyViolation('MISSING_REQUIRED_CONTEXT', 'Built-in role output fields must not contain duplicates.')
+  }
+  return {
+    ...value,
+    allowedTools,
+    requiredOutputFields,
+  }
+}
+
 function normalizeTokenBudget(value: ContextEnvelopeTokenBudgetInput): ContextEnvelopeTokenBudgetInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw policyViolation('BUDGET_EXCEEDED', 'Envelope token budget must be a closed object.')
@@ -273,13 +345,14 @@ function validateBuildInputShape(input: BuildSubagentContextEnvelopeInput): void
     'currentActionBinding',
     'objective',
     'outputSchemaRef',
+    'builtInRole',
     'allowedTools',
     'catalog',
     'relevanceText',
     'sensitiveDisclosureGrants',
     'tokenBudget',
   ]
-  const required = expected.filter((key) => key !== 'sensitiveDisclosureGrants')
+  const required = expected.filter((key) => key !== 'sensitiveDisclosureGrants' && key !== 'builtInRole')
   const keys = Object.keys(input)
   const fullHistoryKeys = new Set(['parentMessages', 'messages', 'history', 'reactHistory', 'transcript'])
   const liveKeys = new Set(['page', 'livePage', 'browser', 'browserContext'])

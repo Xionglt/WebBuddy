@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "security-m4-a2/v1",
+  "moduleCandidates": [
+    "built-in-roles",
+    "built-in-multi-agent-roles",
+    "built-in-agent-roles",
+    "multi-agent-roles"
+  ],
+  "roleExportCandidates": [
+    "BUILT_IN_MULTI_AGENT_ROLES",
+    "BUILT_IN_AGENT_ROLES",
+    "builtInMultiAgentRoles",
+    "builtInAgentRoles"
+  ],
+  "roleListFunctionCandidates": [
+    "listBuiltInMultiAgentRoles",
+    "listBuiltInAgentRoles"
+  ],
+  "roles": [
+    {
+      "id": "planner",
+      "requiredCapability": "plan.propose",
+      "requiredOutputKind": "plan_proposal"
+    },
+    {
+      "id": "researcher",
+      "requiredCapability": "research.summarize",
+      "requiredOutputKind": "research_report"
+    },
+    {
+      "id": "comparison",
+      "requiredCapability": "comparison.propose",
+      "requiredOutputKind": "comparison_report"
+    },
+    {
+      "id": "form-planner",
+      "requiredCapability": "form.plan",
+      "requiredOutputKind": "form_field_plan"
+    },
+    {
+      "id": "safety-reviewer",
+      "requiredCapability": "safety.review",
+      "requiredOutputKind": "safety_verdict"
+    },
+    {
+      "id": "verification",
+      "requiredCapability": "evidence.assess",
+      "requiredOutputKind": "evidence_assessment"
+    }
+  ],
+  "forbiddenRoleFields": {
+    "livePageAccess": true,
+    "browserWrite": true,
+    "canResolveApproval": true,
+    "canWriteMemory": true,
+    "authoritativeCompletionEvidence": true
+  },
+  "forbiddenTools": [
+    "browser_open",
+    "browser_click",
+    "browser_type",
+    "browser_upload_file",
+    "send",
+    "submit",
+    "payment",
+    "memory_write",
+    "agent_done"
+  ],
+  "allowedRuntimeTaskKinds": [
+    "candidate_job_research",
+    "trace_summarization"
+  ]
+}

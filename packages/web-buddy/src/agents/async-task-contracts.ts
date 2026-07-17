@@ -59,6 +59,12 @@ export type ImmutableArtifactKind =
   | 'context_envelope'
   | 'task_graph_checkpoint'
   | 'schema'
+  | 'plan_proposal'
+  | 'research_report'
+  | 'comparison_report'
+  | 'form_field_plan'
+  | 'safety_verdict'
+  | 'evidence_assessment'
 
 export interface ImmutableArtifactRef<TKind extends ImmutableArtifactKind = ImmutableArtifactKind> {
   schemaVersion: 'immutable-artifact-ref/v1'
@@ -541,6 +547,18 @@ export interface RunnerError {
   causeArtifactRef?: ImmutableArtifactRef
 }
 
+export interface BuiltInRoleOutputV1 {
+  schemaVersion: 'built-in-role-output/v1'
+  roleId: string
+  roleVersion: string
+  roleDigest: Sha256Hex
+  artifactKind: string
+  payloadSchemaVersion: string
+  payload: JsonValue
+  requiresMainWorkflowVerification: true
+  authoritativeCompletionEvidence: false
+}
+
 export interface ReadOnlySubagentResult {
   schemaVersion: 'read-only-subagent-result/v1'
   runIdentity: TaskRunIdentity
@@ -556,6 +574,7 @@ export interface ReadOnlySubagentResult {
     | { kind: 'artifact'; artifactRef: ImmutableArtifactRef }
   >
   uncertainties: string[]
+  roleOutput?: BuiltInRoleOutputV1
   sidechainTranscriptRef: ImmutableArtifactRef
   requiresMainWorkflowVerification: true
   authoritativeCompletionEvidence: false
@@ -710,6 +729,25 @@ export interface SubagentAuthorityBoundary {
   }
 }
 
+export interface BuiltInRoleEnvelopeBindingV1 {
+  schemaVersion: 'built-in-role-envelope-binding/v1'
+  roleId: string
+  roleVersion: string
+  roleDigest: Sha256Hex
+  authority: 'read_only' | 'recommend_only'
+  runtimeTaskKind: ReadOnlyLlmTaskKind
+  allowedTools: ReadOnlyArtifactToolName[]
+  outputArtifactKind: string
+  outputPayloadSchemaVersion: string
+  requiredOutputFields: string[]
+  browserWrite: false
+  livePageAccess: false
+  canResolveApproval: false
+  canWriteMemory: false
+  authoritativeCompletionEvidence: false
+  requiresMainWorkflowVerification: true
+}
+
 export interface SubagentContextEnvelopeV1 {
   schemaVersion: 'subagent-context-envelope/v1'
   envelopeId: string
@@ -722,6 +760,7 @@ export interface SubagentContextEnvelopeV1 {
   currentActionBinding: ActionBinding
   objective: SanitizedTextProjectionV1
   outputSchemaRef: ImmutableArtifactRef
+  builtInRole?: BuiltInRoleEnvelopeBindingV1
   selectorPolicyVersion: 'context-selector-policy/v1'
   catalogManifest: ContextCatalogManifestV1
   allowedTools: ReadOnlyArtifactToolName[]

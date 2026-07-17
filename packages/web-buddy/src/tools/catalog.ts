@@ -516,15 +516,21 @@ const RAW_TOOL_CATALOG: Omit<ToolDef, 'execution'>[] = [
   {
     name: 'agent_task_spawn',
     description:
-      'Start a read-only or analysis-only background task and return immediately. Use this for independent research, trace summarization, memory retrieval, workflow evaluation, or delivery probes while the main agent keeps control of the browser.',
+      'Start a bounded built-in role or legacy read-only background task and return immediately. Prefer roleId for Planner, Researcher, Comparison, Form Planner, Safety Reviewer, or Verification. The main agent keeps sole control of the browser.',
     category: 'eval',
     risk: 'L0',
     parameters: {
       type: 'object',
       properties: {
+        roleId: {
+          type: 'string',
+          enum: ['planner', 'researcher', 'comparison', 'form-planner', 'safety-reviewer', 'verification'],
+          description: 'Built-in advisory role. Mutually exclusive with legacy kind.',
+        },
         kind: {
           type: 'string',
           enum: ['candidate_job_research', 'trace_summarization', 'memory_retrieval', 'workflow_evaluation', 'delivery_probe'],
+          description: 'Legacy compatibility task kind. Omit when roleId is provided.',
         },
         title: { type: 'string', description: 'Short task title.' },
         goal: { type: 'string', description: 'Concrete, self-contained goal for the background worker.' },
@@ -551,7 +557,7 @@ const RAW_TOOL_CATALOG: Omit<ToolDef, 'execution'>[] = [
           description: 'Stable session-scoped key. Reusing it with identical input returns the existing task.',
         },
       },
-      required: ['kind', 'title', 'goal', 'idempotencyKey'],
+      required: ['title', 'goal', 'idempotencyKey'],
     },
     local: { enabled: true },
     mcp: { enabled: false },

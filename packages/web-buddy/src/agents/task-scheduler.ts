@@ -24,6 +24,10 @@ import type { TaskGraphMutation, TaskGraphStore } from './task-graph-store.js'
 import { TaskNotificationQueue } from './task-notification-queue.js'
 import { RunnerRegistry } from './runner-registry.js'
 import { assessAsyncTaskResultFreshness } from './async-task-safety.js'
+import {
+  parseBuiltInRoleTaskMetadata,
+  validateBuiltInRoleOutputPayload,
+} from './built-in-roles.js'
 
 export interface AgentTaskSchedulerOptions {
   store: TaskGraphStore
@@ -703,13 +707,45 @@ function materializeSuccess(
   freshness: ResultFreshnessVerdict
 } {
   if (outcome.outcome === 'succeeded_deterministic') return outcome.result
+  const roleMetadata = task.inputs
+    .filter((input) => input.kind === 'goal')
+    .map((input) => parseBuiltInRoleTaskMetadata(input.structuredValue))
+    .find((value) => value !== undefined)
+  if (roleMetadata) {
+    const roleOutput = outcome.result.roleOutput
+    if (!roleOutput
+      || roleOutput.roleId !== roleMetadata.roleId
+      || roleOutput.roleVersion !== roleMetadata.roleVersion
+      || roleOutput.roleDigest !== roleMetadata.roleDigest
+      || roleOutput.artifactKind !== roleMetadata.outputArtifactKind
+      || roleOutput.payloadSchemaVersion !== roleMetadata.outputPayloadSchemaVersion
+      || roleOutput.requiresMainWorkflowVerification !== true
+      || roleOutput.authoritativeCompletionEvidence !== false) {
+      throw schedulerError('RESULT_SCHEMA_INVALID', `Built-in role result for ${task.id} does not match its durable role binding.`)
+    }
+    try {
+      validateBuiltInRoleOutputPayload(roleMetadata.roleId, roleOutput.payload)
+    } catch (error) {
+      throw schedulerError(
+        'RESULT_SCHEMA_INVALID',
+        `Built-in role result for ${task.id} failed its output schema: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
   if (!materializeLlmResult) {
     throw schedulerError(
       'RESULT_SCHEMA_INVALID',
       `Read-only LLM result for ${task.id} must be persisted as an immutable attempt result before commit.`,
     )
   }
-  return materializeLlmResult(outcome, task)
+  const materialized = materializeLlmResult(outcome, task)
+  if (roleMetadata && !materialized.outputRefs.some((ref) => ref.artifactKind === roleMetadata.outputArtifactKind)) {
+    throw schedulerError(
+      'RESULT_SCHEMA_INVALID',
+      `Built-in role result for ${task.id} was not materialized as ${roleMetadata.outputArtifactKind}.`,
+    )
+  }
+  return materialized
 }
 
 function completedNotification(

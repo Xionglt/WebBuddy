@@ -21,7 +21,7 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:release-gate": "npm run typecheck && npm run build && npm run test:m1-contract && npm run test:m4-a1 && npm run test:security-content-trust && npm run test:security-instruction-boundary && npm run test:security-sink-policy && npm run test:eval:deterministic && npm run test:runtime-rewrite && npm run test:async-task-orchestration && npm run test:control-plane",
+    "test:release-gate": "npm run typecheck && npm run build && npm run test:m1-contract && npm run test:m4-a1 && npm run test:m4-a2 && npm run test:security-content-trust && npm run test:security-instruction-boundary && npm run test:security-sink-policy && npm run test:eval:deterministic && npm run test:runtime-rewrite && npm run test:async-task-orchestration && npm run test:control-plane",
     "clean": "node -e \"import('node:fs/promises').then(fs => fs.rm('dist', { recursive: true, force: true }))\"",
     "start": "node ./dist/server.js",
     "dev": "npm run build && npm start",
@@ -106,6 +106,9 @@
     "test:multi-agent-contract": "npm run build && node ./scripts/multi-agent-contract-test.mjs",
     "test:security-m4-a1": "npm run build && node ./scripts/security-m4-a1-contract-test.mjs",
     "test:m4-a1": "npm run build && node ./scripts/multi-agent-contract-test.mjs && node ./scripts/security-m4-a1-contract-test.mjs",
+    "test:multi-agent-built-in-roles": "npm run build && node --experimental-transform-types --experimental-loader ./scripts/multi-agent-source-loader.mjs ./scripts/multi-agent-built-in-roles-test.mjs",
+    "test:security-m4-a2": "npm run build && node ./scripts/security-m4-a2-test.mjs",
+    "test:m4-a2": "npm run build && node --experimental-transform-types --experimental-loader ./scripts/multi-agent-source-loader.mjs ./scripts/multi-agent-built-in-roles-test.mjs && node ./scripts/security-m4-a2-test.mjs",
     "test:security-content-trust": "node ./scripts/security-content-trust-test.mjs",
     "test:security-instruction-boundary": "npm run build && node ./scripts/security-instruction-boundary-test.mjs",
     "test:security-sink-policy": "npm run build && node ./scripts/security-sink-policy-test.mjs",

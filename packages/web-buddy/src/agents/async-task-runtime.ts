@@ -43,6 +43,14 @@ import type { TaskGraphStore } from './task-graph-store.js'
 import { AgentTaskScheduler, type TaskRunRequestFactory } from './task-scheduler.js'
 import { TaskNotificationQueue } from './task-notification-queue.js'
 import { buildAgentTaskCompactFacts } from './async-task-resume.js'
+import {
+  createBuiltInRoleTaskMetadata,
+  getBuiltInRoleRuntimeBinding,
+  parseBuiltInRoleTaskMetadata,
+  toBuiltInRoleEnvelopeBinding,
+  type BuiltInAgentRoleId,
+  type BuiltInRoleRuntimeBinding,
+} from './built-in-roles.js'
 
 export const ASYNC_TASK_BACKGROUND_KINDS = [
   'candidate_job_research',
@@ -68,6 +76,7 @@ export interface AsyncTaskContextEnvelopeRequest {
   runId: string
   graph: AgentTaskGraphV2
   task: Extract<AgentTask, { kind: ReadOnlyLlmTaskKind }>
+  builtInRole?: BuiltInRoleRuntimeBinding
   existingEnvelopeRef?: ImmutableArtifactRef<'context_envelope'>
 }
 
@@ -153,9 +162,24 @@ export interface AsyncTaskSpawnInput {
   actionBinding?: ActionBinding
 }
 
+export interface AsyncTaskSpawnBuiltInRoleInput {
+  taskId?: string
+  roleId: BuiltInAgentRoleId
+  title: string
+  goal: string
+  requestedArtifactIds?: readonly string[]
+  blockedBy?: readonly string[]
+  blocks?: readonly string[]
+  priority?: number
+  idempotencyKey: string
+  completionRequirement?: TaskCompletionRequirement | AsyncTaskCompletionRequirementInput
+  actionBinding?: ActionBinding
+}
+
 export interface AsyncTaskProjection {
   taskId: string
   kind: AgentTask['kind']
+  roleId?: BuiltInAgentRoleId
   title: string
   status: AgentTaskStatus
   graphRevision: number
@@ -180,6 +204,7 @@ export interface AsyncTaskWaitResult {
 
 export interface AsyncTaskResult {
   taskId: string
+  roleId?: BuiltInAgentRoleId
   status: AgentTaskStatus
   available: boolean
   outputs: AgentTask['outputs']
@@ -384,6 +409,31 @@ export class AsyncTaskRuntime {
     })
   }
 
+  /**
+   * Role-aware compatibility entrypoint for the single Agent Loop. The durable
+   * graph keeps its accepted v2 task kinds while the immutable goal input binds
+   * the exact built-in role, output contract, and read-only runner kind.
+   */
+  async spawnBuiltInRole(input: AsyncTaskSpawnBuiltInRoleInput): Promise<TaskSpawnResolutionV1> {
+    const metadata = createBuiltInRoleTaskMetadata({
+      roleId: input.roleId,
+      goal: input.goal,
+      requestedArtifactIds: input.requestedArtifactIds,
+    })
+    return this.spawn({
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      kind: metadata.runtimeTaskKind,
+      title: input.title,
+      inputs: [{ kind: 'goal', structuredValue: metadata }],
+      ...(input.blockedBy ? { blockedBy: input.blockedBy } : {}),
+      ...(input.blocks ? { blocks: input.blocks } : {}),
+      ...(input.priority !== undefined ? { priority: input.priority } : {}),
+      idempotencyKey: input.idempotencyKey,
+      ...(input.completionRequirement ? { completionRequirement: input.completionRequirement } : {}),
+      ...(input.actionBinding ? { actionBinding: input.actionBinding } : {}),
+    })
+  }
+
   async status(taskId: string): Promise<AsyncTaskProjection> {
     await this.ensureInitialized()
     const graph = await this.requireGraph()
@@ -486,10 +536,12 @@ export class AsyncTaskRuntime {
     await this.ensureInitialized()
     const graph = await this.requireGraph()
     const task = requireTask(graph, taskId)
+    const builtInRole = builtInRoleBindingForTask(task)
     const available = task.status === 'completed'
     const outputs = available ? clone(task.outputs) : []
     return {
       taskId,
+      ...(builtInRole ? { roleId: builtInRole.role.id as BuiltInAgentRoleId } : {}),
       status: task.status,
       available,
       outputs,
@@ -747,6 +799,7 @@ export class AsyncTaskRuntime {
     if (!this.contextEnvelopeProvider) {
       throw runtimeError('CONTEXT_POLICY_VIOLATION', `Task ${task.id} requires an injected S004 Context Envelope provider.`)
     }
+    const builtInRole = builtInRoleBindingForTask(task)
     const latestAttempt = [...task.attempts].reverse().find((attempt) => attempt.runnerKind === 'read_only_llm')
     const binding = await this.contextEnvelopeProvider({
       mode,
@@ -754,9 +807,10 @@ export class AsyncTaskRuntime {
       runId: this.runId,
       graph: clone(graph),
       task: clone(task),
+      ...(builtInRole ? { builtInRole: clone(builtInRole) } : {}),
       ...(latestAttempt?.runnerKind === 'read_only_llm' ? { existingEnvelopeRef: clone(latestAttempt.envelopeRef) } : {}),
     })
-    validateEnvelopeBinding(binding, task, graph)
+    validateEnvelopeBinding(binding, task, graph, builtInRole)
     return clone(binding)
   }
 
@@ -986,9 +1040,11 @@ function createdEvent(graph: AgentTaskGraphV2, task: AgentTask, now: string): Ex
 
 function projectTask(task: AgentTask, graphRevision: number): AsyncTaskProjection {
   const latest = task.outputs.at(-1)
+  const builtInRole = builtInRoleBindingForTask(task)
   return {
     taskId: task.id,
     kind: task.kind,
+    ...(builtInRole ? { roleId: builtInRole.role.id as BuiltInAgentRoleId } : {}),
     title: task.title,
     status: task.status,
     graphRevision,
@@ -1014,10 +1070,37 @@ function requireTask(graph: AgentTaskGraphV2, taskId: string): AgentTask {
   return task
 }
 
+function builtInRoleBindingForTask(task: AgentTask): BuiltInRoleRuntimeBinding | undefined {
+  let metadata: ReturnType<typeof parseBuiltInRoleTaskMetadata>
+  try {
+    for (const input of task.inputs) {
+      if (input.kind !== 'goal') continue
+      const candidate = parseBuiltInRoleTaskMetadata(input.structuredValue)
+      if (!candidate) continue
+      if (metadata) {
+        throw new Error(`Task ${task.id} contains multiple built-in role bindings.`)
+      }
+      metadata = candidate
+    }
+  } catch (error) {
+    throw runtimeError(
+      'CONTEXT_POLICY_VIOLATION',
+      `Task ${task.id} has an invalid built-in role binding: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (!metadata) return undefined
+  const binding = getBuiltInRoleRuntimeBinding(metadata.roleId)
+  if (binding.runtimeTaskKind !== task.kind || binding.roleDigest !== metadata.roleDigest) {
+    throw runtimeError('CONTEXT_POLICY_VIOLATION', `Task ${task.id} role binding does not match its runtime task kind.`)
+  }
+  return binding
+}
+
 function validateEnvelopeBinding(
   binding: AsyncTaskContextEnvelopeBinding,
   task: Extract<AgentTask, { kind: ReadOnlyLlmTaskKind }>,
   graph: AgentTaskGraphV2,
+  builtInRole?: BuiltInRoleRuntimeBinding,
 ): void {
   const { envelope, artifactRef } = binding
   if (envelope.schemaVersion !== 'subagent-context-envelope/v1'
@@ -1026,6 +1109,30 @@ function validateEnvelopeBinding(
     || canonicalJson(envelope.currentActionBinding) !== canonicalJson(task.actionBinding)
     || envelope.parentHistoryIncluded !== false) {
     throw runtimeError('CONTEXT_POLICY_VIOLATION', `Context Envelope for ${task.id} violates its session/task authority boundary.`)
+  }
+  if (envelope.authorityBoundary.browserWrite !== false
+    || envelope.authorityBoundary.livePageAccess !== false
+    || envelope.authorityBoundary.authoritativeCompletionEvidence !== false
+    || envelope.authorityBoundary.requiresMainWorkflowVerification !== true
+    || Object.values(envelope.authorityBoundary.gates).some((value) => value !== false)) {
+    throw runtimeError('CONTEXT_POLICY_VIOLATION', `Context Envelope for ${task.id} expands Main Agent authority.`)
+  }
+  if (builtInRole) {
+    const expectedEnvelopeRole = toBuiltInRoleEnvelopeBinding(builtInRole)
+    if (!envelope.builtInRole
+      || canonicalJson(envelope.builtInRole) !== canonicalJson(expectedEnvelopeRole)
+      || builtInRole.runtimeTaskKind !== task.kind
+      || builtInRole.role.browserWrite !== false
+      || builtInRole.role.livePageAccess !== false
+      || builtInRole.role.canResolveApproval !== false
+      || builtInRole.role.canWriteMemory !== false
+      || builtInRole.role.authoritativeCompletionEvidence !== false
+      || builtInRole.role.requiresMainWorkflowVerification !== true
+      || envelope.allowedTools.some((tool) => !builtInRole.role.allowedTools.includes(tool))) {
+      throw runtimeError('CONTEXT_POLICY_VIOLATION', `Built-in role binding for ${task.id} exceeds its registered read-only envelope.`)
+    }
+  } else if (envelope.builtInRole !== undefined) {
+    throw runtimeError('CONTEXT_POLICY_VIOLATION', `Legacy task ${task.id} cannot inject an unbound built-in role.`)
   }
   if (artifactRef.schemaVersion !== 'immutable-artifact-ref/v1'
     || artifactRef.artifactKind !== 'context_envelope' || artifactRef.immutable !== true

@@ -10,8 +10,14 @@ import type {
   JsonValue,
   OmittedContextReason,
   ReadOnlyArtifactToolName,
+  ReadOnlyLlmTaskKind,
   SanitizedTextProjectionV1,
 } from './async-task-contracts.js'
+import {
+  multiAgentDigest,
+  validateMultiAgentRole,
+  type MultiAgentRole,
+} from './multi-agent-contracts.js'
 
 export type ContextOriginKind = 'tool' | 'skill' | 'mcp' | 'trace' | 'memory' | 'workflow'
 
@@ -170,6 +176,20 @@ export interface CreateContextCatalogInput {
   candidates: readonly ContextCatalogItemInput[]
 }
 
+export interface RoleScopedContextCatalogV1 {
+  schemaVersion: 'role-scoped-context-catalog/v1'
+  roleId: string
+  roleVersion: string
+  roleDigest: string
+  runtimeTaskKind: ReadOnlyLlmTaskKind
+  catalog: ContextCatalogV1
+}
+
+export interface CreateRoleScopedContextCatalogInput extends CreateContextCatalogInput {
+  role: MultiAgentRole
+  runtimeTaskKind: ReadOnlyLlmTaskKind
+}
+
 const TASK_KINDS: readonly AgentTaskKind[] = [
   'main_browser_step',
   'candidate_job_research',
@@ -197,6 +217,12 @@ const ARTIFACT_KINDS: readonly ImmutableArtifactKind[] = [
   'context_envelope',
   'task_graph_checkpoint',
   'schema',
+  'plan_proposal',
+  'research_report',
+  'comparison_report',
+  'form_field_plan',
+  'safety_verdict',
+  'evidence_assessment',
 ]
 
 const RETENTION_KINDS: readonly ContextRetention[] = [
@@ -257,6 +283,48 @@ export function createContextCatalog(input: CreateContextCatalogInput): ContextC
     catalogRevision: input.catalogRevision,
     items,
     manifest,
+  }
+}
+
+/**
+ * Produces an auditable role view without adding live Page or parent history.
+ * Candidates not admitted for the compatibility task kind remain represented
+ * as capability-denied entries instead of disappearing from the manifest.
+ */
+export function createRoleScopedContextCatalog(
+  input: CreateRoleScopedContextCatalogInput,
+): RoleScopedContextCatalogV1 {
+  validateMultiAgentRole(input.role)
+  if (input.runtimeTaskKind !== 'candidate_job_research' && input.runtimeTaskKind !== 'trace_summarization') {
+    throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', 'Built-in roles must use the read-only LLM task runtime.')
+  }
+  if (input.role.browserWrite !== false || input.role.livePageAccess !== false
+    || input.role.canResolveApproval !== false || input.role.canWriteMemory !== false
+    || input.role.authoritativeCompletionEvidence !== false
+    || input.role.requiresMainWorkflowVerification !== true) {
+    throw policyViolation('LIVE_CAPABILITY_FORBIDDEN', `Role ${input.role.id} expands Main Agent authority.`)
+  }
+
+  const candidates = input.candidates.map((candidate): ContextCatalogItemInput => ({
+    ...candidate,
+    allowedTaskKinds: [input.runtimeTaskKind],
+    content: candidate.allowedTaskKinds.includes(input.runtimeTaskKind)
+      ? candidate.content
+      : { kind: 'denied', reason: 'capability_denied' },
+  }))
+  const catalog = createContextCatalog({
+    parentRunId: input.parentRunId,
+    parentSessionId: input.parentSessionId,
+    catalogRevision: input.catalogRevision,
+    candidates,
+  })
+  return {
+    schemaVersion: 'role-scoped-context-catalog/v1',
+    roleId: input.role.id,
+    roleVersion: input.role.version,
+    roleDigest: multiAgentDigest(input.role),
+    runtimeTaskKind: input.runtimeTaskKind,
+    catalog,
   }
 }
 

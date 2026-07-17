@@ -34,6 +34,7 @@ import type { ToolCategory, ToolDef as CatalogToolDef } from './types.js'
 import type { ToolExecutionPolicyResolverV1, ToolExecutionPolicyV1 } from './tool-execution-policy.js'
 import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
 import type { JsonValue } from '../agents/async-task-contracts.js'
+import { isBuiltInAgentRoleId } from '../agents/built-in-roles.js'
 
 export interface LocalToolContext {
   sessionId: string
@@ -116,26 +117,40 @@ const localHandlers: Record<string, LocalHandler> = {
       const goal = String(args.goal ?? '').trim()
       const artifactIds = stringArray(args.artifactIds)
       const kind = String(args.kind ?? '')
+      const roleId = String(args.roleId ?? '')
+      if (roleId && kind) throw Object.assign(new Error('roleId and legacy kind are mutually exclusive.'), { code: 'POLICY_VIOLATION' })
       const currentActionSeq = (await runtime.snapshot()).actionClock.currentActionSeq
-      const resolution = await runtime.spawn({
-        kind: kind as never,
+      const completionRequirement = requiredForCompletion
+        ? { requiredForCompletion: true as const, terminalPolicy }
+        : { requiredForCompletion: false as const, terminalPolicy: 'does_not_block' as const }
+      const common = {
         title: String(args.title ?? '').trim(),
         idempotencyKey: String(args.idempotencyKey ?? '').trim(),
         blockedBy: stringArray(args.blockedBy),
-        inputs: [{
-          kind: 'goal',
-          structuredValue: {
+        completionRequirement,
+      }
+      const resolution = roleId
+        ? await runtime.spawnBuiltInRole({
+            ...common,
+            roleId: requireBuiltInRoleId(roleId),
             goal,
-            ...(artifactIds.length ? { requestedArtifactIds: artifactIds } : {}),
-          } as JsonValue,
-        }],
-        completionRequirement: requiredForCompletion
-          ? { requiredForCompletion: true, terminalPolicy }
-          : { requiredForCompletion: false, terminalPolicy: 'does_not_block' },
-        actionBinding: kind === 'memory_retrieval'
-          ? { kind: 'not_action_bound' }
-          : { kind: 'browser_action', sourceActionSeq: currentActionSeq },
-      })
+            requestedArtifactIds: artifactIds,
+            actionBinding: { kind: 'browser_action', sourceActionSeq: currentActionSeq },
+          })
+        : await runtime.spawn({
+            ...common,
+            kind: kind as never,
+            inputs: [{
+              kind: 'goal',
+              structuredValue: {
+                goal,
+                ...(artifactIds.length ? { requestedArtifactIds: artifactIds } : {}),
+              } as JsonValue,
+            }],
+            actionBinding: kind === 'memory_retrieval'
+              ? { kind: 'not_action_bound' }
+              : { kind: 'browser_action', sourceActionSeq: currentActionSeq },
+          })
       return asyncTaskResult(`agent_task_spawn: ${resolution.outcome}`, resolution)
     } catch (error) {
       return asyncTaskFailure('agent_task_spawn', error)
@@ -594,6 +609,13 @@ function asyncTaskFailure(toolName: string, error: unknown): LocalToolRunResult 
   const code = typeof candidate?.code === 'string' ? candidate.code : 'ASYNC_TASK_ERROR'
   const message = typeof candidate?.message === 'string' ? candidate.message : String(error)
   return { observation: `FAILED (${code}): ${toolName}: ${message}`, pageChanged: false }
+}
+
+function requireBuiltInRoleId(value: string) {
+  if (!isBuiltInAgentRoleId(value)) {
+    throw Object.assign(new Error(`Unknown built-in AgentRole: ${value || '(empty)'}.`), { code: 'POLICY_VIOLATION' })
+  }
+  return value
 }
 
 function stringArray(value: unknown): string[] {

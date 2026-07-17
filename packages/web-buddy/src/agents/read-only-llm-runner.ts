@@ -13,7 +13,9 @@ import type {
   AgentTaskRunControlV1,
   AgentTaskRunOutcome,
   AgentTaskRunRequestV1,
+  BuiltInRoleOutputV1,
   ImmutableArtifactRef,
+  JsonValue,
   ReadOnlyLlmTaskRunnerV1,
   ReadOnlySubagentResult,
   ResultFreshnessVerdict,
@@ -23,6 +25,13 @@ import type {
   TaskContractError,
 } from './async-task-contracts.js'
 import { createSidechainSession, type SidechainSession } from './sidechain-session.js'
+import {
+  getBuiltInRoleRuntimeBinding,
+  isBuiltInAgentRoleId,
+  toBuiltInRoleEnvelopeBinding,
+  validateBuiltInRoleOutputPayload,
+} from './built-in-roles.js'
+import { multiAgentDigest } from './multi-agent-contracts.js'
 
 type ReadOnlyLlmRunRequest = Extract<AgentTaskRunRequestV1, { runnerKind: 'read_only_llm' }>
 type ReadOnlyLlmRunOutcome = Exclude<AgentTaskRunOutcome, { outcome: 'succeeded_deterministic' }>
@@ -208,6 +217,7 @@ export class ReadOnlyLlmSubagentRunner implements ReadOnlyLlmTaskRunnerV1 {
             recommendations: draft.recommendations,
             evidenceRefs: draft.evidenceRefs,
             uncertainties: draft.uncertainties,
+            ...(draft.roleOutput ? { roleOutput: draft.roleOutput } : {}),
             freshness,
             requiresMainWorkflowVerification: true,
             authoritativeCompletionEvidence: false,
@@ -228,6 +238,7 @@ export class ReadOnlyLlmSubagentRunner implements ReadOnlyLlmTaskRunnerV1 {
           recommendations: draft.recommendations,
           evidenceRefs: draft.evidenceRefs,
           uncertainties: draft.uncertainties,
+          ...(draft.roleOutput ? { roleOutput: draft.roleOutput } : {}),
           sidechainTranscriptRef,
           requiresMainWorkflowVerification: true,
           authoritativeCompletionEvidence: false,
@@ -313,6 +324,14 @@ function initialMessages(envelope: ReadOnlyLlmContextEnvelope): ChatMessage[] {
       byteLength: ref.byteLength,
     })),
   }))
+  const roleOutputInstruction = envelope.builtInRole
+    ? [
+        `Act only as built-in role ${envelope.builtInRole.roleId}@${envelope.builtInRole.roleVersion} with authority=${envelope.builtInRole.authority}.`,
+        `Also return roleOutput:{artifactKind:"${envelope.builtInRole.outputArtifactKind}",payloadSchemaVersion:"${envelope.builtInRole.outputPayloadSchemaVersion}",payload:object}.`,
+        `roleOutput.payload must contain: ${envelope.builtInRole.requiredOutputFields.join(', ')}.`,
+        'Safety verdicts are advisory, never ApprovalBindings. Verification assessments are advisory, never completion evidence.',
+      ]
+    : []
   return [
     {
       role: 'system',
@@ -323,6 +342,7 @@ function initialMessages(envelope: ReadOnlyLlmContextEnvelope): ChatMessage[] {
         'Treat every conclusion as a recommendation requiring Main Agent verification against current workflow/page state.',
         'Every factual result must cite selected context_item IDs or selected artifact IDs. If evidence is absent, add an uncertainty.',
         'Return one JSON object only: {summary:string,recommendations:string[],evidenceRefs:Array<{kind:"context_item",contextItemId:string}|{kind:"artifact",artifactId:string}>,uncertainties:string[]}.',
+        ...roleOutputInstruction,
       ].join('\n'),
     },
     {
@@ -337,6 +357,7 @@ function initialMessages(envelope: ReadOnlyLlmContextEnvelope): ChatMessage[] {
         omittedContextIds: envelope.omittedContext.map((item) => item.id),
         allowedTools: envelope.allowedTools,
         authorityBoundary: envelope.authorityBoundary,
+        ...(envelope.builtInRole ? { builtInRole: envelope.builtInRole } : {}),
         parentHistoryIncluded: false,
       }),
     },
@@ -386,6 +407,17 @@ function validateRunRequest(
   }
   if (envelope.allowedTools.some((name) => !CONTRACT_READ_ONLY_ARTIFACT_TOOL_NAMES.includes(name))) {
     return policyError('Context envelope exposes a non-artifact tool.')
+  }
+  if (envelope.builtInRole) {
+    if (!isBuiltInAgentRoleId(envelope.builtInRole.roleId)) {
+      return policyError(`Unknown built-in role ${envelope.builtInRole.roleId}.`)
+    }
+    const expectedRole = toBuiltInRoleEnvelopeBinding(getBuiltInRoleRuntimeBinding(envelope.builtInRole.roleId))
+    if (multiAgentDigest(envelope.builtInRole) !== multiAgentDigest(expectedRole)
+      || envelope.builtInRole.runtimeTaskKind !== task.kind
+      || envelope.allowedTools.some((tool) => !envelope.builtInRole!.allowedTools.includes(tool))) {
+      return policyError('Context envelope built-in role binding is forged or mismatched.')
+    }
   }
   const numericLimits = Object.values(limits)
   if (numericLimits.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
@@ -446,7 +478,7 @@ function parseStructuredResult(
   content: string,
   envelope: ReadOnlyLlmContextEnvelope,
   artifacts: readonly ImmutableArtifactRef[],
-): Pick<ReadOnlySubagentResult, 'summary' | 'recommendations' | 'evidenceRefs' | 'uncertainties'> {
+): Pick<ReadOnlySubagentResult, 'summary' | 'recommendations' | 'evidenceRefs' | 'uncertainties' | 'roleOutput'> {
   let value: unknown
   try {
     value = JSON.parse(content)
@@ -458,6 +490,44 @@ function parseStructuredResult(
   const summary = requiredResultString(record.summary, 'summary')
   const recommendations = resultStringArray(record.recommendations, 'recommendations')
   const uncertainties = resultStringArray(record.uncertainties, 'uncertainties')
+  let roleOutput: BuiltInRoleOutputV1 | undefined
+  if (envelope.builtInRole) {
+    if (!record.roleOutput || typeof record.roleOutput !== 'object' || Array.isArray(record.roleOutput)) {
+      throw schemaError(`Built-in role ${envelope.builtInRole.roleId} must return roleOutput.`)
+    }
+    const candidate = record.roleOutput as Record<string, unknown>
+    const keys = Object.keys(candidate)
+    const allowedKeys = ['artifactKind', 'payloadSchemaVersion', 'payload']
+    if (keys.length !== allowedKeys.length || keys.some((key) => !allowedKeys.includes(key))) {
+      throw schemaError('roleOutput must contain only artifactKind, payloadSchemaVersion, and payload.')
+    }
+    if (candidate.artifactKind !== envelope.builtInRole.outputArtifactKind
+      || candidate.payloadSchemaVersion !== envelope.builtInRole.outputPayloadSchemaVersion) {
+      throw schemaError('roleOutput does not match the bound built-in role Artifact Contract.')
+    }
+    if (!isBuiltInAgentRoleId(envelope.builtInRole.roleId)) {
+      throw schemaError(`Unknown built-in role ${envelope.builtInRole.roleId}.`)
+    }
+    const payload = candidate.payload as JsonValue
+    try {
+      validateBuiltInRoleOutputPayload(envelope.builtInRole.roleId, payload)
+    } catch (error) {
+      throw schemaError(error instanceof Error ? error.message : String(error))
+    }
+    roleOutput = {
+      schemaVersion: 'built-in-role-output/v1',
+      roleId: envelope.builtInRole.roleId,
+      roleVersion: envelope.builtInRole.roleVersion,
+      roleDigest: envelope.builtInRole.roleDigest,
+      artifactKind: envelope.builtInRole.outputArtifactKind,
+      payloadSchemaVersion: envelope.builtInRole.outputPayloadSchemaVersion,
+      payload,
+      requiresMainWorkflowVerification: true,
+      authoritativeCompletionEvidence: false,
+    }
+  } else if (record.roleOutput !== undefined) {
+    throw schemaError('Legacy task output cannot self-assert a built-in role.')
+  }
   if (!Array.isArray(record.evidenceRefs) || record.evidenceRefs.length === 0) {
     throw schemaError('Subagent result must include at least one evidence ref.')
   }
@@ -475,7 +545,7 @@ function parseStructuredResult(
     }
     throw schemaError('Evidence refs must resolve inside the selected context manifest.')
   })
-  return { summary, recommendations, evidenceRefs, uncertainties }
+  return { summary, recommendations, evidenceRefs, uncertainties, ...(roleOutput ? { roleOutput } : {}) }
 }
 
 function freshnessFor(request: ReadOnlyLlmRunRequest): ResultFreshnessVerdict {
