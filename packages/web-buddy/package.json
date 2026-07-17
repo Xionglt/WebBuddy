@@ -108,6 +108,7 @@
     "test:security-sink-policy": "npm run build && node ./scripts/security-sink-policy-test.mjs",
     "test:eval:deterministic": "npm run build && node ./scripts/eval-deterministic-test.mjs",
     "test:control-store-contract": "npm run build && node ./scripts/control-store-contract-test.mjs",
+    "test:control-file-store": "npm run build && node ./scripts/control-file-store-test.mjs",
     "test:phase-classifier": "npm run build && node ./scripts/phase-classifier-test.mjs",
     "test:direct-submit-flow": "npm run build && node ./scripts/direct-submit-flow-test.mjs",
     "test:completion-resume": "npm run build && node ./scripts/completion-resume-test.mjs",
