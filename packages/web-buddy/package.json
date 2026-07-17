@@ -104,6 +104,7 @@
     "test:recruiting-adapter": "npm run build && node ./scripts/recruiting-adapter-test.mjs",
     "test:m1-contract": "npm run build && node ./scripts/generic-contract-test.mjs && node ./scripts/generic-web-task-test.mjs && node ./scripts/recruiting-adapter-test.mjs",
     "test:security-content-trust": "node ./scripts/security-content-trust-test.mjs",
+    "test:security-instruction-boundary": "npm run build && node ./scripts/security-instruction-boundary-test.mjs",
     "test:control-store-contract": "npm run build && node ./scripts/control-store-contract-test.mjs",
     "test:phase-classifier": "npm run build && node ./scripts/phase-classifier-test.mjs",
     "test:direct-submit-flow": "npm run build && node ./scripts/direct-submit-flow-test.mjs",

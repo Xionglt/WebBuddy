@@ -18,3 +18,17 @@ export type {
   SecuritySensitivity,
   SecurityTrust,
 } from './types.js'
+
+export {
+  INSTRUCTION_BOUNDARY_RULES,
+  analyzeInstructionRisk,
+  frameContextItem,
+  frameExternalText,
+  frameInstructionData,
+} from './instruction-firewall.js'
+
+export type {
+  FramedInstructionData,
+  InstructionRiskKind,
+  InstructionRiskSignal,
+} from './instruction-firewall.js'

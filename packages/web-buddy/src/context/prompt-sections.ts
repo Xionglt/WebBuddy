@@ -7,6 +7,10 @@ import { normalizeLines, oneLine, truncateText } from './budget.js'
 import { renderRunMemory } from './run-memory.js'
 import type { ContextFreshness, ContextRecentAction, ContextSnapshot, PromptSection, PromptSectionId } from './types.js'
 import { renderSkillPromptSection } from '../skills/renderer.js'
+import {
+  INSTRUCTION_BOUNDARY_RULES,
+  frameExternalText,
+} from '../security/instruction-firewall.js'
 
 export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'SYSTEM_ROLE',
@@ -127,13 +131,23 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
     case 'RUN_MEMORY':
       return renderRunMemory(snapshot.runMemory)
     case 'RELEVANT_MEMORIES':
-      return snapshot.relevantMemories || '(no relevant long-term memories selected for this turn)'
+      return snapshot.relevantMemories
+        ? frameExternalText('relevant-memories', 'memory', snapshot.relevantMemories)
+        : '(no relevant long-term memories selected for this turn)'
     case 'CONTEXT_ITEMS':
       return snapshot.contextSummary || '(no governed context items selected for this turn)'
     case 'CURRENT_PAGE_STATE':
-      return renderPageState(snapshot.page, snapshot.freshness)
+      return frameExternalText(
+        'current-page-state',
+        'web',
+        renderPageState(snapshot.page, snapshot.freshness),
+      )
     case 'CURRENT_FORM_STATE':
-      return renderFormState(snapshot.form, snapshot.freshness)
+      return frameExternalText(
+        'current-form-state',
+        'web',
+        renderFormState(snapshot.form, snapshot.freshness),
+      )
     case 'FILL_PLAN':
       return renderFillPlan(snapshot)
     case 'RECENT_ACTIONS':
@@ -220,6 +234,9 @@ function renderSafetyRules(notes: string[], blockers: string[]): string {
     lines.push(...blockers.map((blocker) => `- ${blocker}`))
     lines.push('')
   }
+  lines.push('Instruction boundary:')
+  lines.push(...INSTRUCTION_BOUNDARY_RULES.map((note) => `- ${note}`))
+  lines.push('')
   lines.push(...(notes.length > 0 ? notes.map((note) => `- ${note}`) : ['- No additional safety notes were supplied.']))
   return lines.join('\n')
 }
