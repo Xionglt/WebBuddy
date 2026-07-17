@@ -117,6 +117,37 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
   }
 }
 
+/**
+ * Removes tool requests that did not durably settle before interruption.
+ * Settled call/result pairs remain transcript context; this function never
+ * executes either side and prevents an old incomplete call from being replayed.
+ */
+export function sanitizeRestoredMessagesForResume(messages: readonly ChatMessage[]): ChatMessage[] {
+  const settledIds = new Set(
+    messages
+      .filter((message) => message.role === 'tool' && typeof message.tool_call_id === 'string')
+      .map((message) => message.tool_call_id as string),
+  )
+  const retainedCallIds = new Set<string>()
+  const sanitized: ChatMessage[] = []
+  for (const message of messages) {
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const settledCalls = message.tool_calls.filter((call) => settledIds.has(call.id))
+      for (const call of settledCalls) retainedCallIds.add(call.id)
+      if (settledCalls.length) {
+        sanitized.push({ ...message, tool_calls: settledCalls })
+      } else if (message.content) {
+        sanitized.push({ role: 'assistant', content: message.content })
+      }
+      continue
+    }
+    if (message.role === 'tool'
+      && (typeof message.tool_call_id !== 'string' || !retainedCallIds.has(message.tool_call_id))) continue
+    sanitized.push(structuredClone(message))
+  }
+  return sanitized
+}
+
 function chatMessageFromTranscriptEntry(entry: TranscriptEntry): ChatMessage | undefined {
   if (entry.type === 'async_task_notification_attachment') {
     return { role: 'user', content: entry.content }

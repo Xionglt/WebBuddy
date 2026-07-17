@@ -38,7 +38,10 @@ import { detectDirectSubmitReview, type DirectSubmitReview } from '../workflow/d
 import {
   FileSessionRecorder,
   FileSessionStore,
+  restoreSessionState,
+  sanitizeRestoredMessagesForResume,
   type AgentSession,
+  type RestoredSessionState,
   type AgentSessionSource,
   type AgentSessionStatus,
   type SessionRecorder,
@@ -138,6 +141,10 @@ export interface RunOptions {
   asyncTaskRuntimeFactory?: (input: AsyncTaskRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
   /** Cooperative run control used by the durable control plane. */
   controller?: AgentRunController
+  /** Existing durable session to restore. Used only by fenced control-plane resume. */
+  restoredSessionId?: string
+  /** Called after the durable session is created/restored, before browser/model work. */
+  onSessionReady?: (session: AgentSession) => void | Promise<void>
 }
 
 export interface AsyncTaskRuntimeFactoryInput {
@@ -400,14 +407,17 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
     profile: runtimeProfile,
     goal: options.taskPrompt,
   })
-  const sessionRecorder = await createRunSession({
+  const sessionSetup = await createRunSession({
     config,
     trace,
     mode,
     source: options.source ?? 'local-runtime',
     goal: options.taskPrompt ?? defaultGoalForMode(mode),
     emit,
+    restoredSessionId: options.restoredSessionId,
   })
+  const sessionRecorder = sessionSetup.recorder
+  await options.onSessionReady?.(sessionRecorder.session)
   const finalizeRun = (args: Omit<FinalizeArgs, 'session'>) =>
     finalize({ ...args, session: sessionRecorder })
   const sessionId = 'default'
@@ -805,6 +815,10 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
         requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
         session: sessionRecorder,
+        restoredMessages: sessionSetup.restored
+          ? sanitizeRestoredMessagesForResume(sessionSetup.restored.restoredMessages)
+          : undefined,
+        restoredAsyncTaskPromptAttachments: sessionSetup.restored?.asyncTaskPromptAttachments,
         abortSignal: options.controller?.signal,
         shouldPause: () => options.controller?.pauseRequested ?? false,
       })
@@ -1433,8 +1447,24 @@ async function createRunSession(args: {
   source: RunSource
   goal: string
   emit: (e: AgentEvent) => void
-}): Promise<SessionRecorder> {
+  restoredSessionId?: string
+}): Promise<{ recorder: SessionRecorder; restored?: RestoredSessionState }> {
   const store = new FileSessionStore({ rootDir: join(args.config.trace.outDir, 'sessions') })
+  if (args.restoredSessionId) {
+    const session = await store.get(args.restoredSessionId)
+    if (!session) throw new Error(`Cannot restore missing session ${args.restoredSessionId}.`)
+    if (session.runId !== args.trace.runId) {
+      throw new Error(`Restored session ${session.sessionId} belongs to another run.`)
+    }
+    const restored = await restoreSessionState({ session })
+    return {
+      recorder: new FileSessionRecorder(store, session, {
+        bestEffort: true,
+        warn: (message) => args.emit({ phase: 'session', message, level: 'warn' }),
+      }),
+      restored,
+    }
+  }
   const session = await store.create({
     runId: args.trace.runId,
     source: sessionSourceFromRunSource(args.source),
@@ -1442,10 +1472,12 @@ async function createRunSession(args: {
     mode: args.mode,
     traceRunId: args.trace.runId,
   })
-  return new FileSessionRecorder(store, session, {
-    bestEffort: true,
-    warn: (message) => args.emit({ phase: 'session', message, level: 'warn' }),
-  })
+  return {
+    recorder: new FileSessionRecorder(store, session, {
+      bestEffort: true,
+      warn: (message) => args.emit({ phase: 'session', message, level: 'warn' }),
+    }),
+  }
 }
 
 async function finalize(args: FinalizeArgs): Promise<AgentRunResult> {

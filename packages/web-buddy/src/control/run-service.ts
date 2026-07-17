@@ -15,6 +15,7 @@ import {
   RUN_RECORD_SCHEMA_VERSION,
   controlRecordDigest,
   type ApprovalListQuery,
+  type ApprovalStoreEvent,
   type ApprovalRecord,
   type ApprovalResolutionExpectation,
   type ApprovalStore,
@@ -184,6 +185,44 @@ export class RunService {
 
   start(runId: string, idempotencyKey: string): Promise<RunRecord> {
     return this.transition(runId, { to: 'running', idempotencyKey })
+  }
+
+  async attachSession(
+    runId: string,
+    sessionRef: NonNullable<RunRecord['sessionRef']>,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+  ): Promise<RunRecord> {
+    const current = await this.require(runId, scope)
+    if (sessionRef.runId !== runId
+      || sessionRef.attempt !== current.attempt
+      || (current.sessionRef && current.sessionRef.id !== sessionRef.id)) {
+      throw new RunServiceError('INVALID_CONTROL', 'Session reference does not match the current run attempt.')
+    }
+    if (current.sessionRef?.id === sessionRef.id) return current
+    const now = new Date().toISOString()
+    const record: RunRecord = {
+      ...current,
+      sessionRef,
+      recordRevision: current.recordRevision + 1,
+      nextEventSequence: current.nextEventSequence + 1,
+      updatedAt: now,
+    }
+    const event = createRunEvent(record, {
+      eventType: 'reference_attached',
+      eventSequence: current.nextEventSequence,
+      recordRevisionBefore: current.recordRevision,
+      idempotencyKey,
+      occurredAt: now,
+      data: { referenceKind: 'session', provider: sessionRef.provider, sessionId: sessionRef.id },
+    })
+    const committed = await this.store.transact(runId, {
+      expectedRecordRevision: current.recordRevision,
+      record,
+      event,
+      idempotencyKey,
+    })
+    return committed.record
   }
 
   async requestPause(runId: string, idempotencyKey: string, scope?: ScopedStoreQuery): Promise<RunRecord> {
@@ -422,6 +461,53 @@ export class ApprovalService {
       },
       options: { idempotencyKey },
     })
+  }
+
+  async cancelPendingForRun(runId: string, reason: string, idempotencyPrefix: string): Promise<ApprovalRecord[]> {
+    const pending = await this.store.list({ runId, statuses: ['pending'], limit: 1000 })
+    const cancelled: ApprovalRecord[] = []
+    for (const current of pending.items) {
+      const occurredAt = new Date().toISOString()
+      const idempotencyKey = `${idempotencyPrefix}:${current.approvalId}`
+      const record: ApprovalRecord = {
+        ...current,
+        recordRevision: current.recordRevision + 1,
+        status: 'cancelled',
+        terminal: {
+          status: 'cancelled',
+          source: 'system',
+          occurredAt,
+          reason,
+        },
+        nextEventSequence: current.nextEventSequence + 1,
+        updatedAt: occurredAt,
+      }
+      const event: ApprovalStoreEvent = {
+        schemaVersion: APPROVAL_EVENT_SCHEMA_VERSION,
+        eventId: randomUUID(),
+        eventSequence: current.nextEventSequence,
+        eventType: 'approval_cancelled',
+        approvalId: current.approvalId,
+        runId: current.runId,
+        recordRevisionBefore: current.recordRevision,
+        recordRevisionAfter: record.recordRevision,
+        runRevision: current.runRevision,
+        attempt: current.attempt,
+        actionId: current.actionBinding.actionId,
+        occurredAt,
+        idempotencyKey,
+        ...(current.ownerScope ? { ownerScope: current.ownerScope } : {}),
+        data: { reason },
+      }
+      const committed = await this.store.transact(current.approvalId, {
+        expectedRecordRevision: current.recordRevision,
+        record,
+        event,
+        idempotencyKey,
+      })
+      cancelled.push(committed.record)
+    }
+    return cancelled
   }
 }
 

@@ -18,4 +18,6 @@ export type {
   LateResultInput,
   TransitionRunInput,
 } from './run-service.js'
+export { RecoveryService } from './recovery-service.js'
+export type { RecoveryDecision, RecoveryServiceOptions } from './recovery-service.js'
 export * from './store-contracts.js'

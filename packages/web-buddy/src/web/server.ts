@@ -15,6 +15,7 @@ import {
   ControlStoreError,
   FileApprovalStore,
   FileRunStore,
+  RecoveryService,
   RunService,
   RunServiceError,
   type RunRecord,
@@ -24,6 +25,7 @@ import { RISK_DECISIONS_ARTIFACT } from '../policy/risk-decisions.js'
 import { loadConfig, type AgentConfig, type ModelConfig } from '../sdk/config.js'
 import { runJobApplicationAgent, type AgentEvent, type AgentRunResult, type RunOptions } from '../sdk/orchestrator.js'
 import { sessionManager } from '../session/manager.js'
+import { FileSessionStore } from '../session/index.js'
 import { snapshotWebTaskInput, type JsonObject } from '../task/contracts.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
@@ -33,7 +35,6 @@ const SOURCE_FILE = fileURLToPath(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..')
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled'])
-const LIVE_RECOVERY_STATES = ['running', 'pausing', 'resuming'] as const
 
 function outputDir(): string {
   return resolve(loadConfig().trace.outDir)
@@ -48,6 +49,7 @@ interface LegacyLaunchOptions {
   taskType?: WebBuddyTaskType
   requiresCurrentResumeUpload?: boolean
   restartSafe: boolean
+  restoredSessionId?: string
 }
 
 interface LiveChannel {
@@ -72,6 +74,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     : resolve(process.env.WEB_BUDDY_CONTROL_STORE_DIR || join(outputDir(), 'control-plane'))
   const runService = new RunService(new FileRunStore({ rootDir: controlStoreDir }))
   const approvalService = new ApprovalService(new FileApprovalStore({ rootDir: controlStoreDir }))
+  const sessionStore = new FileSessionStore({ rootDir: join(outputDir(), 'sessions') })
+  const recoveryService = new RecoveryService(runService, approvalService, {
+    canRestoreSession: async (record) => Boolean(record.sessionRef && await sessionStore.get(record.sessionRef.id)),
+  })
   const channels = new Map<string, LiveChannel>()
   const executions = new Map<string, LiveExecution>()
   let modelOverride: Partial<ModelConfig> = {}
@@ -150,6 +156,16 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       source: 'web-ui',
       profile: 'debug',
       controller,
+      ...(launchOptions.restoredSessionId ? { restoredSessionId: launchOptions.restoredSessionId } : {}),
+      onSessionReady: async (session) => {
+        await runService.attachSession(running.runId, {
+          schemaVersion: 'session-ref/v1',
+          provider: 'file-session-store',
+          id: session.sessionId,
+          runId: running.runId,
+          attempt: running.attempt,
+        }, `session:${running.runRevision}:${running.attempt}:${session.sessionId}`)
+      },
       onEvent: (event) => emitRun(running.runId, event),
     }
 
@@ -265,6 +281,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       headless: launchOptions.headless ?? false,
       restartSafe: launchOptions.restartSafe,
       requiresCurrentResumeUpload: launchOptions.requiresCurrentResumeUpload ?? false,
+      ...(launchOptions.taskType ? { taskType: launchOptions.taskType } : {}),
       ...(launchOptions.resumePath ? { resumePath: launchOptions.resumePath } : {}),
     }
     const snapshot = snapshotWebTaskInput({
@@ -305,28 +322,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
   }
 
   async function recoverStartupRuns(): Promise<void> {
-    const page = await runService.list({ states: [...LIVE_RECOVERY_STATES, 'cancelling'], limit: 1000 })
-    for (const record of page.items) {
-      if (record.state === 'cancelling') {
-        await runService.transition(record.runId, {
-          to: 'failed',
-          reason: 'Process restarted while cancellation was settling; no write action was replayed.',
-          idempotencyKey: `startup-cancel-failed:${record.recordRevision}`,
-          eventType: 'recovery_classified',
-          data: { recoverable: false, replayedAction: false },
-        })
-        continue
-      }
-      const restartSafe = record.inputSnapshot.goal.metadata?.restartSafe === true
-      await runService.classifyInterrupted(
-        record.runId,
-        restartSafe || Boolean(record.checkpointRef),
-        restartSafe || record.checkpointRef
-          ? 'Process restarted; explicit resume may start a fenced new attempt.'
-          : 'Process restarted without a safe restart contract or checkpoint; write actions will not be replayed.',
-        `startup-recovery:${record.recordRevision}`,
-      )
-    }
+    await recoveryService.recoverStartupRuns()
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -419,14 +415,20 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const current = await runService.get(runId)
       if (!current) return send(res, 404, { error: 'unknown runId' })
       const restartSafe = current.inputSnapshot.goal.metadata?.restartSafe === true
-      if (!restartSafe && !current.checkpointRef && !current.lastSafeBoundary?.checkpointRef) {
+      const restoredSessionId = current.sessionRef?.id ?? current.lastSafeBoundary?.sessionRef?.id
+      if (!restartSafe || !restoredSessionId) {
         return send(res, 409, {
-          error: 'resume_requires_checkpoint',
-          message: 'This run has no replay-safe checkpoint; the server will not replay its last write action.',
+          error: 'resume_requires_safe_session',
+          message: 'Resume requires a durable session plus an explicit read-only restart contract; the server will not replay a prior write action.',
         })
       }
+      await approvalService.cancelPendingForRun(
+        runId,
+        'Approval invalidated when resume created a new run revision.',
+        `resume-approval-fence:${current.runRevision}:${current.attempt}`,
+      )
       const resuming = await runService.resume(runId, idempotencyKey)
-      await launch(resuming)
+      await launch(resuming, { ...launchOptionsFromRecord(resuming), restoredSessionId })
       send(res, 202, { run: (await runService.get(runId)) ?? resuming })
       return
     }
@@ -501,6 +503,15 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const body = await readJsonBody(req)
       const approval = await approvalService.get(approvalId)
       if (!approval) return send(res, 404, { error: 'unknown approvalId' })
+      const approvalRun = await runService.get(approval.runId)
+      if (!approvalRun
+        || approvalRun.runRevision !== approval.runRevision
+        || approvalRun.attempt !== approval.attempt) {
+        throw new ControlStoreError(
+          'BINDING_MISMATCH',
+          'Approval belongs to a stale run revision/attempt and cannot be resolved.',
+        )
+      }
       const decision = body.decision === 'approved' || body.decision === 'denied' ? body.decision : undefined
       if (!decision) return send(res, 400, { error: 'decision must be approved or denied' })
       const record = await approvalService.resolve({
@@ -562,6 +573,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     server,
     runService,
     approvalService,
+    recoveryService,
     controlStoreDir,
     recoverStartupRuns,
     async close() {

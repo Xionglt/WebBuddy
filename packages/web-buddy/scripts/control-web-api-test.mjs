@@ -65,7 +65,7 @@ try {
   assert.equal(pausedRequest.run.state, 'pausing')
   const resumedWithoutCheckpoint = await request(base, `/api/runs/${encodeURIComponent(created.runId)}/resume`, { method: 'POST' })
   assert.equal(resumedWithoutCheckpoint.status, 409)
-  assert.equal((await resumedWithoutCheckpoint.json()).error, 'resume_requires_checkpoint')
+  assert.equal((await resumedWithoutCheckpoint.json()).error, 'resume_requires_safe_session')
 
   const trace = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/trace`)
   assert.equal(trace.id, created.runId)

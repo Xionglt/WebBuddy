@@ -21,7 +21,7 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:release-gate": "npm run typecheck && npm run build && npm run test:m1-contract && npm run test:security-content-trust && npm run test:security-instruction-boundary && npm run test:security-sink-policy && npm run test:eval:deterministic && npm run test:runtime-rewrite && npm run test:async-task-orchestration",
+    "test:release-gate": "npm run typecheck && npm run build && npm run test:m1-contract && npm run test:security-content-trust && npm run test:security-instruction-boundary && npm run test:security-sink-policy && npm run test:eval:deterministic && npm run test:runtime-rewrite && npm run test:async-task-orchestration && npm run test:control-plane",
     "clean": "node -e \"import('node:fs/promises').then(fs => fs.rm('dist', { recursive: true, force: true }))\"",
     "start": "node ./dist/server.js",
     "dev": "npm run build && npm start",
@@ -111,6 +111,8 @@
     "test:control-file-store": "npm run build && node ./scripts/control-file-store-test.mjs",
     "test:control-run-service": "npm run build && node ./scripts/control-run-service-test.mjs",
     "test:control-web-api": "npm run build && node ./scripts/control-web-api-test.mjs",
+    "test:control-recovery": "npm run build && node ./scripts/control-recovery-test.mjs",
+    "test:control-plane": "npm run build && node ./scripts/control-store-contract-test.mjs && node ./scripts/control-file-store-test.mjs && node ./scripts/control-run-service-test.mjs && node ./scripts/control-web-api-test.mjs && node ./scripts/control-recovery-test.mjs",
     "test:phase-classifier": "npm run build && node ./scripts/phase-classifier-test.mjs",
     "test:direct-submit-flow": "npm run build && node ./scripts/direct-submit-flow-test.mjs",
     "test:completion-resume": "npm run build && node ./scripts/completion-resume-test.mjs",
