@@ -5,13 +5,14 @@ import type { KernelEvent } from '../kernel/kernel-events.js'
 import type { AgentRunController } from '../kernel/run-controller.js'
 import type { HumanGate } from '../sdk/human.js'
 import type { ChatCompletion, ChatMessage, ChatOptions } from '../sdk/llm.js'
-import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
+import type { LegacyProfileInput, ProfileStore, StructuredProfileInput } from '../context/profile-store.js'
 import type { SessionRecorder } from '../session/index.js'
 import type { ToolContext, ToolRegistry } from '../runtime/local/tool-registry.js'
 import type { TaskState } from '../task/task-state.js'
 import type { RunMemory } from '../context/run-memory.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
+import type { ContextItem, TaskContract } from '../task/contracts.js'
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
@@ -31,10 +32,14 @@ export interface AgentRuntimeEvent {
 }
 
 export interface AgentRuntimeInput {
-  /** The natural-language task, e.g. "fill the application form on this page with my resume". */
+  /** The natural-language task. */
   goal: string
-  resume: ResumeProfile
-  resumeV2?: ResumeProfileV2
+  contextItems?: ContextItem[]
+  profileStore?: ProfileStore
+  /** @deprecated Recruiting compatibility input. Prefer contextItems/profileStore. */
+  resume?: LegacyProfileInput
+  /** @deprecated Recruiting compatibility input. Prefer contextItems/profileStore. */
+  resumeV2?: StructuredProfileInput
   llm: AgentRuntimeLlm
   registry?: ToolRegistry
   ctx: ToolContext
@@ -48,6 +53,7 @@ export interface AgentRuntimeInput {
   safetyMode?: AgentSafetyMode
   /** Explicit task contract for completion criteria. */
   taskType?: WebBuddyTaskType
+  taskContract?: TaskContract
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
   /** Optional kernel-level run controller for abort/pause/status integration. */
@@ -68,7 +74,7 @@ export interface AgentRuntimeResult {
 
 export interface PromptAssemblerInput {
   goal: string
-  resume: ResumeProfile
+  contextItems?: ContextItem[]
   ctx: Pick<ToolContext, 'sessionId'>
   extraContext?: string
   taskState?: TaskState

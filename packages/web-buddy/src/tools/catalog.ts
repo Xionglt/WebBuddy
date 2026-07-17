@@ -159,7 +159,7 @@ const RAW_TOOL_CATALOG: Omit<ToolDef, 'execution'>[] = [
   {
     name: 'resume_query',
     description:
-      'Query the candidate resume by section. Use this when application fields need details beyond RESUME_SUMMARY, such as projects, responsibilities, education, skills, or target roles.',
+      'Query the recruiting profile by section. Use this compatibility tool when application fields need details beyond the governed CONTEXT_ITEMS section, such as projects, responsibilities, education, skills, or target roles.',
     category: 'observation',
     risk: 'L0',
     parameters: {

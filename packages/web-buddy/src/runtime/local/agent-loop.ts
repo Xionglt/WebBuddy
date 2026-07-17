@@ -30,7 +30,7 @@ import {
 import type { ContextRecentAction, ContextSnapshot } from '../../context/types.js'
 import { AnswerStore, type UserAnswer } from '../../context/answer-store.js'
 import { ensureMemdir, queryMemdir, renderMemorySearchResult } from '../../memory/index.js'
-import { ProfileStore } from '../../context/profile-store.js'
+import { ProfileStore, profileStoreContextItem, type LegacyProfileInput, type StructuredProfileInput } from '../../context/profile-store.js'
 import { createFieldPlanner } from '../../fill/field-planner.js'
 import type { FieldPlan } from '../../fill/field-plan.js'
 import {
@@ -84,7 +84,6 @@ import {
 import { abortReason } from '../../kernel/run-controller.js'
 import type { GateDecision, GateKind, HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
-import type { ResumeProfile, ResumeProfileV2 } from '../../sdk/resume.js'
 import type { RiskLevel } from '../../sdk/trace.js'
 import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
@@ -92,6 +91,7 @@ import { toLegacyToolRunResult, type NormalizedToolResult } from '../../tools/to
 import { createNormalizedToolError } from '../../tools/tool-errors.js'
 import type { BackgroundToolBridgeV1 } from '../../tools/background-tool-bridge.js'
 import type { ToolCall } from '../../tools/tool-contract.js'
+import type { ContextItem, EvidenceRef, TaskContract } from '../../task/contracts.js'
 import {
   orchestrateToolCalls,
   partitionToolCalls,
@@ -144,11 +144,14 @@ export interface AgentEvent {
 }
 
 export interface AgentLoopInput {
-  /** The natural-language task, e.g. "fill the application form on this page with my resume". */
+  /** The natural-language task. */
   goal: string
-  resume: ResumeProfile
-  /** Optional full structured resume. This is read-only context until autofill is enabled. */
-  resumeV2?: ResumeProfileV2
+  contextItems?: ContextItem[]
+  profileStore?: ProfileStore
+  /** @deprecated Recruiting compatibility input. */
+  resume?: LegacyProfileInput
+  /** @deprecated Recruiting compatibility input. */
+  resumeV2?: StructuredProfileInput
   /** Optional field plan to inject into FILL_PLAN prompt context. */
   fieldPlan?: FieldPlan
   /** Optional fill ledger summary to inject into FILL_PLAN prompt context. */
@@ -157,6 +160,7 @@ export interface AgentLoopInput {
   requiresCurrentResumeUpload?: boolean
   /** Explicit task contract for completion criteria. */
   taskType?: WebBuddyTaskType
+  taskContract?: TaskContract
   llm: LlmGateway
   registry: ToolRegistry
   ctx: ToolContext
@@ -226,6 +230,7 @@ export interface AgentLoopResult {
   blocked: boolean
   summary: string
   workflowState?: WorkflowState
+  evidence?: EvidenceRef[]
 }
 
 export interface AgentLoopPermissionEngine {
@@ -306,9 +311,9 @@ export const RAW_MODE_EXCLUDED_TOOLS = [
  * is no hardcoded field mapping.
  */
 export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResult> {
-  const { llm, registry, gate, resume, goal, onEvent } = input
+  const { llm, registry, gate, goal, onEvent } = input
   const toolOrchestration = resolveToolOrchestrationOptions(input.toolOrchestration)
-  const profileStore = new ProfileStore(resume, input.resumeV2)
+  const profileStore = input.profileStore ?? (input.resume ? new ProfileStore(input.resume, input.resumeV2) : undefined)
   const answerStore = input.ctx.answerStore ?? (input.persistentAnswerStore
     ? await AnswerStore.load(input.persistentAnswerStore.path)
     : new AnswerStore())
@@ -317,6 +322,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     summary: input.ctx.fillLedgerSummary ?? input.fillLedgerSummary,
   })
   const taskType = input.taskType ?? (input.safetyMode === 'raw' ? 'explore' : 'fill_form')
+  const taskRevision = input.taskContract?.revision ?? 0
+  const contextItems = input.contextItems ?? (profileStore ? [profileStoreContextItem(profileStore, {
+    runId: input.session?.session.runId ?? input.ctx.trace.runId,
+    sessionId: input.session?.session.sessionId ?? input.ctx.sessionId,
+    revision: taskRevision,
+  })] : [])
   const requiresCurrentResumeUpload = input.requiresCurrentResumeUpload ?? false
   let currentResumeUploaded = false
   const ctx: ToolContext = {
@@ -328,7 +339,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     humanInput: input.ctx.humanInput ?? gate,
     llm,
   }
-  const loopInput: AgentLoopInput = { ...input, ctx }
+  const loopInput: AgentLoopInput = { ...input, contextItems, ctx }
   const asyncTaskRuntime = ctx.asyncTaskRuntime
   if (asyncTaskRuntime) {
     if (!input.session || input.session.durability !== 'durable') {
@@ -355,6 +366,27 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const completionGate = input.completionGate ?? defaultCompletionGate
   const workflowEvidenceStore = new EvidenceStore()
   const session = input.session
+  const completionContractFields = () => {
+    const runId = session?.session.runId ?? ctx.trace.runId
+    const revision = input.taskContract?.revision ?? 0
+    return {
+      taskContract: input.taskContract,
+      runId,
+      revision,
+      evidence: workflowEvidenceStore.snapshot().evidence.map((item) => workflowEvidenceRef(
+        item,
+        runId,
+        revision,
+        session?.session.sessionId ?? ctx.sessionId,
+      )),
+      artifacts: [],
+      actions: input.taskContract?.criteria.flatMap((criterion) =>
+        criterion.kind === 'action_boundary' && criterion.outcome === 'not_performed'
+          ? criterion.actionKinds.filter((kind) => kind === 'submit').map((actionKind) => ({ actionKind, outcome: 'not_performed' as const }))
+          : [],
+      ) ?? [],
+    }
+  }
   const toolResultStore = input.toolResultStore ?? new FileToolResultStore({
     rootDir: join(ctx.trace.agentTrace?.dir ?? ctx.trace.dir, 'artifacts', 'tool-results'),
   })
@@ -1397,6 +1429,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           requiresCurrentResumeUpload,
           currentResumeUploaded,
           taskType,
+          ...completionContractFields(),
           source: 'model_no_tool_calls',
           asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
           ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
@@ -2276,6 +2309,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           requiresCurrentResumeUpload,
           currentResumeUploaded,
           taskType,
+          ...completionContractFields(),
           source: 'agent_done',
           asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
           ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
@@ -2338,6 +2372,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             requiresCurrentResumeUpload,
             currentResumeUploaded,
             taskType,
+            ...completionContractFields(),
             source: 'agent_done',
             asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
             ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
@@ -2633,7 +2668,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     done && !blocked ? undefined : summary,
   )
 
-  return { steps: step, toolCalls, done, blocked, summary, workflowState }
+  return {
+    steps: step,
+    toolCalls,
+    done,
+    blocked,
+    summary,
+    workflowState,
+    evidence: workflowEvidenceStore.snapshot().evidence.map((item) => workflowEvidenceRef(
+      item,
+      input.session?.session.runId ?? ctx.trace.runId,
+      input.taskContract?.revision ?? 0,
+      input.session?.session.sessionId ?? ctx.sessionId,
+    )),
+  }
 }
 
 function resolveToolOrchestrationOptions(
@@ -2948,7 +2996,7 @@ async function buildLoopContextWithWorkflow(
   return buildLoopContext(
     {
       goal: input.goal,
-      resume: input.resume,
+      contextItems: input.contextItems,
       ctx: input.ctx,
       extraContext: input.extraContext,
       taskState: taskStateForLoop(input, workflowState),
@@ -2967,7 +3015,7 @@ async function buildLoopContextWithWorkflow(
 }
 
 function taskStateForLoop(input: AgentLoopInput, workflowState: WorkflowState) {
-  const criteria: string[] = []
+  const criteria: string[] = input.taskContract?.criteria.map((criterion) => criterion.description) ?? []
   const blockers: string[] = []
   if (input.requiresCurrentResumeUpload) {
     criteria.push('The current local resume file must be uploaded or re-uploaded to the site before the application draft can be considered ready.')
@@ -2978,7 +3026,9 @@ function taskStateForLoop(input: AgentLoopInput, workflowState: WorkflowState) {
       blockers.push('Current task resume has not been verified as uploaded yet; first explore profile/resume/application areas for upload or re-upload controls.')
     }
   }
-  criteria.push('Stop before true final submission controls such as 确认投递/提交申请/final submit, unless the human explicitly approves that final submit action.')
+  if (!input.taskContract) {
+    criteria.push('Stop before true final submission controls such as 确认投递/提交申请/final submit, unless the human explicitly approves that final submit action.')
+  }
   return {
     schemaVersion: 'task-state/v1' as const,
     goal: input.goal,
@@ -2996,6 +3046,46 @@ function taskStateForLoop(input: AgentLoopInput, workflowState: WorkflowState) {
     knownBlockers: blockers,
     completionCriteria: criteria,
     updatedAt: workflowState.updatedAt,
+  }
+}
+
+function workflowEvidenceRef(
+  evidence: WorkflowEvidence,
+  runId: string,
+  revision: number,
+  sessionId: string,
+): EvidenceRef {
+  const origin = evidence.kind === 'page' || evidence.kind === 'form'
+    ? 'web' as const
+    : evidence.kind === 'tool_result'
+      ? 'tool' as const
+      : evidence.kind === 'user_confirm'
+        ? 'user' as const
+        : 'derived' as const
+  const authority = evidence.kind === 'user_confirm' ? 'user' as const : 'main_runtime' as const
+  return {
+    schemaVersion: 'evidence-ref/v1',
+    id: evidence.id,
+    kind: evidence.kind,
+    summary: evidence.summary,
+    authority,
+    origin,
+    trust: origin === 'user' ? 'user_authorized' : origin === 'derived' ? 'derived_untrusted' : 'untrusted_external',
+    sensitivity: 'internal',
+    provenance: {
+      capturedAt: evidence.ts,
+      parentContentIds: [],
+      runId,
+      sessionId,
+      ...(evidence.toolCallId ? { toolCallId: evidence.toolCallId } : {}),
+    },
+    freshness: { validity: 'current', revision },
+    independentlyObserved: evidence.kind === 'page' || evidence.kind === 'form' || evidence.kind === 'tool_result',
+    spoofableTextOnly: evidence.kind === 'page',
+    binding: { runId, revision },
+    verifier: 'local-agent-loop/v1',
+    verificationStatus: 'verified',
+    createdAt: evidence.ts,
   }
 }
 

@@ -103,7 +103,7 @@ try {
   const snapshot = await manager.createSnapshot({
     sessionId: 'ctx-test',
     goal: 'Fill the current form.',
-    resumeSummary: 'name: Zhang San\nemail: zhangsan@example.com',
+    contextSummary: 'name: Zhang San\nemail: zhangsan@example.com',
     recentActions: [
       recent(1, 'browser_snapshot'),
       recent(2, 'browser_type'),
@@ -144,7 +144,7 @@ try {
   const overrideSnapshot = await new ContextManager({ observationProvider: provider, staleAfterMs: 120_000 }).createSnapshot({
     sessionId: 'ctx-test',
     goal: 'Fill the current form.',
-    resumeSummary: 'name: Zhang San\nemail: zhangsan@example.com',
+    contextSummary: 'name: Zhang San\nemail: zhangsan@example.com',
     updatedAt: '2026-06-25T00:01:00.000Z',
   })
   assert.equal(overrideSnapshot.freshness.staleAfterMs, 120_000)
@@ -162,7 +162,7 @@ try {
   const defaultSnapshot = await new ContextManager().createSnapshot({
     sessionId: defaultSessionId,
     goal: 'Use default provider.',
-    resumeSummary: 'name: Default',
+    contextSummary: 'name: Default',
   })
   assert.equal(defaultSnapshot.page?.title, 'Default Provider Page')
   assert.equal(defaultSnapshot.form?.schemaVersion, 'form-state/v1')

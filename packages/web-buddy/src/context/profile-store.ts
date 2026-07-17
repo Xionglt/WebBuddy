@@ -1,4 +1,9 @@
 import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
+import type { ContextItem } from '../task/contracts.js'
+
+/** Compatibility-only input aliases. Generic runtime code imports these from context, never from the recruiting SDK. */
+export type LegacyProfileInput = ResumeProfile
+export type StructuredProfileInput = ResumeProfileV2
 
 export const PROFILE_SECTIONS = [
   'contact',
@@ -78,6 +83,40 @@ export class ProfileStore {
       keywords: profile.keywords,
       source: profile.source,
     }
+  }
+}
+
+export function profileStoreContextItem(
+  profileStore: ProfileStore,
+  input: { id?: string; runId: string; sessionId?: string; revision: number; capturedAt?: string },
+): ContextItem {
+  const capturedAt = input.capturedAt ?? new Date().toISOString()
+  return {
+    schemaVersion: 'context-item/v1',
+    id: input.id ?? 'recruiting-profile',
+    kind: 'person_profile',
+    content: profileStore.query('all').data as never,
+    origin: 'user',
+    trust: 'user_authorized',
+    instructionAuthority: 'advisory',
+    sensitivity: 'personal',
+    provenance: {
+      capturedAt,
+      parentContentIds: [],
+      runId: input.runId,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    },
+    allowedUses: ['prompt', 'artifact', 'sink'],
+    freshness: { validity: 'current', revision: input.revision },
+    retention: { scope: 'run', deleteWithSession: true },
+    sanitization: {
+      policyId: 'recruiting-profile-adapter/v1',
+      status: 'unchanged',
+      redactedFields: [],
+      instructionNeutralized: false,
+      transformedFrom: [],
+    },
+    integrity: { immutable: true, digestVerified: false },
   }
 }
 

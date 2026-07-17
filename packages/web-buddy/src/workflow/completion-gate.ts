@@ -13,6 +13,8 @@ import type { ObservationPhase } from './phase-classifier.js'
 import type { WorkflowPhase, WorkflowState } from './workflow-state.js'
 import { actionableDialogPresent } from './actionable-dialog.js'
 import { evaluateTaskCompletion } from './task-completion.js'
+import { evaluateCompletionContract } from '../task/completion-contract.js'
+import type { ActionOutcome, ArtifactRef, EvidenceRef, TaskContract } from '../task/contracts.js'
 
 export type CompletionGateAction = 'allow' | 'block' | 'ignore' | 'reject'
 export type CompletionGateRecommendedStatus = 'completed' | 'blocked' | 'unchanged'
@@ -33,6 +35,12 @@ export interface CompletionGateInput {
   asyncTaskRuntimeEnabled?: boolean
   mainCompletionReadiness?: MainCompletionReadinessV1
   taskType?: WebBuddyTaskType
+  taskContract?: TaskContract
+  runId?: string
+  revision?: number
+  evidence?: EvidenceRef[]
+  artifacts?: ArtifactRef[]
+  actions?: ActionOutcome[]
   summaryAuthority?: 'main_agent' | 'read_only_subagent'
   source?: 'agent_done' | 'finalize' | 'manual' | (string & {})
 }
@@ -103,6 +111,62 @@ export class CompletionGate {
         blockers,
         workflowPhase,
         evidenceIds,
+      })
+    }
+
+    if (input.taskContract) {
+      const runId = input.runId ?? input.evidence?.[0]?.binding.runId
+      const revision = input.revision ?? input.taskContract.revision
+      if (!runId) {
+        return decision({
+          action: 'reject',
+          recommendedStatus: 'unchanged',
+          reason: completionReason('PREMATURE_AGENT_DONE_REJECTED. Generic completion requires a run binding.', input),
+          missingCriteria,
+          blockers,
+          workflowPhase,
+          evidenceIds,
+        })
+      }
+      const contractEvaluation = evaluateCompletionContract({
+        contract: input.taskContract,
+        runId,
+        revision,
+        evidence: input.evidence ?? [],
+        artifacts: input.artifacts ?? [],
+        formState: completionFormState(input),
+        actions: input.actions ?? [],
+      })
+      if (contractEvaluation.completed) {
+        return decision({
+          action: 'allow',
+          recommendedStatus: 'completed',
+          reason: completionReason('Completion gate allowed completion because every required TaskContract criterion has verified evidence.', input),
+          missingCriteria,
+          blockers,
+          workflowPhase,
+          evidenceIds: contractEvaluation.evidenceIds,
+        })
+      }
+      const genericMissing = contractEvaluation.criteria.filter((criterion) => !criterion.passed)
+      missingCriteria.push(...genericMissing.map((criterion) => ({
+        id: criterion.id,
+        kind: 'evidence_required' as const,
+        description: criterion.id,
+        evidenceKinds: [],
+        missingEvidenceKinds: [],
+        evidenceIds: criterion.evidenceIds,
+        reason: criterion.reason,
+      })))
+      const externalBlocker = input.page?.pageType === 'login' || input.page?.pageType === 'captcha' || blockers.some(isExternalCompletionBlocker)
+      return decision({
+        action: input.blocked && externalBlocker ? 'block' : 'reject',
+        recommendedStatus: input.blocked && externalBlocker ? 'blocked' : 'unchanged',
+        reason: completionReason(`PREMATURE_AGENT_DONE_REJECTED. TaskContract criteria are missing: ${contractEvaluation.missingCriteria.join(', ')}.`, input),
+        missingCriteria,
+        blockers,
+        workflowPhase,
+        evidenceIds: contractEvaluation.evidenceIds,
       })
     }
 
@@ -211,6 +275,19 @@ export class CompletionGate {
 }
 
 export const completionGate = new CompletionGate()
+
+function completionFormState(input: CompletionGateInput) {
+  const coverage = input.formCoverage ?? input.form?.formCoverage ?? input.workflowState?.formCoverage
+  const fields = input.form?.fields ?? []
+  const required = fields.filter((field) => field.required && field.disabled !== true && field.readonly !== true)
+  const filled = required.filter((field) => field.filled === true)
+  return {
+    audited: coverage?.scope === 'full_audit' && coverage.complete === true && coverage.fieldLimitReached !== true,
+    requiredFieldCoverage: required.length ? filled.length / required.length : coverage?.complete === true ? 1 : 0,
+    visibleErrorCount: (input.form?.visibleErrors ?? []).filter((value) => /\S/.test(value)).length,
+    submitted: input.page?.pageType === 'confirmation',
+  }
+}
 
 function decision(input: Omit<CompletionGateDecision, 'schemaVersion'>): CompletionGateDecision {
   return {

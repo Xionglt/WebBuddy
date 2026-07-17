@@ -2,7 +2,7 @@ import type { AgentRuntimeEvent, AgentRuntimeLlm, AgentSafetyMode, AgentStopReas
 import type { HumanGate } from '../sdk/human.js'
 import type { LlmGateway } from '../sdk/llm.js'
 import type { PermissionMode } from '../permission/index.js'
-import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
+import type { LegacyProfileInput, ProfileStore, StructuredProfileInput } from '../context/profile-store.js'
 import type { SessionRecorder } from '../session/index.js'
 import { runAgentLoop, type AgentEvent, type AgentLoopResult } from '../runtime/local/agent-loop.js'
 import { ToolRegistry, type ToolContext } from '../runtime/local/tool-registry.js'
@@ -21,11 +21,16 @@ import {
   type TurnStateSnapshot,
 } from './turn-state.js'
 import { createTokenBudgetSnapshot, type TokenBudgetSnapshot } from './token-budget.js'
+import type { ContextItem, TaskContract } from '../task/contracts.js'
 
 export interface QueryLoopInput {
   goal: string
-  resume: ResumeProfile
-  resumeV2?: ResumeProfileV2
+  contextItems?: ContextItem[]
+  profileStore?: ProfileStore
+  /** @deprecated Recruiting compatibility input. */
+  resume?: LegacyProfileInput
+  /** @deprecated Recruiting compatibility input. */
+  resumeV2?: StructuredProfileInput
   llm: AgentRuntimeLlm
   registry?: ToolRegistry
   ctx: ToolContext
@@ -36,6 +41,7 @@ export interface QueryLoopInput {
   extraContext?: string
   safetyMode?: AgentSafetyMode
   taskType?: WebBuddyTaskType
+  taskContract?: TaskContract
   permissionMode?: PermissionMode
   allowFinalSubmit?: boolean
   session?: SessionRecorder
@@ -75,6 +81,8 @@ export class QueryLoop {
     try {
       const loopResult = await runAgentLoop({
         goal: input.goal,
+        contextItems: input.contextItems,
+        profileStore: input.profileStore,
         resume: input.resume,
         resumeV2: input.resumeV2,
         llm: input.llm as LlmGateway,
@@ -89,6 +97,7 @@ export class QueryLoop {
         extraContext: input.extraContext,
         safetyMode: input.safetyMode,
         taskType: input.taskType,
+        taskContract: input.taskContract,
         permissionMode: input.permissionMode,
         allowFinalSubmit: input.allowFinalSubmit,
         session: input.session,

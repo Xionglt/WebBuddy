@@ -94,7 +94,8 @@ const snapshot = {
     formStateStale: false,
     staleAfterMs: 30_000,
   },
-  resumeSummary: 'name: Zhang San\nemail: zhangsan@example.com',
+  contextItems: [],
+  contextSummary: 'name: Zhang San\nemail: zhangsan@example.com',
   recentActions: [
     {
       step: 1,
@@ -127,9 +128,9 @@ const sections = buildPromptSections(snapshot, {
 
 assert.deepEqual(sections.map((section) => section.id), PROMPT_SECTION_ORDER, 'prompt section order must be stable')
 assert.deepEqual(
-  PROMPT_SECTION_ORDER.slice(0, 8),
-  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'RUN_MEMORY', 'RELEVANT_MEMORIES', 'RESUME_SUMMARY'],
-  'RELEVANT_MEMORIES should render after RUN_MEMORY and before RESUME_SUMMARY',
+  PROMPT_SECTION_ORDER.slice(0, 9),
+  ['SYSTEM_ROLE', 'SAFETY_RULES', 'TASK', 'TASK_STATE', 'WORKFLOW_STATE', 'AGENT_TASKS', 'RUN_MEMORY', 'RELEVANT_MEMORIES', 'CONTEXT_ITEMS'],
+  'CONTEXT_ITEMS should render after AGENT_TASKS, RUN_MEMORY, and RELEVANT_MEMORIES',
 )
 assert.equal(
   PROMPT_SECTION_ORDER.indexOf('FILL_PLAN'),

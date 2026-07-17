@@ -1,6 +1,6 @@
 import { getActiveTrace } from '../agent-trace/index.js'
 import { measurePromptSections, type ContextSelectionMetrics } from '../context/metrics.js'
-import { contextManager, summarizeResumeProfile } from '../context/context-manager.js'
+import { contextManager } from '../context/context-manager.js'
 import {
   buildPromptSections,
   renderPromptSections,
@@ -12,6 +12,7 @@ import type { ContextRecentAction, ContextSnapshot, PromptSection } from '../con
 import { loadSkills, resolveSkills, renderSkillPromptSection } from '../skills/index.js'
 import { createDefaultTaskState } from '../task/task-state.js'
 import type { AgentSafetyMode, PromptAssemblerInput } from './types.js'
+import { renderContextItemsForPrompt } from '../task/context-provider.js'
 
 export function safetyNotesFor(mode: AgentSafetyMode = 'guarded'): string[] {
   if (mode === 'raw') {
@@ -45,7 +46,8 @@ export class PromptAssembler {
     const snapshot = await contextManager.createSnapshot({
       sessionId: input.ctx.sessionId,
       goal: input.goal,
-      resumeSummary: summarizeResumeProfile(input.resume),
+      contextItems: input.contextItems,
+      contextSummary: renderContextItemsForPrompt(input.contextItems ?? []),
       recentActions,
       blockers,
       extraContext: input.extraContext,

@@ -7,6 +7,7 @@ import type { FillLedgerSummary } from '../fill/fill-ledger.js'
 import type { WorkflowState } from '../workflow/workflow-state.js'
 import type { RunMemory } from './run-memory.js'
 import type { ResolvedSkillContext } from '../skills/types.js'
+import type { ContextItem } from '../task/contracts.js'
 
 export type MaybePromise<T> = T | Promise<T>
 
@@ -53,7 +54,8 @@ export interface ContextSnapshot {
   /** Bounded control-plane summary of background work; never includes child ReAct history. */
   agentTasks?: string
   freshness: ContextFreshness
-  resumeSummary: string
+  contextItems: ContextItem[]
+  contextSummary: string
   recentActions: ContextRecentAction[]
   safetyNotes: string[]
   resolvedSkillContext?: ResolvedSkillContext
@@ -65,7 +67,8 @@ export interface ContextSnapshot {
 export interface ContextSnapshotInput {
   sessionId: string
   goal: string
-  resumeSummary: string
+  contextItems?: ContextItem[]
+  contextSummary?: string
   recentActions?: ContextRecentAction[]
   safetyNotes?: string[]
   resolvedSkillContext?: ResolvedSkillContext
@@ -91,7 +94,7 @@ export type PromptSectionId =
   | 'AGENT_TASKS'
   | 'RUN_MEMORY'
   | 'RELEVANT_MEMORIES'
-  | 'RESUME_SUMMARY'
+  | 'CONTEXT_ITEMS'
   | 'CURRENT_PAGE_STATE'
   | 'CURRENT_FORM_STATE'
   | 'FILL_PLAN'

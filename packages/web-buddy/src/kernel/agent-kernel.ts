@@ -5,7 +5,7 @@ import type {
 } from '../agent/types.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import type { HumanGate } from '../sdk/human.js'
-import type { ResumeProfile, ResumeProfileV2 } from '../sdk/resume.js'
+import type { LegacyProfileInput, ProfileStore, StructuredProfileInput } from '../context/profile-store.js'
 import type { SessionRecorder } from '../session/index.js'
 import { ToolRegistry, type ToolContext } from '../runtime/local/tool-registry.js'
 import type { KernelEvent, KernelEventType } from './kernel-events.js'
@@ -16,11 +16,16 @@ import {
   type AgentRunController,
 } from './run-controller.js'
 import { createTurnStateSnapshot } from './turn-state.js'
+import type { ContextItem, TaskContract } from '../task/contracts.js'
 
 export interface AgentKernelInput {
   goal: string
-  resume: ResumeProfile
-  resumeV2?: ResumeProfileV2
+  contextItems?: ContextItem[]
+  profileStore?: ProfileStore
+  /** @deprecated Recruiting compatibility input. */
+  resume?: LegacyProfileInput
+  /** @deprecated Recruiting compatibility input. */
+  resumeV2?: StructuredProfileInput
   llm: AgentRuntimeLlm
   registry?: ToolRegistry
   ctx: ToolContext
@@ -31,6 +36,7 @@ export interface AgentKernelInput {
   extraContext?: string
   safetyMode?: AgentSafetyMode
   taskType?: WebBuddyTaskType
+  taskContract?: TaskContract
   session?: SessionRecorder
   controller?: AgentRunController
 }

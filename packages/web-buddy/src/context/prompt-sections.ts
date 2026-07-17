@@ -17,7 +17,7 @@ export const PROMPT_SECTION_ORDER: PromptSectionId[] = [
   'AGENT_TASKS',
   'RUN_MEMORY',
   'RELEVANT_MEMORIES',
-  'RESUME_SUMMARY',
+  'CONTEXT_ITEMS',
   'CURRENT_PAGE_STATE',
   'CURRENT_FORM_STATE',
   'FILL_PLAN',
@@ -44,7 +44,7 @@ const DEFAULT_SECTION_MAX_CHARS: Record<PromptSectionId, number> = {
   AGENT_TASKS: 1600,
   RUN_MEMORY: 1400,
   RELEVANT_MEMORIES: 900,
-  RESUME_SUMMARY: 2200,
+  CONTEXT_ITEMS: 8000,
   CURRENT_PAGE_STATE: 1800,
   CURRENT_FORM_STATE: 2800,
   FILL_PLAN: 1800,
@@ -61,7 +61,7 @@ const SECTION_TITLES: Record<PromptSectionId, string> = {
   AGENT_TASKS: 'AGENT_TASKS',
   RUN_MEMORY: 'RUN_MEMORY',
   RELEVANT_MEMORIES: 'RELEVANT_MEMORIES',
-  RESUME_SUMMARY: 'RESUME_SUMMARY',
+  CONTEXT_ITEMS: 'CONTEXT_ITEMS',
   CURRENT_PAGE_STATE: 'CURRENT_PAGE_STATE',
   CURRENT_FORM_STATE: 'CURRENT_FORM_STATE',
   FILL_PLAN: 'FILL_PLAN',
@@ -128,8 +128,8 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
       return renderRunMemory(snapshot.runMemory)
     case 'RELEVANT_MEMORIES':
       return snapshot.relevantMemories || '(no relevant long-term memories selected for this turn)'
-    case 'RESUME_SUMMARY':
-      return snapshot.resumeSummary || '(no resume summary provided)'
+    case 'CONTEXT_ITEMS':
+      return snapshot.contextSummary || '(no governed context items selected for this turn)'
     case 'CURRENT_PAGE_STATE':
       return renderPageState(snapshot.page, snapshot.freshness)
     case 'CURRENT_FORM_STATE':
@@ -488,7 +488,7 @@ function fitSectionsToTotal(sections: PromptSection[], totalMaxChars?: number): 
     'FILL_PLAN',
     'CURRENT_PAGE_STATE',
     'CURRENT_FORM_STATE',
-    'RESUME_SUMMARY',
+    'CONTEXT_ITEMS',
     'WORKFLOW_STATE',
     'TASK_STATE',
     'TASK',

@@ -96,7 +96,8 @@ try {
       formStateStale: true,
       staleAfterMs: 30_000,
     },
-    resumeSummary: 'name: Zhang San\nemail: zhangsan@example.com',
+    contextItems: [],
+    contextSummary: 'name: Zhang San\nemail: zhangsan@example.com',
     recentActions: [
       recent(1, 'browser_snapshot', 'ok', 'Initial page snapshot.'),
       recent(2, 'browser_click', 'warn', 'Opened the application form.', 'L3'),

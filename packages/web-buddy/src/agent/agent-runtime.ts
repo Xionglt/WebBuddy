@@ -21,6 +21,8 @@ export class AgentRuntime {
     const registry = input.registry ?? new ToolRegistry()
     const kernelResult = await this.kernel.start({
       goal: input.goal,
+      contextItems: input.contextItems,
+      profileStore: input.profileStore,
       resume: input.resume,
       resumeV2: input.resumeV2,
       llm: input.llm,
@@ -33,6 +35,7 @@ export class AgentRuntime {
       extraContext: input.extraContext,
       safetyMode: input.safetyMode,
       taskType: input.taskType,
+      taskContract: input.taskContract,
       session: input.session,
       controller: input.controller,
     })
