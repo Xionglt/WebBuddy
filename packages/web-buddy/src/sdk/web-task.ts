@@ -11,6 +11,7 @@ import { listLocalToolDefs } from '../tools/catalog.js'
 import { emptyRunMetrics } from '../metrics/schema.js'
 import { generateAndWriteMetrics } from '../metrics/writer.js'
 import { evaluateCompletionContract } from '../task/completion-contract.js'
+import { classifyContentSecurity, toContextSecurityFields } from '../security/content-trust.js'
 import {
   WebTaskContractError,
   isContextItemEligible,
@@ -87,7 +88,8 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     contextItems = await resolveContextItems(input, runId, revision)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message), data: { code: 'PROVIDER_FAILED' } })
+    const code = error instanceof WebTaskContractError ? error.code : 'PROVIDER_FAILED'
+    emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message), data: { code } })
     return failedResult(input, runId, revision, message)
   }
 
@@ -175,12 +177,39 @@ async function resolveContextItems(input: WebTaskInput, runId: string, revision:
       throw new WebTaskContractError('PROVIDER_FAILED', `Context provider ${provider.id} failed: ${error instanceof Error ? error.message : String(error)}`)
     }
     if (!Array.isArray(items)) throw new WebTaskContractError('PROVIDER_FAILED', `Context provider ${provider.id} did not return an array.`)
-    for (const item of items) validateContextItem(item)
     resolved.push(...items)
   }
   const ids = resolved.map((item) => item.id)
   if (new Set(ids).size !== ids.length) throw new WebTaskContractError('INVALID_CONTRACT', 'Context item IDs must be unique after provider resolution.')
-  return resolved.filter((item) => isContextItemEligible(item))
+  return resolved.map(secureContextItem).filter((item) => isContextItemEligible(item))
+}
+
+function secureContextItem(item: ContextItem): ContextItem {
+  if (!item || typeof item !== 'object') {
+    throw new WebTaskContractError('INVALID_CONTRACT', 'Context providers must return ContextItem objects.')
+  }
+  const metadata = classifyContentSecurity({
+    contentId: item.id,
+    origin: item.origin,
+    trust: item.trust,
+    sensitivity: item.sensitivity,
+    provenance: item.provenance,
+  })
+  if (metadata.origin === 'system' || metadata.trust === 'trusted_runtime') {
+    throw new WebTaskContractError(
+      'INVALID_CONTRACT',
+      `Context ${item.id}: external WebTask inputs and providers cannot supply trusted system context.`,
+    )
+  }
+  if (metadata.classification.status === 'fail_closed') {
+    throw new WebTaskContractError(
+      'INVALID_CONTRACT',
+      `Context ${item.id} failed security classification: ${metadata.classification.reasons.join(', ')}.`,
+    )
+  }
+  const secured: ContextItem = { ...item, ...toContextSecurityFields(metadata) }
+  validateContextItem(secured)
+  return secured
 }
 
 const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {

@@ -62,6 +62,41 @@ assert.throws(
   /subagent context must be non_authoritative/,
 )
 
+for (const [field, value] of [
+  ['origin', 'remote_frame'],
+  ['trust', 'root'],
+  ['sensitivity', 'probably_public'],
+]) {
+  assert.throws(
+    () => validateContextItem(contextItem({ id: `unknown-${field}`, [field]: value })),
+    new RegExp(`${field} is unsupported`),
+  )
+}
+
+for (const [origin, trust] of [
+  ['system', 'user_authorized'],
+  ['user', 'trusted_runtime'],
+  ['web', 'trusted_runtime'],
+  ['tool', 'user_authorized'],
+  ['download', 'trusted_runtime'],
+  ['memory', 'trusted_runtime'],
+  ['artifact', 'trusted_runtime'],
+  ['derived', 'trusted_runtime'],
+]) {
+  assert.throws(
+    () => validateContextItem(contextItem({
+      id: `forged-${origin}-trust`,
+      origin,
+      trust,
+      instructionAuthority: 'data_only',
+      ...(origin === 'memory'
+        ? { memory: { schemaVersion: 'memory-binding/v1', memoryId: 'forged-memory', revision: 0, scope: 'run', status: 'active', supersedesIds: [], conflictIds: [] } }
+        : {}),
+    })),
+    /trust is invalid for origin/,
+  )
+}
+
 const forgotten = contextItem({
   id: 'forgotten-memory',
   origin: 'memory',

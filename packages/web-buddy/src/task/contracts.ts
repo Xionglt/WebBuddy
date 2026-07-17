@@ -15,6 +15,12 @@ export type ContextUse = 'prompt' | 'trace' | 'artifact' | 'memory' | 'subagent'
 export type SensitiveActionKind = 'navigate' | 'type_or_paste' | 'upload' | 'send' | 'publish' | 'submit' | 'payment' | 'memory_write' | 'permission_write'
 export type EvidenceAuthority = 'main_runtime' | 'user' | 'page_claim' | 'subagent_advisory'
 
+const CONTEXT_ORIGINS = ['system', 'user', 'web', 'tool', 'download', 'artifact', 'memory', 'subagent', 'derived'] as const satisfies readonly ContentOrigin[]
+const CONTEXT_TRUST_LEVELS = ['trusted_runtime', 'user_authorized', 'untrusted_external', 'derived_untrusted', 'non_authoritative'] as const satisfies readonly ContentTrust[]
+const CONTEXT_SENSITIVITY_LEVELS = ['public', 'internal', 'personal', 'auth', 'secret'] as const satisfies readonly ContentSensitivity[]
+const INSTRUCTION_AUTHORITIES = ['system_policy', 'user_goal', 'advisory', 'data_only'] as const satisfies readonly InstructionAuthority[]
+const CONTEXT_USES = ['prompt', 'trace', 'artifact', 'memory', 'subagent', 'sink'] as const satisfies readonly ContextUse[]
+
 export interface OwnerScope {
   schemaVersion: 'owner-scope/v1'
   tenantId?: string
@@ -557,13 +563,20 @@ export function validateContextItem(item: ContextItem): void {
   nonEmpty(item.id, 'contextItem.id')
   nonEmpty(item.kind, 'contextItem.kind')
   validateJsonValue(item.content, `${item.id}.content`)
-  if (!item.allowedUses.length) invalid(`${item.id}.allowedUses must be non-empty.`)
+  enumValue(item.origin, CONTEXT_ORIGINS, `${item.id}.origin`)
+  enumValue(item.trust, CONTEXT_TRUST_LEVELS, `${item.id}.trust`)
+  enumValue(item.instructionAuthority, INSTRUCTION_AUTHORITIES, `${item.id}.instructionAuthority`)
+  enumValue(item.sensitivity, CONTEXT_SENSITIVITY_LEVELS, `${item.id}.sensitivity`)
+  if (!Array.isArray(item.allowedUses) || !item.allowedUses.length) invalid(`${item.id}.allowedUses must be non-empty.`)
+  for (const use of item.allowedUses) enumValue(use, CONTEXT_USES, `${item.id}.allowedUses`)
+  unique(item.allowedUses, `${item.id} allowed use`)
+  if (item.origin === 'subagent' && item.trust !== 'non_authoritative') invalid(`${item.id}: subagent context must be non_authoritative.`)
+  if (!isTrustAllowedForContextOrigin(item.origin, item.trust)) invalid(`${item.id}: trust is invalid for origin ${item.origin}.`)
   if (item.origin === 'memory' && !item.memory) invalid(`${item.id}.memory is required for memory-origin context.`)
   if (item.origin !== 'memory' && item.memory) invalid(`${item.id}.memory is only valid for memory-origin context.`)
   if (item.sensitivity === 'secret' && item.allowedUses.includes('prompt')) invalid(`${item.id}: secret context cannot allow prompt use.`)
   if (item.sensitivity === 'secret' && item.retention.scope === 'project') invalid(`${item.id}: secret context cannot use project retention.`)
   if (['web', 'tool', 'download', 'memory', 'subagent'].includes(item.origin) && ['system_policy', 'user_goal'].includes(item.instructionAuthority)) invalid(`${item.id}: untrusted/data origins cannot have instruction authority.`)
-  if (item.origin === 'subagent' && item.trust !== 'non_authoritative') invalid(`${item.id}: subagent context must be non_authoritative.`)
   if (item.sanitization.status === 'quarantined' || item.sanitization.status === 'rejected') {
     if (item.allowedUses.includes('prompt') || item.allowedUses.includes('sink')) invalid(`${item.id}: quarantined/rejected context cannot enter prompt or sink.`)
   }
@@ -649,6 +662,20 @@ function validateMemoryBinding(memory: MemoryBinding, id: string): void {
   if (memory.schemaVersion !== 'memory-binding/v1') unsupported('MemoryBinding', memory.schemaVersion)
   nonEmpty(memory.memoryId, `${id}.memory.memoryId`)
   integer(memory.revision, `${id}.memory.revision`)
+}
+
+function isTrustAllowedForContextOrigin(origin: ContentOrigin, trust: ContentTrust): boolean {
+  if (origin === 'system') return trust === 'trusted_runtime'
+  if (origin === 'user') return trust === 'user_authorized'
+  if (origin === 'subagent') return trust === 'non_authoritative'
+  if (origin === 'web' || origin === 'tool' || origin === 'download' || origin === 'memory') {
+    return trust === 'untrusted_external' || trust === 'derived_untrusted' || trust === 'non_authoritative'
+  }
+  return trust === 'derived_untrusted' || trust === 'non_authoritative'
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[], path: string): asserts value is T {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) invalid(`${path} is unsupported: ${String(value)}.`)
 }
 
 function validateStartUrl(value: string): void {
