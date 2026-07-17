@@ -125,6 +125,13 @@
   .risk-title { display: flex; gap: 6px; align-items: center; min-width: 0; }
   .risk-title .tool { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .risk-meta { color: var(--muted); font-family: var(--mono); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+  .control-list { border: 1px solid var(--soft); border-radius: 7px; overflow: hidden; }
+  .control-row { padding: 8px; border-bottom: 1px solid var(--soft); cursor: pointer; }
+  .control-row:last-child { border-bottom: 0; }
+  .control-row:hover { background: #f4f6f8; }
+  .control-row .meta { color: var(--muted); font: 10px/1.4 var(--mono); overflow-wrap: anywhere; }
+  .control-links { display: flex; gap: 10px; margin-top: 7px; }
+  .control-links a { color: var(--blue); text-decoration: none; font-size: 11px; }
   .chip.risk-high { color: var(--amber); background: #fff3d9; }
   .chip.risk-critical { color: var(--red); background: #fff0ef; }
   .chip.decision-auto_allow { color: var(--green); background: #e8f7ef; }
@@ -208,6 +215,8 @@
     <div class="actions">
       <button class="btn primary" id="runBtn">Run Agent</button>
       <button class="btn secondary" id="refreshBtn">Refresh Trace</button>
+      <button class="btn secondary" id="pauseBtn" disabled>Pause</button>
+      <button class="btn secondary" id="resumeBtn" disabled>Resume</button>
       <button class="btn danger" id="stopBtn" disabled>Stop</button>
     </div>
   </aside>
@@ -235,6 +244,18 @@
         <div>Trace path</div><div class="mono" id="tracePath">-</div>
         <div>Spans</div><div class="mono" id="spanCount">0</div>
       </div>
+      <div class="control-links">
+        <a id="traceLink" href="#" target="_blank">Trace API</a>
+        <a id="artifactLink" href="#" target="_blank">Artifacts API</a>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Tasks</h2>
+      <div id="runList" class="control-list"><div class="metric-empty" style="padding:8px">No durable runs.</div></div>
+    </div>
+    <div class="panel">
+      <h2>Approval Inbox</h2>
+      <div id="approvalList" class="control-list"><div class="metric-empty" style="padding:8px">No pending approvals.</div></div>
     </div>
     <div class="panel">
       <h2>Metrics</h2>
@@ -295,7 +316,7 @@ const RUNTIMES = {
     runPath: '/api/run',
     eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
     tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
-    stopPath: () => '/api/stop',
+    stopPath: (id) => `/api/runs/${encodeURIComponent(id)}/cancel`,
   },
   'web-buddy-match': {
     label: 'Web Buddy Match',
@@ -303,7 +324,7 @@ const RUNTIMES = {
     runPath: '/api/run',
     eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
     tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
-    stopPath: () => '/api/stop',
+    stopPath: (id) => `/api/runs/${encodeURIComponent(id)}/cancel`,
   },
 };
 
@@ -351,6 +372,9 @@ function updateRunMeta(extra = {}) {
   $('runRuntime').textContent = extra.runtime || info.label;
   $('runMode').textContent = extra.mode || activeMode || runtimeMode();
   $('runIdPanel').textContent = extra.runId || runId || '-';
+  const selected = extra.runId || runId;
+  $('traceLink').href = selected ? `/api/runs/${encodeURIComponent(selected)}/trace` : '#';
+  $('artifactLink').href = selected ? `/api/runs/${encodeURIComponent(selected)}/artifacts` : '#';
 }
 
 function setStatus(value) {
@@ -601,6 +625,8 @@ function closeStream() {
 function setRunControls(running) {
   $('runBtn').disabled = running;
   $('stopBtn').disabled = !running;
+  $('pauseBtn').disabled = !running;
+  $('resumeBtn').disabled = true;
   document.querySelectorAll('#runtimeSeg button').forEach((button) => { button.disabled = running; });
   document.querySelectorAll('#presetSeg button').forEach((button) => { button.disabled = running; });
 }
@@ -696,8 +722,10 @@ $('runBtn').addEventListener('click', async () => {
         updateRunMeta({ runtime: displayRuntime(event.runtime), mode: event.mode || mode, runId });
         setStatus(finalStatusForEnd(event));
         setRunControls(false);
+        $('resumeBtn').disabled = !(event.state === 'paused' || event.state === 'blocked_on_human' || event.state === 'recoverable');
         closeStream();
         refreshTrace().catch(() => {});
+        refreshControlPlane().catch(() => {});
         return;
       }
       addEvent(event);
@@ -718,6 +746,8 @@ $('runBtn').addEventListener('click', async () => {
 });
 
 function finalStatusForEnd(event) {
+  if (event.state === 'failed' || event.state === 'cancelled') return event.state === 'failed' ? 'failed' : 'done';
+  if (event.state === 'paused' || event.state === 'blocked_on_human' || event.state === 'recoverable') return 'blocked';
   if (event.exitCode !== undefined) return event.exitCode === 0 ? 'done' : 'failed';
   if (event.finalState === 'error') return 'failed';
   if (event.finalState === 'blocked' || event.finalState === 'login_required' || event.finalState === 'direct_submit_review' || event.finalState === 'stopped_at_submit') return 'blocked';
@@ -729,12 +759,105 @@ $('stopBtn').addEventListener('click', async () => {
   await api(activeRuntimeInfo().stopPath(runId), { method: 'POST' });
 });
 
+$('pauseBtn').addEventListener('click', async () => {
+  if (!runId) return;
+  await api(`/api/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST' });
+  $('pauseBtn').disabled = true;
+  addEvent({ level: 'gate', phase: 'control', message: 'Pause requested; waiting for a safe turn boundary.' });
+});
+
+$('resumeBtn').addEventListener('click', async () => {
+  if (!runId) return;
+  try {
+    await api(`/api/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
+    setStatus('running');
+    setRunControls(true);
+  } catch (error) {
+    addEvent({ level: 'warn', phase: 'control', message: error.message || String(error) });
+  }
+});
+
+async function refreshControlPlane() {
+  const [runs, approvals] = await Promise.all([api('/api/runs?limit=25'), api('/api/approvals?limit=25')]);
+  renderRunList(runs.items || []);
+  renderApprovalList(approvals.items || []);
+}
+
+function renderRunList(items) {
+  const root = $('runList');
+  root.innerHTML = '';
+  if (!items.length) {
+    root.innerHTML = '<div class="metric-empty" style="padding:8px">No durable runs.</div>';
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'control-row';
+    const title = document.createElement('div');
+    title.textContent = `${item.state} · ${item.inputSnapshot?.goal?.metadata?.mode || 'web'}`;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${item.runId} · r${item.runRevision}/a${item.attempt}`;
+    row.append(title, meta);
+    row.addEventListener('click', () => {
+      runId = item.runId;
+      $('runId').textContent = runId;
+      setStatus(item.state === 'running' || item.state === 'resuming' ? 'running'
+        : item.state === 'failed' ? 'failed'
+          : item.state === 'paused' || item.state === 'blocked_on_human' || item.state === 'recoverable' ? 'blocked' : item.state);
+      updateRunMeta({ runId, mode: item.inputSnapshot?.goal?.metadata?.mode });
+      $('resumeBtn').disabled = !(item.state === 'paused' || item.state === 'blocked_on_human' || item.state === 'recoverable');
+      refreshTrace().catch(() => {});
+    });
+    root.appendChild(row);
+  }
+}
+
+function renderApprovalList(items) {
+  const root = $('approvalList');
+  root.innerHTML = '';
+  if (!items.length) {
+    root.innerHTML = '<div class="metric-empty" style="padding:8px">No pending approvals.</div>';
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'control-row';
+    const title = document.createElement('div');
+    title.textContent = item.actionBinding?.toolName || item.actionBinding?.actionId || item.approvalId;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${item.runId} · ${item.actionBinding?.destinationOrigin || 'local'}`;
+    const actions = document.createElement('div');
+    actions.className = 'control-links';
+    for (const decision of ['approved', 'denied']) {
+      const button = document.createElement('button');
+      button.className = `btn ${decision === 'approved' ? 'secondary' : 'danger'}`;
+      button.textContent = decision === 'approved' ? 'Approve' : 'Deny';
+      button.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        await api(`/api/approvals/${encodeURIComponent(item.approvalId)}/resolve`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ decision, expectedRecordRevision: item.recordRevision }),
+        });
+        await refreshControlPlane();
+      });
+      actions.appendChild(button);
+    }
+    row.append(title, meta, actions);
+    root.appendChild(row);
+  }
+}
+
 $('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => addEvent({ level: 'error', phase: 'trace', message: error.message })));
 
 loadConfig().catch((error) => {
   setStatus('failed');
   addEvent({ level: 'error', phase: 'config', message: error.message });
 });
+refreshControlPlane().catch(() => {});
+setInterval(() => refreshControlPlane().catch(() => {}), 5000);
 </script>
 </body>
 </html>

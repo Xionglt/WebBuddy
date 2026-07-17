@@ -16,7 +16,7 @@ import type { ContextItem, TaskContract, TaskPolicy } from '../task/contracts.js
 
 export type AgentSafetyMode = 'guarded' | 'raw'
 
-export type AgentStopReason = 'agent_done' | 'blocked' | 'step_budget' | 'llm_error' | 'aborted' | 'unknown'
+export type AgentStopReason = 'agent_done' | 'blocked' | 'paused' | 'step_budget' | 'llm_error' | 'aborted' | 'unknown'
 
 export type AgentRuntimeEventLevel = 'think' | 'risk' | 'decision' | 'act' | 'observe' | 'gate' | 'warn' | 'error' | 'done'
 

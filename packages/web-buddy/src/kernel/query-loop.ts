@@ -104,6 +104,7 @@ export class QueryLoop {
         allowFinalSubmit: input.allowFinalSubmit,
         session: input.session,
         abortSignal: controller.signal,
+        shouldPause: () => controller.pauseRequested,
       })
 
       const status = statusForLoopResult(loopResult, controller)
@@ -209,6 +210,7 @@ function markController(controller: AgentRunController, status: AgentKernelStatu
 function inferStopReason(result: AgentLoopResult, status: AgentKernelStatus, maxSteps?: number): AgentStopReason {
   const summary = result.summary.toLowerCase()
   if (status === 'aborted') return 'aborted'
+  if (result.paused) return 'paused'
   if (summary.includes('llm error')) return 'llm_error'
   if (result.blocked) return 'blocked'
   if (status === 'blocked' && !summary.includes('step budget')) return 'blocked'

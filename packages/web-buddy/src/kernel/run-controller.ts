@@ -10,7 +10,10 @@ export interface AgentRunController {
   readonly signal: AbortSignal
   readonly status: AgentKernelStatus
   readonly reason?: string
+  readonly pauseRequested: boolean
   abort(reason?: string): void
+  requestPause(reason?: string): void
+  clearPauseRequest(): void
   markRunning(): void
   markBlocked(reason?: string): void
   markCompleted(): void
@@ -21,6 +24,7 @@ export class DefaultAgentRunController implements AgentRunController {
   private readonly controller = new AbortController()
   private currentStatus: AgentKernelStatus = 'idle'
   private currentReason: string | undefined
+  private currentPauseRequested = false
 
   get signal(): AbortSignal {
     return this.controller.signal
@@ -34,6 +38,10 @@ export class DefaultAgentRunController implements AgentRunController {
     return this.currentReason
   }
 
+  get pauseRequested(): boolean {
+    return this.currentPauseRequested
+  }
+
   abort(reason = 'Abort requested.'): void {
     this.currentStatus = 'aborted'
     this.currentReason = reason
@@ -42,10 +50,21 @@ export class DefaultAgentRunController implements AgentRunController {
     }
   }
 
+  requestPause(reason = 'Pause requested.'): void {
+    if (this.currentStatus === 'completed' || this.currentStatus === 'failed' || this.currentStatus === 'aborted') return
+    this.currentPauseRequested = true
+    this.currentReason = reason
+  }
+
+  clearPauseRequest(): void {
+    this.currentPauseRequested = false
+    if (this.currentStatus === 'running') this.currentReason = undefined
+  }
+
   markRunning(): void {
     if (this.currentStatus === 'aborted') return
     this.currentStatus = 'running'
-    this.currentReason = undefined
+    if (!this.currentPauseRequested) this.currentReason = undefined
   }
 
   markBlocked(reason?: string): void {

@@ -199,6 +199,8 @@ export interface AgentLoopInput {
   restoredAsyncTaskPromptAttachments?: TaskNotificationPromptAttachmentV1[]
   /** Optional kernel/run-controller abort signal. Checked before model/tool work. */
   abortSignal?: AbortSignal
+  /** Cooperative pause probe. A true value stops only at a safe turn boundary. */
+  shouldPause?: () => boolean
   /** Optional execution service for tests or alternate local runtimes. */
   toolExecutionService?: ToolExecutionService
   /** Optional permission decision service for tests or alternate runtimes. */
@@ -244,6 +246,7 @@ export interface AgentLoopResult {
   toolCalls: number
   done: boolean
   blocked: boolean
+  paused?: boolean
   summary: string
   workflowState?: WorkflowState
   evidence?: EvidenceRef[]
@@ -1012,6 +1015,28 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     if (!input.abortSignal?.aborted) return undefined
     return abortRun(turnId)
   }
+  const pauseAtSafeBoundary = async (turnId?: string): Promise<AgentLoopResult | undefined> => {
+    if (!input.shouldPause?.()) return undefined
+    summary = 'Run paused at a safe turn boundary.'
+    done = false
+    blocked = true
+    emit('gate', summary, step)
+    ctx.trace.record({ phase: 'agent_loop', action: summary, status: 'blocked' })
+    if (turnId) {
+      await sessionEvent({
+        type: 'turn_completed',
+        turnId,
+        message: `Turn ${step} paused after all scheduled tool work settled.`,
+        data: { done, blocked, paused: true },
+      })
+    }
+    await finalizeSession(
+      'blocked',
+      { steps: step, toolCalls, done, blocked, paused: true, summary, workflowState, runMemory: compactRunMemory(runMemory) },
+      summary,
+    )
+    return { steps: step, toolCalls, done, blocked, paused: true, summary, workflowState }
+  }
 
   await sessionStatus('running')
   await sessionEvent({
@@ -1338,6 +1363,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
 
   while (step < maxSteps) {
+    const pausedBeforeTurn = await pauseAtSafeBoundary()
+    if (pausedBeforeTurn) return pausedBeforeTurn
     step += 1
     const turnId = turnIdForStep(step)
     await sessionEvent({ type: 'turn_started', turnId, message: `Turn ${step} started.` })
@@ -2701,6 +2728,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     }
 
     await recordShadowPlanDiagnostic()
+
+    const pausedAfterTools = await pauseAtSafeBoundary(turnId)
+    if (pausedAfterTools) return pausedAfterTools
 
     if (!done) {
       latestContext = await refreshLoopContext('Context refresh updated prompt context.', step)

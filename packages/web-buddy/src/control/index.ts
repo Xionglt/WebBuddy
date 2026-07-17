@@ -7,4 +7,15 @@ export type {
   FileControlStoreFaultPoint,
   FileControlStoreOptions,
 } from './file-store.js'
+export {
+  ApprovalService,
+  RunService,
+  RunServiceError,
+  legalRunTransitions,
+} from './run-service.js'
+export type {
+  LateResultDecision,
+  LateResultInput,
+  TransitionRunInput,
+} from './run-service.js'
 export * from './store-contracts.js'

@@ -49,6 +49,7 @@ import { BackgroundToolBridge, createTraceSummarizationMappingV1 } from '../tool
 import { createLocalTools } from '../tools/local-adapter.js'
 import { listLocalToolDefs } from '../tools/catalog.js'
 import { runRecruitingCompatibilityTask } from '../scenarios/recruiting/adapter.js'
+import type { AgentRunController } from '../kernel/run-controller.js'
 
 /**
  * Unified local Web Agent orchestrator. One pipeline, plus safe demos:
@@ -135,6 +136,8 @@ export interface RunOptions {
   targetJobTitle?: string
   /** Builds the session-scoped async runtime with application-owned runners and Context Envelope providers. */
   asyncTaskRuntimeFactory?: (input: AsyncTaskRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
+  /** Cooperative run control used by the durable control plane. */
+  controller?: AgentRunController
 }
 
 export interface AsyncTaskRuntimeFactoryInput {
@@ -802,6 +805,8 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
         requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
         session: sessionRecorder,
+        abortSignal: options.controller?.signal,
+        shouldPause: () => options.controller?.pauseRequested ?? false,
       })
       await captureFinalScreenshot(sessionId, trace)
       const finalState: FinalState = loopResult.blocked
