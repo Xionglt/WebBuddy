@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "security-m4-b1/v1",
+  "actorScope": {
+    "tenantId": "tenant-a",
+    "userId": "user-a",
+    "runId": "run-a"
+  },
+  "foreignScopes": {
+    "tenant": {
+      "tenantId": "tenant-b",
+      "userId": "user-a",
+      "runId": "run-a"
+    },
+    "user": {
+      "tenantId": "tenant-a",
+      "userId": "user-b",
+      "runId": "run-a"
+    },
+    "run": {
+      "tenantId": "tenant-a",
+      "userId": "user-a",
+      "runId": "run-b"
+    }
+  },
+  "transformKinds": [
+    "summary",
+    "embedding",
+    "trace"
+  ],
+  "moduleCandidates": [
+    "memory-write-policy",
+    "memory-v2",
+    "memory-interface",
+    "memory-write-service",
+    "policy-enforced-memory"
+  ],
+  "writerFactoryCandidates": [
+    "createPolicyEnforcedMemoryWriter",
+    "createMemoryWriteService",
+    "createMemoryWriter"
+  ]
+}
