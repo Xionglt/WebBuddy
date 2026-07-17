@@ -48,6 +48,7 @@ import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
 import { BackgroundToolBridge, createTraceSummarizationMappingV1 } from '../tools/background-tool-bridge.js'
 import { createLocalTools } from '../tools/local-adapter.js'
 import { listLocalToolDefs } from '../tools/catalog.js'
+import { runRecruitingCompatibilityTask } from '../scenarios/recruiting/adapter.js'
 
 /**
  * Unified local Web Agent orchestrator. One pipeline, plus safe demos:
@@ -371,7 +372,12 @@ function legacyProfileToResumeV2Fallback(
   }
 }
 
+/** @deprecated Use runWebTask(). Kept for one compatibility cycle. */
 export async function runJobApplicationAgent(options: RunOptions = {}): Promise<AgentRunResult> {
+  return runRecruitingCompatibilityTask(options, runLegacyJobApplicationFlow)
+}
+
+async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<AgentRunResult> {
   const config = options.config ?? loadConfig()
   const mode: AgentMode = options.mode ?? 'fill'
   const taskType = options.taskType ?? defaultTaskTypeForMode(mode)
