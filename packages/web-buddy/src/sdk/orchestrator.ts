@@ -143,6 +143,8 @@ export interface RunOptions {
   controller?: AgentRunController
   /** Existing durable session to restore. Used only by fenced control-plane resume. */
   restoredSessionId?: string
+  /** Stable durable session id selected by an embedding control plane. */
+  sessionId?: string
   /** Called after the durable session is created/restored, before browser/model work. */
   onSessionReady?: (session: AgentSession) => void | Promise<void>
 }
@@ -415,6 +417,7 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
     goal: options.taskPrompt ?? defaultGoalForMode(mode),
     emit,
     restoredSessionId: options.restoredSessionId,
+    sessionId: options.sessionId,
   })
   const sessionRecorder = sessionSetup.recorder
   await options.onSessionReady?.(sessionRecorder.session)
@@ -1448,6 +1451,7 @@ async function createRunSession(args: {
   goal: string
   emit: (e: AgentEvent) => void
   restoredSessionId?: string
+  sessionId?: string
 }): Promise<{ recorder: SessionRecorder; restored?: RestoredSessionState }> {
   const store = new FileSessionStore({ rootDir: join(args.config.trace.outDir, 'sessions') })
   if (args.restoredSessionId) {
@@ -1466,6 +1470,7 @@ async function createRunSession(args: {
     }
   }
   const session = await store.create({
+    ...(args.sessionId ? { sessionId: args.sessionId } : {}),
     runId: args.trace.runId,
     source: sessionSourceFromRunSource(args.source),
     goal: args.goal,

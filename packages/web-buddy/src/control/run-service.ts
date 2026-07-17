@@ -225,6 +225,43 @@ export class RunService {
     return committed.record
   }
 
+  async setPendingApproval(
+    runId: string,
+    approvalId: string,
+    pending: boolean,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+  ): Promise<RunRecord> {
+    const current = await this.require(runId, scope)
+    const ids = new Set(current.pendingApprovalIds)
+    const changed = pending ? !ids.has(approvalId) : ids.delete(approvalId)
+    if (pending) ids.add(approvalId)
+    if (!changed) return current
+    const now = new Date().toISOString()
+    const record: RunRecord = {
+      ...current,
+      pendingApprovalIds: [...ids],
+      recordRevision: current.recordRevision + 1,
+      nextEventSequence: current.nextEventSequence + 1,
+      updatedAt: now,
+    }
+    const event = createRunEvent(record, {
+      eventType: 'reference_attached',
+      eventSequence: current.nextEventSequence,
+      recordRevisionBefore: current.recordRevision,
+      idempotencyKey,
+      occurredAt: now,
+      data: { referenceKind: 'approval', approvalId, pending },
+    })
+    const committed = await this.store.transact(runId, {
+      expectedRecordRevision: current.recordRevision,
+      record,
+      event,
+      idempotencyKey,
+    })
+    return committed.record
+  }
+
   async requestPause(runId: string, idempotencyKey: string, scope?: ScopedStoreQuery): Promise<RunRecord> {
     const current = await this.require(runId, scope)
     if (current.state === 'pausing' || current.state === 'paused') return current

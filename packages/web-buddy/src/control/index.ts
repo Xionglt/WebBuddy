@@ -20,4 +20,6 @@ export type {
 } from './run-service.js'
 export { RecoveryService } from './recovery-service.js'
 export type { RecoveryDecision, RecoveryServiceOptions } from './recovery-service.js'
+export { DurableHumanGate } from './durable-human-gate.js'
+export type { DurableHumanGateOptions } from './durable-human-gate.js'
 export * from './store-contracts.js'

@@ -93,6 +93,7 @@ import type { BackgroundToolBridgeV1 } from '../../tools/background-tool-bridge.
 import type { ToolCall } from '../../tools/tool-contract.js'
 import {
   digestCanonicalJson,
+  type ActionBinding,
   type ApprovalBinding,
   type ContextItem,
   type EvidenceRef,
@@ -306,7 +307,12 @@ interface RememberingHumanGate extends HumanGate {
     kind: GateKind,
     message: string,
     context: Parameters<HumanGate['confirm']>[2],
-    permission: { request: PermissionRequest; decision: PermissionDecision },
+    permission: {
+      request: PermissionRequest
+      decision: PermissionDecision
+      approval: ApprovalRequest
+      actionBinding?: ActionBinding
+    },
   ): Promise<GateDecision | PermissionGateResponse>
 }
 
@@ -950,7 +956,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       message: `Gate requested for workflow handoff: ${handoffKind}.`,
       data: { kind: handoffKind, reason: decision.reason, approvalId: approval.approvalId },
     })
-    const gateDecision = await gate.confirm(handoffKind, approval.message, approval.context)
+    const gateResponse = await confirmPermissionGate(gate, handoffKind, approval.message, approval.context, {
+      request,
+      decision,
+      approval,
+    })
+    const gateDecision = gateResponse.decision
     const resolvedApproval = await resolveApproval(approval, gateDecision, currentStep)
     await sessionEvent({
       type: 'human_gate_resolved',
@@ -1919,6 +1930,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         const gateResponse = await confirmPermissionGate(gate, kind, approval.message, approval.context, {
           request: permissionRequest,
           decision: permissionDecision,
+          approval,
+          ...(sinkActionBinding ? { actionBinding: sinkActionBinding } : {}),
         })
         const decision = gateResponse.decision
         const resolvedApproval = await resolveApproval(approval, decision, step, gateResponse.rememberScope)
@@ -3530,7 +3543,12 @@ async function confirmPermissionGate(
   kind: GateKind,
   message: string,
   context: Parameters<HumanGate['confirm']>[2],
-  permission: { request: PermissionRequest; decision: PermissionDecision },
+  permission: {
+    request: PermissionRequest
+    decision: PermissionDecision
+    approval: ApprovalRequest
+    actionBinding?: ActionBinding
+  },
 ): Promise<PermissionGateResponse> {
   const rememberingGate = gate as RememberingHumanGate
   const response = rememberingGate.confirmPermission

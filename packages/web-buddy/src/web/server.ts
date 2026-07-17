@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import {
   ApprovalService,
   ControlStoreError,
+  DurableHumanGate,
   FileApprovalStore,
   FileRunStore,
   RecoveryService,
@@ -59,6 +60,7 @@ interface LiveChannel {
 
 interface LiveExecution {
   controller: AgentRunController
+  gate: DurableHumanGate
   runRevision: number
   attempt: number
 }
@@ -130,8 +132,20 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       expectedRunRevision: record.runRevision,
       expectedAttempt: record.attempt,
     })
+    const sessionId = launchOptions.restoredSessionId ?? `control-${running.runId}-a${running.attempt}`
+    const gate = new DurableHumanGate({
+      runs: runService,
+      approvals: approvalService,
+      runId: running.runId,
+      runRevision: running.runRevision,
+      attempt: running.attempt,
+      taskContract: running.inputSnapshot.contract,
+      sessionId,
+      abortSignal: controller.signal,
+    })
     executions.set(record.runId, {
       controller,
+      gate,
       runRevision: running.runRevision,
       attempt: running.attempt,
     })
@@ -156,6 +170,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       source: 'web-ui',
       profile: 'debug',
       controller,
+      gate,
+      sessionId,
       ...(launchOptions.restoredSessionId ? { restoredSessionId: launchOptions.restoredSessionId } : {}),
       onSessionReady: async (session) => {
         await runService.attachSession(running.runId, {
@@ -409,6 +425,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       if (control === 'cancel') {
         const run = await runService.requestCancel(runId, idempotencyKey)
         executions.get(runId)?.controller.abort('Cancel requested from control plane.')
+        await approvalService.cancelPendingForRun(
+          runId,
+          'Run was cancelled while awaiting approval.',
+          `cancel-approval-fence:${run.runRevision}:${run.attempt}`,
+        )
         send(res, 202, { run })
         return
       }
@@ -438,6 +459,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       if (!runId) return send(res, 400, { error: 'runId is required' })
       const run = await runService.requestCancel(runId, `legacy-stop:${runId}:${randomUUID()}`)
       executions.get(runId)?.controller.abort('Cancel requested from legacy stop endpoint.')
+      await approvalService.cancelPendingForRun(
+        runId,
+        'Run was cancelled from the legacy stop endpoint.',
+        `legacy-cancel-approval-fence:${run.runRevision}:${run.attempt}`,
+      )
       send(res, 202, { ok: true, run })
       return
     }
@@ -534,7 +560,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         nonce: randomUUID(),
         expiresAt: approval.expiresAt,
       })
-      send(res, 200, { approval: record })
+      const resumedLive = await executions.get(approval.runId)?.gate.resolveLive(approvalId, decision) ?? false
+      send(res, 200, { approval: record, resumedLive })
       return
     }
 
