@@ -12,7 +12,7 @@
     }
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "bin": {
     "web-buddy-mcp": "dist/server.js",
@@ -23,7 +23,8 @@
     "job-agent-web": "dist/web/server.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "examples"
   ],
   "scripts": {
     "build": "node ./scripts/build.mjs",
@@ -124,6 +125,7 @@
     "test:m4-b2": "npm run build && node ./scripts/multi-agent-memory-lifecycle-test.mjs && node ./scripts/security-m4-b2-memory-lifecycle-test.mjs",
     "test:eval:m4-multi-agent": "npm run build && node ./scripts/m4-single-vs-multi-eval-test.mjs",
     "test:sdk-public-surface": "npm run build && node ./scripts/sdk-public-surface-test.mjs",
+    "test:sdk-public-consumer": "npm run build && WEB_BUDDY_PACK_CURRENT=1 node ./scripts/sdk-public-consumer-test.mjs",
     "test:security-m5-service-contract": "npm run build && node ./scripts/security-m5-service-contract-test.mjs",
     "test:security-content-trust": "node ./scripts/security-content-trust-test.mjs",
     "test:security-instruction-boundary": "npm run build && node ./scripts/security-instruction-boundary-test.mjs",
