@@ -160,6 +160,27 @@ async function runApprovalMatrix() {
   const restarted = new FileApprovalStore({ rootDir: root })
   assert.equal((await restarted.get(create.record.approvalId, { ownerScope }))?.status, 'approved')
   assert.deepEqual((await restarted.readEvents(create.record.approvalId, { ownerScope })).items.map((event) => event.eventSequence), [0, 1])
+
+  const otherScope = {
+    schemaVersion: 'owner-scope/v1',
+    tenantId: 'tenant-c2-other',
+    userId: 'user-c2-other',
+  }
+  const sharedA = approvalCreate('approval-shared-across-scopes', 'run-scope-a')
+  const sharedB = approvalCreate('approval-shared-across-scopes', 'run-scope-b', otherScope)
+  await store.create(sharedA)
+  await store.create(sharedB)
+  await store.resolveOnce(resolveCommand(sharedA.record, {}, 'resolve-shared-a', 'nonce-shared-a'))
+  assert.equal((await store.get(sharedA.record.approvalId, { ownerScope }))?.status, 'approved')
+  assert.equal((await store.get(sharedB.record.approvalId, { ownerScope: otherScope }))?.status, 'pending')
+  const scopedCommand = resolveCommand(
+    sharedB.record,
+    {},
+    'resolve-shared-unscoped',
+    'nonce-shared-unscoped',
+  )
+  const { ownerScope: _discardedScope, ...unscopedCommand } = scopedCommand
+  await assertStoreError(store.resolveOnce(unscopedCommand), 'APPROVAL_NOT_FOUND')
 }
 
 function runCreate(runId) {
@@ -249,7 +270,7 @@ function runMutation(current, _currentEvent, key) {
   return { expectedRecordRevision: 0, record, event, idempotencyKey: key }
 }
 
-function approvalCreate(approvalId, runId) {
+function approvalCreate(approvalId, runId, scope = ownerScope) {
   const requestedAt = '2026-07-17T03:01:00.000Z'
   const sessionRef = {
     schemaVersion: 'session-ref/v1',
@@ -285,7 +306,7 @@ function approvalCreate(approvalId, runId) {
     actionBinding,
     actionBindingSha256: controlRecordDigest(actionBinding),
     allowedDecisions: ['approved', 'denied'],
-    ownerScope,
+    ownerScope: scope,
     sessionRef,
     nextEventSequence: 1,
     requestedAt,
@@ -306,7 +327,7 @@ function approvalCreate(approvalId, runId) {
     actionId: actionBinding.actionId,
     occurredAt: requestedAt,
     idempotencyKey: `create:${approvalId}`,
-    ownerScope,
+    ownerScope: scope,
   }
   return { record, event, options: { idempotencyKey: event.idempotencyKey } }
 }
@@ -315,6 +336,7 @@ function resolveCommand(record, expectationPatch = {}, idempotencyKey = 'resolve
   const resolvedAt = '2026-07-17T03:02:00.000Z'
   return {
     approvalId: record.approvalId,
+    ownerScope: record.ownerScope,
     expectedRecordRevision: 0,
     idempotencyKey,
     expectation: {

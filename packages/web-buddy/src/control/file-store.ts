@@ -265,11 +265,12 @@ export class FileApprovalStore implements ApprovalStore {
   async resolveOnce(
     command: ApprovalResolveCommand,
   ): Promise<StoreCommit<ApprovalRecord, ApprovalStoreEvent>> {
-    const candidates = await findApprovalPaths(this.options.rootDir, command.approvalId)
-    if (candidates.length !== 1) {
-      throw new ControlStoreError('APPROVAL_NOT_FOUND', `Approval not found in one exact scope: ${command.approvalId}`)
-    }
-    const paths = candidates[0]
+    const paths = fileControlStorePaths(
+      this.options.rootDir,
+      'approval',
+      command.approvalId,
+      command.ownerScope,
+    )
     return withEntityLock(paths, async () => {
       await recoverEntity(paths, 'approval', command.approvalId, decodeApprovalRecord)
       const requestDigest = controlRecordDigest(command)
@@ -490,28 +491,6 @@ async function listRecords<TRecord extends { schemaVersion: string }>(
     }
   }
   return records.sort((left, right) => recordId(left).localeCompare(recordId(right)))
-}
-
-async function findApprovalPaths(rootDir: string, approvalId: string): Promise<EntityPaths[]> {
-  const scopesDir = join(rootDir, 'scopes')
-  const scopes = await safeReadDir(scopesDir)
-  const encoded = encodeId(approvalId)
-  const matches: EntityPaths[] = []
-  for (const scope of scopes) {
-    if (!scope.isDirectory()) continue
-    const dir = join(scopesDir, scope.name, 'approvals', encoded)
-    if (await exists(join(dir, 'record.json')) || await exists(join(dir, 'transaction.wal.json'))) {
-      matches.push({
-        dir,
-        record: join(dir, 'record.json'),
-        events: join(dir, 'events.jsonl'),
-        idempotency: join(dir, 'idempotency.json'),
-        wal: join(dir, 'transaction.wal.json'),
-        lock: join(dir, 'writer.lock'),
-      })
-    }
-  }
-  return matches
 }
 
 async function appendEventOnce<TEvent>(paths: EntityPaths, event: TEvent): Promise<void> {

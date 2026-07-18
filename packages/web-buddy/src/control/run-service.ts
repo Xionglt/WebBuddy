@@ -183,8 +183,8 @@ export class RunService {
     return committed.record
   }
 
-  start(runId: string, idempotencyKey: string): Promise<RunRecord> {
-    return this.transition(runId, { to: 'running', idempotencyKey })
+  start(runId: string, idempotencyKey: string, scope?: ScopedStoreQuery): Promise<RunRecord> {
+    return this.transition(runId, { to: 'running', idempotencyKey }, scope)
   }
 
   async attachSession(
@@ -439,6 +439,7 @@ export class ApprovalService {
 
   async resolve(input: {
     approvalId: string
+    ownerScope?: OwnerScope
     expectedRecordRevision: number
     expectation: ApprovalResolutionExpectation
     decision: 'approved' | 'denied'
@@ -459,6 +460,7 @@ export class ApprovalService {
     }
     const committed = await this.store.resolveOnce({
       approvalId: input.approvalId,
+      ...(input.ownerScope ? { ownerScope: input.ownerScope } : {}),
       expectedRecordRevision: input.expectedRecordRevision,
       expectation: input.expectation,
       resolution,
@@ -500,8 +502,18 @@ export class ApprovalService {
     })
   }
 
-  async cancelPendingForRun(runId: string, reason: string, idempotencyPrefix: string): Promise<ApprovalRecord[]> {
-    const pending = await this.store.list({ runId, statuses: ['pending'], limit: 1000 })
+  async cancelPendingForRun(
+    runId: string,
+    reason: string,
+    idempotencyPrefix: string,
+    scope?: ScopedStoreQuery,
+  ): Promise<ApprovalRecord[]> {
+    const pending = await this.store.list({
+      runId,
+      statuses: ['pending'],
+      limit: 1000,
+      ...(scope?.ownerScope ? { ownerScope: scope.ownerScope } : {}),
+    })
     const cancelled: ApprovalRecord[] = []
     for (const current of pending.items) {
       const occurredAt = new Date().toISOString()

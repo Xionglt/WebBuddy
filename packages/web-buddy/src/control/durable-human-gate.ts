@@ -14,6 +14,7 @@ import type {
 import {
   digestCanonicalJson,
   type ActionBinding,
+  type OwnerScope,
   type TaskContract,
 } from '../task/contracts.js'
 import type { ApprovalService, RunService } from './run-service.js'
@@ -32,6 +33,7 @@ export interface DurableHumanGateOptions {
   taskContract: TaskContract
   sessionId: string
   abortSignal: AbortSignal
+  ownerScope?: OwnerScope
   approvalTtlMs?: number
 }
 
@@ -63,7 +65,8 @@ export class DurableHumanGate implements HumanGate {
       actionBinding?: ActionBinding
     },
   ): Promise<GateDecision> {
-    const current = await this.options.runs.get(this.options.runId)
+    const scope = scoped(this.options.ownerScope)
+    const current = await this.options.runs.get(this.options.runId, scope)
     if (!current
       || current.runRevision !== this.options.runRevision
       || current.attempt !== this.options.attempt
@@ -86,6 +89,7 @@ export class DurableHumanGate implements HumanGate {
       status: 'pending',
       actionBinding,
       allowedDecisions: ['approved', 'denied'],
+      ...(this.options.ownerScope ? { ownerScope: this.options.ownerScope } : {}),
       sessionRef: {
         schemaVersion: 'session-ref/v1',
         provider: 'file-session-store',
@@ -101,6 +105,7 @@ export class DurableHumanGate implements HumanGate {
       permission.approval.approvalId,
       true,
       `run-pending-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`,
+      scope,
     )
     await this.options.runs.transition(this.options.runId, {
       to: 'blocked_on_human',
@@ -109,7 +114,7 @@ export class DurableHumanGate implements HumanGate {
       expectedRunRevision: this.options.runRevision,
       expectedAttempt: this.options.attempt,
       data: { approvalId: permission.approval.approvalId },
-    })
+    }, scope)
 
     return new Promise<GateDecision>((resolve) => {
       const onAbort = () => {
@@ -128,7 +133,8 @@ export class DurableHumanGate implements HumanGate {
   async resolveLive(approvalId: string, decision: 'approved' | 'denied'): Promise<boolean> {
     const pending = this.pending.get(approvalId)
     if (!pending) return false
-    const current = await this.options.runs.get(this.options.runId)
+    const scope = scoped(this.options.ownerScope)
+    const current = await this.options.runs.get(this.options.runId, scope)
     if (!current
       || current.state !== 'blocked_on_human'
       || current.runRevision !== this.options.runRevision
@@ -140,6 +146,7 @@ export class DurableHumanGate implements HumanGate {
       approvalId,
       false,
       `run-clear-approval:${this.options.runRevision}:${this.options.attempt}:${approvalId}`,
+      scope,
     )
     const resuming = await this.options.runs.transition(this.options.runId, {
       to: 'resuming',
@@ -147,7 +154,7 @@ export class DurableHumanGate implements HumanGate {
       expectedRunRevision: this.options.runRevision,
       expectedAttempt: this.options.attempt,
       data: { approvalId, decision },
-    })
+    }, scope)
     await this.options.runs.transition(this.options.runId, {
       to: 'running',
       idempotencyKey: `approval-running:${this.options.runRevision}:${this.options.attempt}:${approvalId}`,
@@ -155,12 +162,16 @@ export class DurableHumanGate implements HumanGate {
       expectedRunRevision: this.options.runRevision,
       expectedAttempt: this.options.attempt,
       data: { approvalId, decision },
-    })
+    }, scope)
     this.pending.delete(approvalId)
     pending.removeAbortListener()
     pending.resolve(decision === 'approved' ? 'approve' : 'decline')
     return true
   }
+}
+
+function scoped(ownerScope?: OwnerScope): { ownerScope: OwnerScope } | undefined {
+  return ownerScope ? { ownerScope } : undefined
 }
 
 function fallbackActionBinding(

@@ -259,6 +259,7 @@ export interface ApprovalResolutionExpectation {
 
 export interface ApprovalResolveCommand {
   approvalId: string
+  ownerScope?: OwnerScope
   expectedRecordRevision: number
   idempotencyKey: string
   expectation: ApprovalResolutionExpectation
@@ -534,6 +535,9 @@ export function validateApprovalResolve(
   nonEmpty(command.idempotencyKey, 'idempotencyKey')
   isoUtc(command.resolvedAt, 'resolvedAt')
   if (command.approvalId !== record.approvalId) binding('Approval id does not match.')
+  if (!sameOptionalJson(command.ownerScope, record.ownerScope)) {
+    binding('Approval resolution scope does not match the durable request.')
+  }
   if (command.expectedRecordRevision !== record.recordRevision) {
     revision('Approval resolve expected revision is stale.', command.expectedRecordRevision, record.recordRevision)
   }
