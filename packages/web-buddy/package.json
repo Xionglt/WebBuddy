@@ -1,6 +1,6 @@
 {
   "name": "@multi-functional-agent/web-buddy",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Web Buddy — local Web Agent runtime + Playwright browser tools + MCP server",
   "type": "module",
@@ -18,9 +18,9 @@
     "web-buddy-mcp": "dist/server.js",
     "playwright-mcp": "dist/server.js",
     "web-agent": "dist/cli/demo.js",
-    "job-agent": "dist/cli/demo.js",
+    "job-agent": "dist/cli/job-agent.js",
     "web-agent-web": "dist/web/server.js",
-    "job-agent-web": "dist/web/server.js"
+    "job-agent-web": "dist/web/job-agent-web.js"
   },
   "files": [
     "dist",
@@ -126,6 +126,7 @@
     "test:eval:m4-multi-agent": "npm run build && node ./scripts/m4-single-vs-multi-eval-test.mjs",
     "test:sdk-public-surface": "npm run build && node ./scripts/sdk-public-surface-test.mjs",
     "test:sdk-public-consumer": "npm run build && WEB_BUDDY_PACK_CURRENT=1 node ./scripts/sdk-public-consumer-test.mjs",
+    "test:compat-bins": "npm run build && node ./scripts/compat-bin-deprecation-test.mjs",
     "test:security-m5-service-contract": "npm run build && node ./scripts/security-m5-service-contract-test.mjs",
     "test:security-content-trust": "node ./scripts/security-content-trust-test.mjs",
     "test:security-instruction-boundary": "npm run build && node ./scripts/security-instruction-boundary-test.mjs",

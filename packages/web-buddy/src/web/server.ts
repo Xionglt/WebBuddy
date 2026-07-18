@@ -852,7 +852,9 @@ function listen(server: ReturnType<typeof createServer>, port: number): Promise<
   })
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(SOURCE_FILE)) {
+if (process.env.WEB_BUDDY_COMPAT_WRAPPER !== '1'
+  && process.argv[1]
+  && resolve(process.argv[1]) === resolve(SOURCE_FILE)) {
   const explicitPort = Boolean(process.env.PORT)
   const initialPort = Number(process.env.PORT || 5178)
   let control: Awaited<ReturnType<typeof startWebControlServer>> | undefined

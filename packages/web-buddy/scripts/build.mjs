@@ -62,6 +62,17 @@ await esbuild.build({
   external: EXTERNAL,
 })
 
+await esbuild.build({
+  entryPoints: ['src/cli/job-agent.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  outfile: 'dist/cli/job-agent.js',
+  banner: { js: '#!/usr/bin/env node' },
+  external: EXTERNAL,
+})
+
 // Web UI server. index.html is inlined as a text module (single-file bundle).
 await esbuild.build({
   entryPoints: ['src/web/server.ts'],
@@ -70,6 +81,18 @@ await esbuild.build({
   format: 'esm',
   target: 'node20',
   outfile: 'dist/web/server.js',
+  banner: { js: '#!/usr/bin/env node' },
+  external: EXTERNAL,
+  loader: { '.html': 'text' },
+})
+
+await esbuild.build({
+  entryPoints: ['src/web/job-agent-web.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  outfile: 'dist/web/job-agent-web.js',
   banner: { js: '#!/usr/bin/env node' },
   external: EXTERNAL,
   loader: { '.html': 'text' },
