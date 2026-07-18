@@ -48,3 +48,4 @@ export type {
   PolicyEnforcedMemoryStore,
   PolicyEnforcedMemoryWriter,
 } from './memory-write-policy.js'
+export * from './memory-lifecycle.js'
