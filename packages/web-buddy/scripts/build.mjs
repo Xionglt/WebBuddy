@@ -1,6 +1,10 @@
 import * as esbuild from 'esbuild'
-import { mkdir, readdir } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdir, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 await mkdir('dist', { recursive: true })
 
@@ -70,3 +74,32 @@ await esbuild.build({
   external: EXTERNAL,
   loader: { '.html': 'text' },
 })
+
+await execFileAsync(process.execPath, [
+  './node_modules/typescript/bin/tsc',
+  '--project',
+  'tsconfig.public.json',
+])
+
+const publicDeclarationFiles = (await readdir('dist/public'))
+  .filter((name) => name.endsWith('.d.ts'))
+for (const name of publicDeclarationFiles) {
+  const declaration = await readFile(join('dist/public', name), 'utf8')
+  if (/\bfrom\s+['"]\.\.\//.test(declaration)) {
+    throw new Error(`Public declaration graph escapes the stable public directory: ${name}`)
+  }
+  for (const forbidden of [
+    'playwright',
+    'WebTaskRuntimeDriver',
+    'RuntimeOptions',
+    'RunService',
+    'FileRunStore',
+    'FileApprovalStore',
+    'runJobApplicationAgent',
+    'AgentRunResult',
+  ]) {
+    if (declaration.includes(forbidden)) {
+      throw new Error(`Public declaration exposes forbidden symbol ${forbidden}: ${name}`)
+    }
+  }
+}

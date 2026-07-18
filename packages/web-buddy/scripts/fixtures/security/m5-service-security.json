@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "security-m5-service/v1",
+  "secretMarker": "m5_TEST_BEARER_SECRET_7f2c91d4",
+  "secretPrefix": "m5_TES",
+  "principals": {
+    "tenantA": {
+      "token": "m5_test_token_tenant_a",
+      "actorId": "actor-a",
+      "tenantId": "tenant-a",
+      "userId": "user-a"
+    },
+    "tenantB": {
+      "token": "m5_test_token_tenant_b",
+      "actorId": "actor-b",
+      "tenantId": "tenant-b",
+      "userId": "user-b"
+    }
+  },
+  "quota": {
+    "runsPerWindow": 1,
+    "windowMs": 60000
+  },
+  "apiPaths": [
+    "/api/config",
+    "/api/runs",
+    "/api/approvals",
+    "/api/memories"
+  ],
+  "resourceKinds": [
+    "run",
+    "approval",
+    "artifact",
+    "trace",
+    "memory",
+    "audit"
+  ]
+}
