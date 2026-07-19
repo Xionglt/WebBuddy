@@ -1,8 +1,11 @@
 {
   "name": "@multi-functional-agent/web-buddy",
   "version": "1.0.0",
-  "private": true,
-  "description": "Web Buddy — local Web Agent runtime + Playwright browser tools + MCP server",
+  "private": false,
+  "description": "Web Buddy — stable SDK and safety-first runtime for auditable web agents",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "types": "./dist/public/index.d.ts",
   "exports": {

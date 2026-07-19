@@ -10,6 +10,56 @@ booking preparation, and recruiting assistance all run through the same
 Agent Harness; task prompts, Skills, Policies, and Workflows provide the
 scenario-specific behavior.
 
+## Public SDK
+
+Use Node.js `>=20` and import only the package root. Deep imports such as
+`@multi-functional-agent/web-buddy/dist/*` and `src/*` are private and rejected
+by package exports.
+
+```bash
+npm install @multi-functional-agent/web-buddy
+```
+
+```js
+import {
+  createResearchStarter,
+  runWebTask,
+} from '@multi-functional-agent/web-buddy'
+
+const input = createResearchStarter({
+  schemaVersion: 'research-starter/v1',
+  goal: 'Summarize the page with current source evidence.',
+  startUrl: 'https://example.com/',
+})
+
+const result = await runWebTask(input)
+```
+
+The stable root also exports `createComparisonStarter()`,
+`createFormDraftStarter()`, `createSkillScaffold()`, `createRunClient()`, and
+`createApprovalClient()`. Public DTOs are versioned and unknown major versions
+fail closed. See `examples/research`, `examples/comparison`, and
+`examples/form-draft`; every example imports only the package root.
+
+Package metadata is publication-ready, but registry availability is controlled
+by the separate release process. Recruiting remains a Scenario Adapter example.
+The `job-agent` and `job-agent-web` bins are compatibility wrappers that emit a
+deprecation warning; new integrations should call `runWebTask()` or use the
+generic `web-agent` entry.
+
+## Authenticated Service Boundary
+
+The Web API authenticates before business parsing and derives tenant/user scope
+from `WEB_BUDDY_API_TOKEN` or `WEB_BUDDY_API_TOKENS_JSON`. Run, Approval,
+Trace, Artifact, and Memory resources are exact-scope isolated. Stable
+mutations require both `expectedRevision` and `idempotencyKey`.
+
+Model credentials are injected only by the server Secret Provider. The Web UI
+does not accept model keys, resume paths, or inline secret Context, and tenants
+cannot redirect the global model endpoint. Local/private-network targets are
+denied by default; local fixtures require the explicit test-only
+`WEB_BUDDY_ALLOW_PRIVATE_NETWORK_FOR_TESTING=true` override.
+
 ## Scenario Coverage
 
 | Scenario | Runtime behavior | Safety boundary |
