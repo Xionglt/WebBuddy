@@ -159,6 +159,12 @@
     </div>
 
     <div class="group">
+      <div class="label"><span>Service token</span><span id="authState">required</span></div>
+      <input id="serviceToken" type="password" autocomplete="off" placeholder="Raw token, without the Bearer prefix" />
+      <button class="btn secondary" id="connectBtn" style="width:100%;margin-top:8px">Connect</button>
+    </div>
+
+    <div class="group">
       <div class="label"><span>Runtime</span><span>selector</span></div>
       <div class="seg runtime" id="runtimeSeg">
         <button data-v="web-buddy-raw" class="on">Web Buddy Raw</button>
@@ -186,26 +192,21 @@
     </div>
 
     <div class="group" id="resumeGroup">
-      <div class="label"><span>Resume</span><span>optional</span></div>
-      <input id="resumePath" placeholder="/path/to/resume.pdf" />
-      <div class="row" style="margin-top:8px">
-        <input type="file" id="resumeFile" accept=".pdf,.json,.txt" />
-        <button class="btn secondary" id="uploadBtn">Use file</button>
-      </div>
-      <div class="hint" id="resumeHint">Generic tasks can run without a resume.</div>
+      <div class="label"><span>Profile context</span><span>server managed</span></div>
+      <div class="hint" id="resumeHint">Sensitive profile material is supplied by a dedicated server-side provider.</div>
     </div>
 
     <div class="group">
-      <div class="label"><span>Model endpoint</span><span>Anthropic-compatible</span></div>
-      <input id="baseUrl" placeholder="https://open.bigmodel.cn/api/anthropic" />
+      <div class="label"><span>Model endpoint</span><span>server config</span></div>
+      <input id="baseUrl" readonly />
     </div>
     <div class="group">
       <div class="label"><span>Model</span></div>
-      <input id="model" placeholder="glm-4.7" />
+      <input id="model" readonly />
     </div>
     <div class="group">
-      <div class="label"><span>API key</span><span id="keyState">checking</span></div>
-      <input id="key" type="password" placeholder="leave blank to use env" />
+      <div class="label"><span>Model credential</span><span id="keyState">server provider</span></div>
+      <div class="hint">Credentials never enter ordinary Run, Trace, Artifact, or Memory payloads.</div>
     </div>
 
     <div class="group">
@@ -213,8 +214,8 @@
     </div>
 
     <div class="actions">
-      <button class="btn primary" id="runBtn">Run Agent</button>
-      <button class="btn secondary" id="refreshBtn">Refresh Trace</button>
+      <button class="btn primary" id="runBtn" disabled>Run Agent</button>
+      <button class="btn secondary" id="refreshBtn" disabled>Refresh Trace</button>
       <button class="btn secondary" id="pauseBtn" disabled>Pause</button>
       <button class="btn secondary" id="resumeBtn" disabled>Resume</button>
       <button class="btn danger" id="stopBtn" disabled>Stop</button>
@@ -305,15 +306,18 @@ let runtime = 'web-buddy-raw';
 let activeRuntime = null;
 let activeMode = null;
 let runId = null;
+let activeRunRevision = 0;
 let events = null;
 let traceTimer = null;
 let riskTimelineKeys = new Set();
+let serviceToken = '';
+let connected = false;
 
 const RUNTIMES = {
   'web-buddy-raw': {
     label: 'Web Buddy Raw',
     mode: () => 'raw',
-    runPath: '/api/run',
+    runPath: '/api/runs',
     eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
     tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
     stopPath: (id) => `/api/runs/${encodeURIComponent(id)}/cancel`,
@@ -321,7 +325,7 @@ const RUNTIMES = {
   'web-buddy-match': {
     label: 'Web Buddy Match',
     mode: () => 'match',
-    runPath: '/api/run',
+    runPath: '/api/runs',
     eventsPath: (id) => `/api/events?id=${encodeURIComponent(id)}`,
     tracePath: (id) => `/api/trace?id=${encodeURIComponent(id)}`,
     stopPath: (id) => `/api/runs/${encodeURIComponent(id)}/cancel`,
@@ -358,12 +362,9 @@ function setPreset(next) {
   } else if (!$('prompt').value.trim() || $('prompt').value === ALIBABA_PROMPT || $('prompt').value === VENUE_PROMPT) {
     $('prompt').value = GENERIC_PROMPT;
   }
-  const venueMode = preset === 'venue';
-  $('resumeGroup').classList.toggle('is-disabled', venueMode);
-  $('resumePath').disabled = venueMode;
-  $('resumeFile').disabled = venueMode;
-  $('uploadBtn').disabled = venueMode;
-  $('resumeHint').textContent = venueMode ? '场地预订测试不读取或上传简历。' : 'Generic tasks can run without a resume.';
+  $('resumeHint').textContent = preset === 'venue'
+    ? '场地预订测试不读取个人资料。'
+    : 'Sensitive profile material is supplied by a dedicated server-side provider.';
   updateRunMeta();
 }
 
@@ -373,8 +374,10 @@ function updateRunMeta(extra = {}) {
   $('runMode').textContent = extra.mode || activeMode || runtimeMode();
   $('runIdPanel').textContent = extra.runId || runId || '-';
   const selected = extra.runId || runId;
-  $('traceLink').href = selected ? `/api/runs/${encodeURIComponent(selected)}/trace` : '#';
-  $('artifactLink').href = selected ? `/api/runs/${encodeURIComponent(selected)}/artifacts` : '#';
+  $('traceLink').href = '#';
+  $('traceLink').dataset.path = selected ? `/api/runs/${encodeURIComponent(selected)}/trace` : '';
+  $('artifactLink').href = '#';
+  $('artifactLink').dataset.path = selected ? `/api/runs/${encodeURIComponent(selected)}/artifacts` : '';
 }
 
 function setStatus(value) {
@@ -388,7 +391,10 @@ function setStatus(value) {
 }
 
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  if (!serviceToken) throw new Error('Service token is required.');
+  const headers = new Headers(opts?.headers);
+  headers.set('authorization', `Bearer ${serviceToken}`);
+  const res = await fetch(path, { ...opts, headers });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
@@ -398,24 +404,20 @@ async function loadConfig() {
   const cfg = await api('/api/config');
   $('baseUrl').value = cfg.baseUrl || '';
   $('model').value = cfg.name || '';
-  $('resumePath').value = cfg.resumePath || '';
-  $('keyState').textContent = cfg.hasKey ? 'set' : 'not set';
+  $('keyState').textContent = cfg.credentialConfigured ? 'configured' : 'not configured';
   setPreset('generic');
   setRuntime('web-buddy-raw');
 }
 
-async function saveConfig() {
-  const key = $('key').value.trim();
-  await api('/api/config', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      provider: 'anthropic',
-      baseUrl: $('baseUrl').value.trim(),
-      name: $('model').value.trim(),
-      ...(key ? { key } : {}),
-    }),
-  });
+async function connectService() {
+  serviceToken = $('serviceToken').value.trim();
+  if (!serviceToken) throw new Error('Service token is required.');
+  await loadConfig();
+  await refreshControlPlane();
+  connected = true;
+  $('authState').textContent = 'connected';
+  $('runBtn').disabled = false;
+  $('refreshBtn').disabled = false;
 }
 
 function addEvent(event) {
@@ -438,10 +440,10 @@ function addEvent(event) {
 async function refreshTrace() {
   if (!runId) return;
   const trace = await api(activeRuntimeInfo().tracePath(runId));
-  updateRunMeta({ runtime: displayRuntime(trace.runtime), mode: trace.mode, runId });
-  $('runDir').textContent = trace.runDir || '-';
-  $('traceDir').textContent = trace.traceDir || '-';
-  $('tracePath').textContent = trace.summary?.tracePath || trace.tracePath || '-';
+  updateRunMeta({ runId });
+  $('runDir').textContent = 'server managed';
+  $('traceDir').textContent = 'server managed';
+  $('tracePath').textContent = `/api/runs/${runId}/trace`;
   $('spanCount').textContent = String(trace.spans?.length || 0);
   renderMetrics(trace.metrics || null);
   renderRiskDecisions(trace.riskDecisions || null);
@@ -613,13 +615,49 @@ function renderSpans(spans) {
 
 function closeStream() {
   if (events) {
-    events.close();
+    events.abort();
     events = null;
   }
   if (traceTimer) {
     clearInterval(traceTimer);
     traceTimer = null;
   }
+}
+
+async function openEventStream(path, onEvent) {
+  const controller = new AbortController();
+  const headers = new Headers({ authorization: `Bearer ${serviceToken}` });
+  const response = await fetch(path, { headers, signal: controller.signal });
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || `Event stream failed with ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  void (async () => {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
+        for (const frame of frames) {
+          const data = frame.split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('\n');
+          if (data) onEvent(JSON.parse(data));
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        addEvent({ level: 'error', phase: 'events', message: error.message || String(error) });
+      }
+    }
+  })();
+  return controller;
 }
 
 function setRunControls(running) {
@@ -654,17 +692,19 @@ $('runtimeSeg').addEventListener('click', (event) => {
   if (button) setRuntime(button.dataset.v);
 });
 
-$('uploadBtn').addEventListener('click', async () => {
-  const file = $('resumeFile').files[0];
-  if (!file) return;
-  const body = await file.arrayBuffer();
-  const uploaded = await api('/api/resume', {
-    method: 'POST',
-    headers: { 'content-type': 'application/octet-stream', 'x-file-name': file.name },
-    body,
-  });
-  $('resumePath').value = uploaded.path || '';
-});
+function handleLiveEvent(event) {
+  if (event._end) {
+    updateRunMeta({ mode: activeMode, runId });
+    setStatus(finalStatusForEnd(event));
+    setRunControls(false);
+    $('resumeBtn').disabled = !(event.state === 'paused' || event.state === 'blocked_on_human' || event.state === 'recoverable');
+    closeStream();
+    refreshTrace().catch(() => {});
+    refreshControlPlane().catch(() => {});
+    return;
+  }
+  addEvent(event);
+}
 
 $('runBtn').addEventListener('click', async () => {
   closeStream();
@@ -694,43 +734,27 @@ $('runBtn').addEventListener('click', async () => {
   setRunControls(true);
 
   try {
-    await saveConfig();
     const mode = activeMode;
     const prompt = $('prompt').value.trim();
     const url = $('url').value.trim();
-    const resumePath = preset === 'venue' ? undefined : ($('resumePath').value.trim() || undefined);
     const started = await api(activeRuntimeInfo().runPath, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        idempotencyKey: `ui-create-${crypto.randomUUID()}`,
         runtime,
         mode,
         startUrl: url,
-        resumePath,
         headless: $('headless').checked,
         prompt,
         taskPrompt: prompt,
       }),
     });
     runId = started.runId;
+    activeRunRevision = started.revision;
     $('runId').textContent = runId;
-    updateRunMeta({ runtime: displayRuntime(started.runtime), mode: started.mode || mode, runId });
-    events = new EventSource(activeRuntimeInfo().eventsPath(runId));
-    events.onmessage = (message) => {
-      const event = JSON.parse(message.data);
-      if (event._end) {
-        updateRunMeta({ runtime: displayRuntime(event.runtime), mode: event.mode || mode, runId });
-        setStatus(finalStatusForEnd(event));
-        setRunControls(false);
-        $('resumeBtn').disabled = !(event.state === 'paused' || event.state === 'blocked_on_human' || event.state === 'recoverable');
-        closeStream();
-        refreshTrace().catch(() => {});
-        refreshControlPlane().catch(() => {});
-        return;
-      }
-      addEvent(event);
-    };
-    events.onerror = () => {};
+    updateRunMeta({ mode, runId });
+    events = await openEventStream(activeRuntimeInfo().eventsPath(runId), handleLiveEvent);
     traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
   } catch (error) {
     if (!runId) {
@@ -754,14 +778,33 @@ function finalStatusForEnd(event) {
   return 'done';
 }
 
+function controlPayload(action) {
+  return {
+    expectedRevision: activeRunRevision,
+    idempotencyKey: `ui-${action}-${crypto.randomUUID()}`,
+  };
+}
+
 $('stopBtn').addEventListener('click', async () => {
   if (!runId) return;
-  await api(activeRuntimeInfo().stopPath(runId), { method: 'POST' });
+  const stopped = await api(activeRuntimeInfo().stopPath(runId), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(controlPayload('cancel')),
+  });
+  activeRunRevision = stopped.revision;
+  setStatus(stopped.state);
+  setRunControls(false);
 });
 
 $('pauseBtn').addEventListener('click', async () => {
   if (!runId) return;
-  await api(`/api/runs/${encodeURIComponent(runId)}/pause`, { method: 'POST' });
+  const paused = await api(`/api/runs/${encodeURIComponent(runId)}/pause`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(controlPayload('pause')),
+  });
+  activeRunRevision = paused.revision;
   $('pauseBtn').disabled = true;
   addEvent({ level: 'gate', phase: 'control', message: 'Pause requested; waiting for a safe turn boundary.' });
 });
@@ -769,9 +812,17 @@ $('pauseBtn').addEventListener('click', async () => {
 $('resumeBtn').addEventListener('click', async () => {
   if (!runId) return;
   try {
-    await api(`/api/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST' });
+    const resumed = await api(`/api/runs/${encodeURIComponent(runId)}/resume`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(controlPayload('resume')),
+    });
+    activeRunRevision = resumed.revision;
     setStatus('running');
     setRunControls(true);
+    closeStream();
+    events = await openEventStream(activeRuntimeInfo().eventsPath(runId), handleLiveEvent);
+    traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1200);
   } catch (error) {
     addEvent({ level: 'warn', phase: 'control', message: error.message || String(error) });
   }
@@ -781,6 +832,45 @@ async function refreshControlPlane() {
   const [runs, approvals] = await Promise.all([api('/api/runs?limit=25'), api('/api/approvals?limit=25')]);
   renderRunList(runs.items || []);
   renderApprovalList(approvals.items || []);
+  const selected = (runs.items || []).find((item) => item.runId === runId);
+  if (selected) applyRunState(selected);
+}
+
+function applyRunState(item) {
+  activeRunRevision = item.revision;
+  const running = item.state === 'running' || item.state === 'resuming' || item.state === 'pausing';
+  const resumable = item.state === 'paused' || item.state === 'blocked_on_human' || item.state === 'recoverable';
+  const terminal = item.state === 'completed' || item.state === 'failed' || item.state === 'cancelled';
+  setStatus(running ? 'running' : item.state === 'failed' ? 'failed' : resumable ? 'blocked' : item.state);
+  $('runBtn').disabled = !connected || running;
+  $('stopBtn').disabled = terminal;
+  $('pauseBtn').disabled = !running || item.state === 'pausing';
+  $('resumeBtn').disabled = !resumable;
+}
+
+async function selectRun(selectedRunId) {
+  closeStream();
+  const [detail, history] = await Promise.all([
+    api(`/api/runs/${encodeURIComponent(selectedRunId)}`),
+    api(`/api/runs/${encodeURIComponent(selectedRunId)}/events`),
+  ]);
+  runId = detail.runId;
+  activeRunRevision = detail.revision;
+  $('runId').textContent = runId;
+  updateRunMeta({ runId });
+  applyRunState(detail);
+  $('timeline').innerHTML = '';
+  for (const event of history.items || []) {
+    addEvent({
+      ts: event.timestamp,
+      phase: 'history',
+      message: `${event.type}${event.data ? ` · ${JSON.stringify(event.data)}` : ''}`,
+    });
+  }
+  if (!(history.items || []).length) {
+    $('timeline').innerHTML = '<div class="empty">No durable events.</div>';
+  }
+  await refreshTrace();
 }
 
 function renderRunList(items) {
@@ -794,21 +884,14 @@ function renderRunList(items) {
     const row = document.createElement('div');
     row.className = 'control-row';
     const title = document.createElement('div');
-    title.textContent = `${item.state} · ${item.inputSnapshot?.goal?.metadata?.mode || 'web'}`;
+    title.textContent = `${item.state} · web`;
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = `${item.runId} · r${item.runRevision}/a${item.attempt}`;
+    meta.textContent = `${item.runId} · r${item.revision}/a${item.attempt}`;
     row.append(title, meta);
-    row.addEventListener('click', () => {
-      runId = item.runId;
-      $('runId').textContent = runId;
-      setStatus(item.state === 'running' || item.state === 'resuming' ? 'running'
-        : item.state === 'failed' ? 'failed'
-          : item.state === 'paused' || item.state === 'blocked_on_human' || item.state === 'recoverable' ? 'blocked' : item.state);
-      updateRunMeta({ runId, mode: item.inputSnapshot?.goal?.metadata?.mode });
-      $('resumeBtn').disabled = !(item.state === 'paused' || item.state === 'blocked_on_human' || item.state === 'recoverable');
-      refreshTrace().catch(() => {});
-    });
+    row.addEventListener('click', () => selectRun(item.runId).catch((error) => {
+      addEvent({ level: 'error', phase: 'detail', message: error.message || String(error) });
+    }));
     root.appendChild(row);
   }
 }
@@ -824,10 +907,10 @@ function renderApprovalList(items) {
     const row = document.createElement('div');
     row.className = 'control-row';
     const title = document.createElement('div');
-    title.textContent = item.actionBinding?.toolName || item.actionBinding?.actionId || item.approvalId;
+    title.textContent = item.action?.kind || item.action?.actionId || item.approvalId;
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = `${item.runId} · ${item.actionBinding?.destinationOrigin || 'local'}`;
+    meta.textContent = `${item.runId} · ${item.action?.destinationOrigin || 'local'}`;
     const actions = document.createElement('div');
     actions.className = 'control-links';
     for (const decision of ['approved', 'denied']) {
@@ -839,7 +922,7 @@ function renderApprovalList(items) {
         await api(`/api/approvals/${encodeURIComponent(item.approvalId)}/resolve`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ decision, expectedRecordRevision: item.recordRevision }),
+          body: JSON.stringify({ decision, expectedRevision: item.revision }),
         });
         await refreshControlPlane();
       });
@@ -852,12 +935,42 @@ function renderApprovalList(items) {
 
 $('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => addEvent({ level: 'error', phase: 'trace', message: error.message })));
 
-loadConfig().catch((error) => {
+$('connectBtn').addEventListener('click', () => connectService().catch((error) => {
+  connected = false;
+  serviceToken = '';
+  $('authState').textContent = 'failed';
+  $('runBtn').disabled = true;
+  $('refreshBtn').disabled = true;
   setStatus('failed');
-  addEvent({ level: 'error', phase: 'config', message: error.message });
+  addEvent({ level: 'error', phase: 'auth', message: error.message || String(error) });
+}));
+$('serviceToken').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') $('connectBtn').click();
 });
-refreshControlPlane().catch(() => {});
-setInterval(() => refreshControlPlane().catch(() => {}), 5000);
+for (const id of ['traceLink', 'artifactLink']) {
+  $(id).addEventListener('click', async (event) => {
+    event.preventDefault();
+    const path = event.currentTarget.dataset.path;
+    if (!path) return;
+    const viewer = window.open('', '_blank');
+    if (viewer) viewer.opener = null;
+    try {
+      const value = await api(path);
+      if (!viewer) throw new Error('The browser blocked the protected API viewer.');
+      viewer.document.title = id === 'traceLink' ? 'Run Trace' : 'Run Artifacts';
+      viewer.document.body.innerHTML = '';
+      const pre = viewer.document.createElement('pre');
+      pre.textContent = JSON.stringify(value, null, 2);
+      viewer.document.body.appendChild(pre);
+    } catch (error) {
+      viewer?.close();
+      addEvent({ level: 'error', phase: 'api', message: error.message || String(error) });
+    }
+  });
+}
+setInterval(() => {
+  if (serviceToken) refreshControlPlane().catch(() => {});
+}, 5000);
 </script>
 </body>
 </html>

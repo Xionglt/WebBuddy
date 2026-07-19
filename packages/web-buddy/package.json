@@ -29,7 +29,7 @@
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:release-gate": "npm run typecheck && npm run build && npm run test:m1-contract && npm run test:m4-a1 && npm run test:m4-a2 && npm run test:m4-b1 && npm run test:m4-b2 && npm run test:eval:m4-multi-agent && npm run test:security-content-trust && npm run test:security-instruction-boundary && npm run test:security-sink-policy && npm run test:eval:deterministic && npm run test:runtime-rewrite && npm run test:async-task-orchestration && npm run test:control-plane",
+    "test:release-gate": "npm run typecheck && npm run build && npm run test:m1-contract && npm run test:m4-a1 && npm run test:m4-a2 && npm run test:m4-b1 && npm run test:m4-b2 && npm run test:eval:m4-multi-agent && npm run test:security-content-trust && npm run test:security-instruction-boundary && npm run test:security-sink-policy && npm run test:eval:deterministic && npm run test:runtime-rewrite && npm run test:async-task-orchestration && npm run test:control-plane && npm run test:m5-release",
     "clean": "node -e \"import('node:fs/promises').then(fs => fs.rm('dist', { recursive: true, force: true }))\"",
     "start": "node ./dist/server.js",
     "dev": "npm run build && npm start",
@@ -128,6 +128,8 @@
     "test:sdk-public-consumer": "npm run build && WEB_BUDDY_PACK_CURRENT=1 node ./scripts/sdk-public-consumer-test.mjs",
     "test:compat-bins": "npm run build && node ./scripts/compat-bin-deprecation-test.mjs",
     "test:security-m5-service-contract": "npm run build && node ./scripts/security-m5-service-contract-test.mjs",
+    "test:security-m5-web-api": "npm run build && node --experimental-transform-types ./scripts/security-m5-web-api-test.mjs",
+    "test:m5-release": "npm run test:sdk-public-surface && npm run test:sdk-public-consumer && npm run test:compat-bins && npm run test:security-m5-service-contract && npm run test:security-m5-web-api",
     "test:security-content-trust": "node ./scripts/security-content-trust-test.mjs",
     "test:security-instruction-boundary": "npm run build && node ./scripts/security-instruction-boundary-test.mjs",
     "test:security-sink-policy": "npm run build && node ./scripts/security-sink-policy-test.mjs",

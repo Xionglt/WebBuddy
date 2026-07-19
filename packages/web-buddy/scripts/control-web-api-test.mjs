@@ -189,6 +189,9 @@ try {
   assert.match(html, /Approval Inbox/)
   assert.match(html, /Artifacts API/)
   assert.match(html, /Pause/)
+  assert.match(html, /Service token/)
+  assert.match(html, /authorization.*Bearer/)
+  assert.doesNotMatch(html, /new EventSource\(/, 'authenticated SSE must not put tokens in query parameters')
 
   console.log('control web API tests passed')
 } finally {
