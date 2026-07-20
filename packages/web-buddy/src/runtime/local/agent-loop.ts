@@ -1761,6 +1761,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const sinkSourceItems = contextItems.filter((item) => item.allowedUses.includes('sink'))
       const sinkSourceOrigin = originForUrl(currentUrl)
       const sinkDestinationOrigin = destinationOriginForTool(call.name, call.arguments, currentUrl)
+      const sinkExecutableArgs = sinkActionKind
+        ? finalExecutableSinkArguments(call.name, call.arguments)
+        : call.arguments
       const sinkActionBinding = sinkActionKind && input.taskPolicy && input.taskContract
         ? createSinkActionBinding({
             contractId: input.taskContract.contractId,
@@ -1768,7 +1771,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             runId: session?.session.runId ?? ctx.trace.runId,
             actionId: `${turnId}:${call.id}`,
             toolName: call.name,
-            args: call.arguments,
+            args: sinkExecutableArgs,
             sourceItems: sinkSourceItems,
             ...(sinkSourceOrigin ? { sourceOrigin: sinkSourceOrigin } : {}),
             ...(sinkDestinationOrigin ? { destinationOrigin: sinkDestinationOrigin } : {}),
@@ -1776,14 +1779,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
           })
         : undefined
-      const sinkPreparation = sinkActionKind && input.taskPolicy
+      const sinkPreparation = sinkActionKind
         ? evaluateSinkPolicy({
             actionKind: sinkActionKind,
             runId: session?.session.runId ?? ctx.trace.runId,
             revision: input.taskContract?.revision ?? 0,
             policy: input.taskPolicy,
             sourceItems: sinkSourceItems,
-            payload: call.arguments,
+            payload: sinkExecutableArgs,
             ...(sinkSourceOrigin ? { sourceOrigin: sinkSourceOrigin } : {}),
             ...(sinkDestinationOrigin ? { destinationOrigin: sinkDestinationOrigin } : {}),
             ...(sinkActionBinding ? { actionBinding: sinkActionBinding } : {}),
@@ -3377,6 +3380,17 @@ function markConfirmed(call: { name: string; arguments: Record<string, unknown> 
   if (call.name === 'browser_click' || call.name === 'browser_click_text' || call.name === 'browser_upload_file') {
     call.arguments.confirmed = true
   }
+}
+
+function finalExecutableSinkArguments(
+  toolName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const executable = structuredClone(args)
+  if (toolName === 'browser_click' || toolName === 'browser_click_text' || toolName === 'browser_upload_file') {
+    executable.confirmed = true
+  }
+  return executable
 }
 
 function noteWithPermission(note: string, policy: PolicyEngineDecision, permission: PermissionDecision): string {

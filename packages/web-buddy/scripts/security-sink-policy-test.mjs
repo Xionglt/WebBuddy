@@ -61,7 +61,7 @@ const base = {
   revision: 4,
   policy,
   sourceItems,
-  payload: { text: 'person@example.test' },
+  payload: { ref: 'e1', text: 'person@example.test' },
   sourceOrigin: 'https://source.example.test',
   destinationOrigin: 'https://target.example.test',
   actionBinding: action,

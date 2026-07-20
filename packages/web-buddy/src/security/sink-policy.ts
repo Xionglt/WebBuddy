@@ -87,20 +87,18 @@ export function evaluateSinkPolicy(input: SinkPolicyInput): SinkPolicyDecision {
   }
 
   const rule = matchingRule(input.policy, input.actionKind, sourceSensitivities, input.destinationOrigin)
-  const policyDecision = rule?.decision ?? input.policy?.defaultSensitiveAction
-  if (!policyDecision) {
-    return {
-      ...base,
-      action: 'allow',
-      reasonCode: 'not_sensitive',
-      reason: 'No TaskPolicy applies to this sink.',
-    }
-  }
+  const policyDecision = rule?.decision ?? input.policy?.defaultSensitiveAction ?? 'deny'
   if (rule?.destinationOrigins?.length && !rule.destinationOrigins.includes(input.destinationOrigin!)) {
     return deny(base, 'destination_not_allowed', 'Destination origin is outside the matched TaskPolicy rule.')
   }
   if (policyDecision === 'deny') {
-    return deny(base, 'policy_denied', `TaskPolicy denied ${input.actionKind}.`)
+    return deny(
+      base,
+      'policy_denied',
+      input.policy
+        ? `TaskPolicy denied ${input.actionKind}.`
+        : `No TaskPolicy was supplied; the fail-closed default denied ${input.actionKind}.`,
+    )
   }
   if (!input.actionBinding || !input.approvalBinding) {
     return {
@@ -215,6 +213,9 @@ export function destinationOriginForTool(
 function validateSinkBinding(input: SinkPolicyInput, sourceContentIds: string[]): void {
   const binding = input.actionBinding!
   validateActionBinding(binding, input.runId, input.revision)
+  if (binding.argsSha256 !== digestCanonicalJson(input.payload ?? null)) {
+    throw new Error('Action binding does not match the exact final executable payload.')
+  }
   if (binding.sourceOrigin !== input.sourceOrigin
     || binding.destinationOrigin !== input.destinationOrigin
     || !sameSet(binding.sourceContentIds, sourceContentIds)) {
