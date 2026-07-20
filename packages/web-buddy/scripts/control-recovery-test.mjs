@@ -264,6 +264,34 @@ try {
     attempt: 1,
   }), { idempotencyKey: 'create-child-c4' })
   await runServiceB.start(childRunId, 'start-child-c4')
+  const futureTranscriptRunId = 'recovery-child-future-transcript'
+  const futureTranscriptSession = await childSessions.create({
+    sessionId: 'child-session-future-transcript-c4',
+    runId: futureTranscriptRunId,
+    source: 'web',
+    goal: 'This session contains an unsupported future transcript entry.',
+    mode: 'demo-research',
+  })
+  await writeFile(
+    futureTranscriptSession.transcriptPath,
+    `${JSON.stringify({
+      version: 99,
+      sessionId: futureTranscriptSession.sessionId,
+      runId: futureTranscriptRunId,
+      entryId: 'future-transcript-entry-c4',
+      ts: '2026-07-17T00:00:00.000Z',
+      type: 'user_message',
+      content: 'Future transcript payload.',
+    })}\n`,
+  )
+  await runServiceB.create(snapshot(futureTranscriptRunId, true, {
+    schemaVersion: 'session-ref/v1',
+    provider: 'file-session-store',
+    id: futureTranscriptSession.sessionId,
+    runId: futureTranscriptRunId,
+    attempt: 1,
+  }), { idempotencyKey: 'create-future-transcript-c4' })
+  await runServiceB.start(futureTranscriptRunId, 'start-future-transcript-c4')
   const tenantChildRunId = 'recovery-child-process-tenant'
   await runServiceB.create(
     snapshot(tenantChildRunId, false, undefined, tenantOwnerScope),
@@ -286,6 +314,13 @@ try {
     'recoverable',
     'real server bootstrap classifies an abandoned running record from the prior process',
   )
+  const futureTranscriptRun = await runServiceC.get(futureTranscriptRunId)
+  assert.equal(
+    futureTranscriptRun?.state,
+    'failed',
+    'future transcript versions fail only their run during real server recovery',
+  )
+  assert.match(futureTranscriptRun?.reason ?? '', /failed validation/i)
   assert.equal(
     (await runServiceC.get(tenantChildRunId, { ownerScope: tenantOwnerScope }))?.state,
     'failed',

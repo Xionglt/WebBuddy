@@ -46,7 +46,7 @@ import {
   runWebTask,
 } from '../sdk/web-task.js'
 import { sessionManager } from '../session/manager.js'
-import { FileSessionStore } from '../session/index.js'
+import { FileSessionStore, restoreSessionState } from '../session/index.js'
 import {
   digestCanonicalJson,
   snapshotWebTaskInput,
@@ -134,16 +134,27 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     rootDir: join(outputDir(), 'sessions'),
     sanitize: (value) => security.sanitize(value),
   })
+  const validateRestorableSession = async (record: RunRecord): Promise<boolean> => {
+    const sessionRef = record.sessionRef ?? record.lastSafeBoundary?.sessionRef
+    if (!sessionRef) return false
+    const session = await sessionStore.get(sessionRef.id)
+    if (!session
+      || session.sessionId !== sessionRef.id
+      || session.runId !== record.runId) {
+      return false
+    }
+    try {
+      const restored = await restoreSessionState({ session })
+      return restored.session.sessionId === sessionRef.id
+        && restored.session.runId === record.runId
+    } catch (error) {
+      throw new Error(String(security.sanitize(
+        error instanceof Error ? error.message : String(error),
+      )))
+    }
+  }
   const recoveryService = new RecoveryService(runService, approvalService, {
-    canRestoreSession: async (record) => {
-      if (!record.sessionRef) return false
-      const session = await sessionStore.get(record.sessionRef.id)
-      return Boolean(
-        session
-        && session.sessionId === record.sessionRef.id
-        && session.runId === record.runId,
-      )
-    },
+    canRestoreSession: validateRestorableSession,
   })
   const channels = new Map<string, LiveChannel>()
   const executions = new Map<string, LiveExecution>()
@@ -906,12 +917,31 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         return
       }
       const current = visible
+      if (executionAdapterFor(current) !== 'recruiting_compat') {
+        return respond(409, {
+          error: 'generic_resume_not_supported',
+          message: 'Generic service runs are not restartable until a durable generic checkpoint adapter is available.',
+        })
+      }
       const restartSafe = current.inputSnapshot.goal.metadata?.restartSafe === true
       const restoredSessionId = current.sessionRef?.id ?? current.lastSafeBoundary?.sessionRef?.id
       if (!restartSafe || !restoredSessionId) {
         return respond(409, {
           error: 'resume_requires_safe_session',
           message: 'Resume requires a durable session plus an explicit read-only restart contract; the server will not replay a prior write action.',
+        })
+      }
+      try {
+        if (!await validateRestorableSession(current)) {
+          return respond(409, {
+            error: 'resume_requires_safe_session',
+            message: 'Resume requires a valid durable session; no prior write action was replayed.',
+          })
+        }
+      } catch {
+        return respond(409, {
+          error: 'resume_session_validation_failed',
+          message: 'The durable session failed schema or transcript validation; the run was not resumed.',
         })
       }
       await approvalService.cancelPendingForRun(
@@ -921,12 +951,6 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         storeScope,
       )
       const resuming = await runService.resume(runId, idempotencyKey, storeScope)
-      if (executionAdapterFor(resuming) !== 'recruiting_compat') {
-        return respond(409, {
-          error: 'generic_resume_not_supported',
-          message: 'Generic service runs are not restartable until a durable generic checkpoint adapter is available.',
-        })
-      }
       await launch(resuming, { ...launchOptionsFromRecord(resuming), restoredSessionId })
       const resumed = (await runService.get(runId, storeScope)) ?? resuming
       await security.audit({
