@@ -184,7 +184,9 @@ export function sensitiveActionKindForTool(
   args?: Record<string, unknown>,
 ): SensitiveActionKind | undefined {
   if (toolName === 'browser_open') return 'navigate'
-  if (toolName === 'browser_press_key' && isPotentialSubmitKey(args?.key)) return 'submit'
+  if (toolName === 'browser_press_key') {
+    if (typeof args?.key !== 'string' || isPotentialSubmitKey(args.key)) return 'submit'
+  }
   if (/upload/i.test(toolName)) return 'upload'
   if (/type|fill|paste|select/i.test(toolName)) return 'type_or_paste'
   if (/payment|purchase|checkout/i.test(toolName)) return 'payment'

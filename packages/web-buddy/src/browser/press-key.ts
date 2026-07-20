@@ -39,6 +39,12 @@ export async function browserPressKey(input: {
     })
   }
 
+  if (typeof input.key !== 'string') {
+    return toolFailure('INVALID_ARGUMENT', 'Key must be a string from the supported key allowlist.', {
+      recoverable: false,
+      suggestedNextActions: ['Use browser_press_key with one exact supported key string.'],
+    })
+  }
   const key = normalizeKey(input.key)
   if (!ALLOWED_KEYS.has(key)) {
     return toolFailure('INVALID_ARGUMENT', `Unsupported key "${input.key}". Allowed keys: ${[...ALLOWED_KEYS].join(', ')}.`, {

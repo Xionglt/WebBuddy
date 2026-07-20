@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { browserOpen } from '../dist/browser/open.js'
+import { browserPressKey } from '../dist/browser/press-key.js'
 import {
   createSinkActionBinding,
   evaluateSinkPolicy,
@@ -62,6 +63,13 @@ assert.equal(
   undefined,
   'non-activating navigation keys must not be misclassified as submit',
 )
+for (const key of [undefined, null, 7, ['Enter'], [['Enter']], { value: 'Enter' }]) {
+  assert.equal(
+    sensitiveActionKindForTool('browser_press_key', undefined, { key }),
+    'submit',
+    `malformed browser_press_key(${JSON.stringify(key)}) must fail closed as submit`,
+  )
+}
 
 const secretKinds = matrix.map(([actionKind]) => actionKind)
 for (const actionKind of secretKinds) {
@@ -301,10 +309,15 @@ try {
       `${actionKind} lacks an auditable block result`,
     )
   }
-  for (const key of ['Enter', 'Space']) {
-    const pressKeySubmit = await runPressKeySubmitFixture(root, key)
-    assert.equal(pressKeySubmit.executions.length, 0, `${key} must be blocked before browser_press_key executes`)
-    assert.equal(pressKeySubmit.posts, 0, `${key} must not submit the real form`)
+  for (const testCase of [
+    { label: 'enter', key: 'Enter', focus: 'input[name="query"]' },
+    { label: 'space', key: 'Space', focus: 'button[type="submit"]' },
+    { label: 'array-enter', key: ['Enter'], focus: 'input[name="query"]', malformed: true },
+    { label: 'nested-array-enter', key: [['Enter']], focus: 'input[name="query"]', malformed: true },
+  ]) {
+    const pressKeySubmit = await runPressKeySubmitFixture(root, testCase)
+    assert.equal(pressKeySubmit.executions.length, 0, `${testCase.label} must be blocked before browser_press_key executes`)
+    assert.equal(pressKeySubmit.posts, 0, `${testCase.label} must not submit the real form`)
     assert.deepEqual(pressKeySubmit.gates, ['final_submit'], 'submit-like keys must retain the final_submit gate')
   }
 } finally {
@@ -389,7 +402,7 @@ async function runThroughAgentLoop(root, actionKind, toolName, args) {
   }
 }
 
-async function runPressKeySubmitFixture(root, key) {
+async function runPressKeySubmitFixture(root, testCase) {
   let posts = 0
   const server = createServer((request, response) => {
     if (request.method === 'POST') {
@@ -408,7 +421,7 @@ async function runPressKeySubmitFixture(root, key) {
   const address = server.address()
   assert(address && typeof address === 'object')
   const origin = `http://127.0.0.1:${address.port}`
-  const suffix = key.toLowerCase()
+  const { key, label: suffix } = testCase
   const sessionId = `m6-press-key-${suffix}-submit-session`
   const executions = []
   const gates = []
@@ -431,7 +444,12 @@ async function runPressKeySubmitFixture(root, key) {
     assert.equal(opened.ok, true, opened.observation)
     const page = sessionManager.get(sessionId)?.page
     assert(page)
-    await page.locator(key === 'Space' ? 'button[type="submit"]' : 'input[name="query"]').focus()
+    await page.locator(testCase.focus).focus()
+    if (testCase.malformed) {
+      const direct = await browserPressKey({ sessionId, key })
+      assert.equal(direct.ok, false, 'the execution boundary must reject non-string keys')
+      assert.equal(posts, 0, 'execution-boundary rejection must not submit the form')
+    }
 
     const registry = new ToolRegistry([{
       name: 'browser_press_key',

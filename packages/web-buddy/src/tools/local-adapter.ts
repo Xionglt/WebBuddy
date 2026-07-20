@@ -473,7 +473,7 @@ const localHandlers: Record<string, LocalHandler> = {
 
   async browser_press_key(args, ctx) {
     const r = await browserPressKey({
-      key: String(args.key ?? ''),
+      key: args.key as string,
       ref: args.ref as string | undefined,
       sessionId: ctx.sessionId,
       timeoutMs: args.timeoutMs as number | undefined,
