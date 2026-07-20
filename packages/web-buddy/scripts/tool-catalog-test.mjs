@@ -62,13 +62,20 @@ assertLocalParams('plan_form_fill', ['refresh'])
 
 const mcpNames = TOOL_DEFINITIONS.map((tool) => tool.name)
 for (const name of [
-  'browser_open',
   'browser_snapshot',
-  'browser_click',
-  'browser_click_text',
   'browser_form_snapshot',
   'browser_form_audit',
   'browser_inspect_options',
+  'browser_wait',
+  'browser_screenshot',
+]) {
+  assert(mcpNames.includes(name), `MCP definitions missing ${name}`)
+}
+
+for (const name of [
+  'browser_open',
+  'browser_click',
+  'browser_click_text',
   'browser_upload_file',
   'browser_fill_by_label',
   'browser_select_by_text',
@@ -76,14 +83,12 @@ for (const name of [
   'browser_type',
   'browser_press_key',
   'browser_select',
-  'browser_wait',
-  'browser_screenshot',
 ]) {
-  assert(mcpNames.includes(name), `MCP definitions missing ${name}`)
+  assert(!mcpNames.includes(name), `default MCP definitions must not expose mutation tool ${name}`)
 }
 
 assert(!mcpNames.includes('agent_done'), 'agent_done is local-only')
-assert.equal(mcp.length, TOOL_DEFINITIONS.length, 'MCP adapter should project every MCP-enabled catalog tool')
+assert(mcp.length > TOOL_DEFINITIONS.length, 'the MCP adapter must filter the raw catalog at its trust boundary')
 assert.equal(getToolCategory('browser_snapshot'), 'observation')
 assert.equal(getToolCategory('browser_form_audit'), 'observation')
 assert.equal(getToolCategory('browser_inspect_options'), 'observation')

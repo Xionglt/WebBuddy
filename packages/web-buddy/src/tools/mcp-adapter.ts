@@ -16,7 +16,8 @@ import { browserType } from '../browser/type.js'
 import { browserUploadFile } from '../browser/upload-file.js'
 import { browserWait } from '../browser/wait.js'
 import { getOrCreateProcessTrace } from '../agent-trace/index.js'
-import { formatToolResult } from '../errors.js'
+import { formatToolResult, toolFailure } from '../errors.js'
+import { redactSensitiveData } from '../security/redaction.js'
 import { getToolDef, listMcpToolDefs } from './catalog.js'
 
 const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknown>> = {
@@ -38,55 +39,61 @@ const handlers: Record<string, (args: Record<string, unknown>) => Promise<unknow
   browser_screenshot: (args) => browserScreenshot(args as Parameters<typeof browserScreenshot>[0]),
 }
 
-export const TOOL_DEFINITIONS: Tool[] = listMcpToolDefs().map((tool) => ({
-  name: tool.mcpName ?? tool.name,
-  description: tool.description,
-  inputSchema: tool.parameters as Tool['inputSchema'],
-}))
+const MCP_OBSERVATION_TOOLS = new Set([
+  'browser_snapshot',
+  'browser_form_snapshot',
+  'browser_form_audit',
+  'browser_inspect_options',
+  'browser_wait',
+  'browser_screenshot',
+])
+
+export const TOOL_DEFINITIONS: Tool[] = listMcpToolDefs()
+  .filter((tool) => MCP_OBSERVATION_TOOLS.has(tool.mcpName ?? tool.name))
+  .map((tool) => ({
+    name: tool.mcpName ?? tool.name,
+    description: tool.description,
+    inputSchema: tool.parameters as Tool['inputSchema'],
+  }))
 
 export async function callBrowserTool(name: string, args: Record<string, unknown>) {
   const def = getToolDef(name)
   const category = def?.category
+  const handler = handlers[name]
+  if (!handler) {
+    return formatToolResult(toolFailure('UNKNOWN', `Unknown tool: ${name}`, { recoverable: false }))
+  }
+  if (!MCP_OBSERVATION_TOOLS.has(name)) {
+    return formatToolResult(toolFailure(
+      'NAVIGATION_BLOCKED',
+      `MCP_POLICY_DENIED: ${name} requires a trusted host-issued task/policy/approval envelope; the default MCP compatibility surface is observation-only.`,
+      { recoverable: false },
+    ))
+  }
+
+  const safeArgs = redactSensitiveData(args).value as Record<string, unknown>
   const trace = getOrCreateProcessTrace('mcp-server')
   const span = trace?.startSpan({
     spanType: 'mcp_tool_call',
     name,
     toolName: name,
     toolCategory: category,
-    input: args,
+    input: safeArgs,
     metadata: {
-      sessionId: args.sessionId,
+      sessionId: safeArgs.sessionId,
       category,
     },
   })
-  const handler = handlers[name]
-  if (!handler) {
-    const text = formatToolResult({
-      ok: false,
-      observation: `Unknown tool: ${name}`,
-      error: {
-        code: 'UNKNOWN',
-        message: `Unknown tool: ${name}`,
-        recoverable: false,
-      },
-    })
-    span?.end({
-      status: 'failed',
-      output: text,
-      errorCode: 'UNKNOWN',
-      errorMessage: `Unknown tool: ${name}`,
-    })
-    return text
-  }
 
   try {
     const result = await handler(args)
     const text = formatToolResult(result as Parameters<typeof formatToolResult>[0])
+    const safeResult = redactSensitiveData(result).value
     span?.end({
       status: (result as { ok?: boolean }).ok === false ? 'failed' : 'success',
       output: {
-        result,
-        text,
+        result: safeResult,
+        text: formatToolResult(safeResult as Parameters<typeof formatToolResult>[0]),
       },
     })
     return text
