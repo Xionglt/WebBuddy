@@ -66,6 +66,14 @@ try {
   assert.equal(resuming.runRevision, 1)
   assert.equal(resuming.attempt, 2)
   await service.transition(runId, { to: 'running', idempotencyKey: 'restart-c3' })
+  await assert.rejects(
+    service.requestPause(runId, 'stale-pause-c3', undefined, {
+      expectedRunRevision: 0,
+      expectedAttempt: 1,
+    }),
+    (error) => error?.code === 'STALE_ATTEMPT',
+    'a stale control request must not cross a lifecycle epoch',
+  )
 
   const late = await service.acceptResult({
     runId,

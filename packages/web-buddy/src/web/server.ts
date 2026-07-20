@@ -938,8 +938,18 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         principal,
         requireIdempotencyKey(req, body),
       )
+      const controlExpectation = {
+        expectedRecordRevision: visible.recordRevision,
+        expectedRunRevision: visible.runRevision,
+        expectedAttempt: visible.attempt,
+      }
       if (control === 'pause') {
-        const run = await runService.requestPause(runId, idempotencyKey, storeScope)
+        const run = await runService.requestPause(
+          runId,
+          idempotencyKey,
+          storeScope,
+          controlExpectation,
+        )
         executions.get(runId)?.controller.requestPause('Pause requested from control plane.')
         await security.audit({
           principal,
@@ -958,12 +968,16 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           'Run was cancelled while awaiting approval.',
           `cancel-approval-fence:${visible.runRevision}:${visible.attempt}`,
           storeScope,
+          {
+            expectedRunRevision: visible.runRevision,
+            expectedAttempt: visible.attempt,
+          },
         )
         const run = await runService.requestCancel(
           runId,
           idempotencyKey,
           storeScope,
-          { quiescent: !liveExecution },
+          { ...controlExpectation, quiescent: !liveExecution },
         )
         liveExecution?.controller.abort('Cancel requested from control plane.')
         await security.audit({
@@ -1009,8 +1023,17 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         'Approval invalidated when resume created a new run revision.',
         `resume-approval-fence:${current.runRevision}:${current.attempt}`,
         storeScope,
+        {
+          expectedRunRevision: current.runRevision,
+          expectedAttempt: current.attempt,
+        },
       )
-      const resuming = await runService.resume(runId, idempotencyKey, storeScope)
+      const resuming = await runService.resume(
+        runId,
+        idempotencyKey,
+        storeScope,
+        controlExpectation,
+      )
       await launch(resuming, { ...launchOptionsFromRecord(resuming), restoredSessionId })
       const resumed = (await runService.get(runId, storeScope)) ?? resuming
       await security.audit({
@@ -1027,11 +1050,18 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if (path === '/api/stop' && req.method === 'POST') {
       const runId = query('id')
       if (!runId) return respond(400, { error: 'runId is required' })
-      if (!await runService.get(runId, storeScope)) return denyResource({ kind: 'run' })
+      const visible = await runService.get(runId, storeScope)
+      if (!visible) return denyResource({ kind: 'run' })
       const run = await runService.requestCancel(
         runId,
         `legacy-stop:${runId}:${randomUUID()}`,
         storeScope,
+        {
+          expectedRecordRevision: visible.recordRevision,
+          expectedRunRevision: visible.runRevision,
+          expectedAttempt: visible.attempt,
+          quiescent: !executions.has(runId),
+        },
       )
       executions.get(runId)?.controller.abort('Cancel requested from legacy stop endpoint.')
       await approvalService.cancelPendingForRun(
@@ -1039,6 +1069,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         'Run was cancelled from the legacy stop endpoint.',
         `legacy-cancel-approval-fence:${run.runRevision}:${run.attempt}`,
         storeScope,
+        {
+          expectedRunRevision: run.runRevision,
+          expectedAttempt: run.attempt,
+        },
       )
       await security.audit({
         principal,

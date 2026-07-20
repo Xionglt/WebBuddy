@@ -84,6 +84,12 @@ export interface LateResultDecision {
   record: RunRecord
 }
 
+export interface ControlEpochExpectation {
+  expectedRecordRevision?: number
+  expectedRunRevision?: number
+  expectedAttempt?: number
+}
+
 export class RunService {
   constructor(readonly store: RunStore) {}
 
@@ -263,12 +269,19 @@ export class RunService {
     return committed.record
   }
 
-  async requestPause(runId: string, idempotencyKey: string, scope?: ScopedStoreQuery): Promise<RunRecord> {
+  async requestPause(
+    runId: string,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+    expectation: ControlEpochExpectation = {},
+  ): Promise<RunRecord> {
     const current = await this.require(runId, scope)
+    assertControlExpectation(current, expectation)
     if (current.state === 'pausing' || current.state === 'paused') return current
     return this.transition(runId, {
       to: 'pausing',
       idempotencyKey,
+      ...expectation,
       eventType: 'control_requested',
       data: { control: 'pause', semantics: 'acknowledge_at_safe_turn_boundary' },
     }, scope)
@@ -303,12 +316,19 @@ export class RunService {
     }, scope)
   }
 
-  async resume(runId: string, idempotencyKey: string, scope?: ScopedStoreQuery): Promise<RunRecord> {
+  async resume(
+    runId: string,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+    expectation: ControlEpochExpectation = {},
+  ): Promise<RunRecord> {
     const current = await this.require(runId, scope)
+    assertControlExpectation(current, expectation)
     if (current.state === 'resuming') return current
     return this.transition(runId, {
       to: 'resuming',
       idempotencyKey,
+      ...expectation,
       update: (record) => ({
         runRevision: record.runRevision + 1,
         attempt: record.attempt + 1,
@@ -326,9 +346,10 @@ export class RunService {
     runId: string,
     idempotencyKey: string,
     scope?: ScopedStoreQuery,
-    options: { quiescent?: boolean } = {},
+    options: ControlEpochExpectation & { quiescent?: boolean } = {},
   ): Promise<RunRecord> {
     const current = await this.require(runId, scope)
+    assertControlExpectation(current, options)
     if (current.state === 'cancelled' || current.state === 'cancelling') return current
     const quiescentTerminal = options.quiescent === true
       && (current.state === 'paused'
@@ -338,6 +359,9 @@ export class RunService {
       return this.transition(runId, {
         to: 'cancelled',
         idempotencyKey,
+        expectedRecordRevision: options.expectedRecordRevision,
+        expectedRunRevision: options.expectedRunRevision,
+        expectedAttempt: options.expectedAttempt,
         eventType: 'control_requested',
         reason: current.state === 'queued'
           ? 'Cancelled before execution.'
@@ -349,6 +373,9 @@ export class RunService {
     return this.transition(runId, {
       to: 'cancelling',
       idempotencyKey,
+      expectedRecordRevision: options.expectedRecordRevision,
+      expectedRunRevision: options.expectedRunRevision,
+      expectedAttempt: options.expectedAttempt,
       eventType: 'control_requested',
       data: { control: 'cancel' },
       update: () => ({ pendingApprovalIds: [] }),
@@ -528,6 +555,7 @@ export class ApprovalService {
     reason: string,
     idempotencyPrefix: string,
     scope?: ScopedStoreQuery,
+    expectation?: Pick<ControlEpochExpectation, 'expectedRunRevision' | 'expectedAttempt'>,
   ): Promise<ApprovalRecord[]> {
     const pending = await this.store.list({
       runId,
@@ -536,7 +564,12 @@ export class ApprovalService {
       ...(scope?.ownerScope ? { ownerScope: scope.ownerScope } : {}),
     })
     const cancelled: ApprovalRecord[] = []
-    for (const current of pending.items) {
+    for (const current of pending.items.filter((approval) => (
+      (expectation?.expectedRunRevision === undefined
+        || approval.runRevision === expectation.expectedRunRevision)
+      && (expectation?.expectedAttempt === undefined
+        || approval.attempt === expectation.expectedAttempt)
+    ))) {
       const occurredAt = new Date().toISOString()
       const idempotencyKey = `${idempotencyPrefix}:${current.approvalId}`
       const record: ApprovalRecord = {
@@ -617,6 +650,22 @@ function fence(current: RunRecord, runRevision?: number, attempt?: number): void
       `Stale run attempt: expected ${runRevision ?? current.runRevision}/${attempt ?? current.attempt}, current ${current.runRevision}/${current.attempt}.`,
     )
   }
+}
+
+function assertControlExpectation(
+  current: RunRecord,
+  expectation: ControlEpochExpectation,
+): void {
+  if (expectation.expectedRecordRevision !== undefined
+    && expectation.expectedRecordRevision !== current.recordRevision) {
+    throw new ControlStoreError(
+      'REVISION_CONFLICT',
+      `Expected record revision ${expectation.expectedRecordRevision}, found ${current.recordRevision}.`,
+      expectation.expectedRecordRevision,
+      current.recordRevision,
+    )
+  }
+  fence(current, expectation.expectedRunRevision, expectation.expectedAttempt)
 }
 
 function mergeRefs(record: RunRecord, input: LateResultInput): Partial<RunRecord> {

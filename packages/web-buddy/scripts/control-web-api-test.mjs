@@ -218,6 +218,105 @@ try {
     [],
   )
 
+  const raceCreateResponse = await request(base, '/api/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'demo-research',
+      startUrl: 'https://example.test/race-research',
+      taskPrompt: 'Exercise a stale control request.',
+    }),
+  })
+  assert.equal(raceCreateResponse.status, 201)
+  const raceCreated = await raceCreateResponse.json()
+  await control.runService.start(raceCreated.runId, 'race-start-c3', { ownerScope })
+  await control.runService.requestPause(raceCreated.runId, 'race-pause-c3', { ownerScope })
+  const racePausing = await control.runService.get(raceCreated.runId, { ownerScope })
+  await control.runService.acknowledgePause(raceCreated.runId, {
+    schemaVersion: 'safe-turn-boundary-ref/v1',
+    runId: raceCreated.runId,
+    runRevision: racePausing.runRevision,
+    attempt: racePausing.attempt,
+    turnId: 'race-safe-turn-c3',
+    actionSeq: 1,
+    observedAt: new Date().toISOString(),
+  }, 'race-pause-ack-c3', { ownerScope })
+
+  const originalGet = control.runService.get.bind(control.runService)
+  let injectNewEpoch = true
+  control.runService.get = async (runId, query) => {
+    const stale = await originalGet(runId, query)
+    if (injectNewEpoch && runId === raceCreated.runId) {
+      injectNewEpoch = false
+      const resumed = await control.runService.resume(
+        runId,
+        'race-concurrent-resume-c3',
+        query,
+      )
+      await control.runService.transition(runId, {
+        to: 'running',
+        idempotencyKey: 'race-concurrent-start-c3',
+        expectedRunRevision: resumed.runRevision,
+        expectedAttempt: resumed.attempt,
+      }, query)
+      const requestedAt = new Date().toISOString()
+      await control.approvalService.enqueue({
+        approvalId: 'race-new-epoch-approval-c3',
+        runId,
+        runRevision: resumed.runRevision,
+        attempt: resumed.attempt,
+        status: 'pending',
+        ownerScope,
+        actionBinding: {
+          schemaVersion: 'action-binding/v1',
+          contractId: 'web-control-plane-legacy-adapter',
+          contractRevision: raceCreated.revision,
+          runId,
+          actionId: 'race-new-epoch-action-c3',
+          toolName: 'browser_click',
+          argsSha256: 'd'.repeat(64),
+          sourceContentIds: ['race-new-page-c3'],
+          sourceSensitiveClasses: [],
+          sourceOrigin: 'https://example.test',
+          destinationOrigin: 'https://example.test',
+          actionSeq: 1,
+          expiresAt: '2030-01-01T00:00:00.000Z',
+        },
+        allowedDecisions: ['approved', 'denied'],
+        requestedAt,
+        expiresAt: '2030-01-01T00:00:00.000Z',
+      }, 'race-new-epoch-approval-enqueue-c3')
+    }
+    return stale
+  }
+  let staleCancelResponse
+  try {
+    staleCancelResponse = await request(base, `/api/runs/${encodeURIComponent(raceCreated.runId)}/cancel`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': 'api-stale-cancel-c3' },
+      body: JSON.stringify({ expectedRevision: raceCreated.revision }),
+    })
+  } finally {
+    control.runService.get = originalGet
+  }
+  assert.equal(staleCancelResponse.status, 409, 'stale cancel must fail its atomic epoch fence')
+  const raceCurrent = await control.runService.get(raceCreated.runId, { ownerScope })
+  assert.equal(raceCurrent.runRevision, 1)
+  assert.equal(raceCurrent.attempt, 2)
+  assert.equal(raceCurrent.state, 'running', 'stale cancel must not mutate the new attempt')
+  assert.equal(
+    (await control.approvalService.get('race-new-epoch-approval-c3', { ownerScope })).status,
+    'pending',
+    'stale cancel must not cancel an approval from the new attempt',
+  )
+  await control.approvalService.cancelPendingForRun(
+    raceCreated.runId,
+    'Race fixture cleanup.',
+    'race-new-epoch-cleanup-c3',
+    { ownerScope },
+    { expectedRunRevision: 1, expectedAttempt: 2 },
+  )
+
   const actionBinding = {
     schemaVersion: 'action-binding/v1',
     contractId: 'web-control-plane-legacy-adapter',

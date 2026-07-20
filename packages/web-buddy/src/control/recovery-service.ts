@@ -46,6 +46,10 @@ export class RecoveryService {
           'Run was interrupted while cancellation was settling.',
           `startup-cancel-approvals:${record.runRevision}:${record.attempt}`,
           scope,
+          {
+            expectedRunRevision: record.runRevision,
+            expectedAttempt: record.attempt,
+          },
         )
         decisions.push({ runId: record.runId, fromState: record.state, toState: failed.state, recoverable: false, reason })
         continue
@@ -79,6 +83,10 @@ export class RecoveryService {
         'Approval invalidated by process restart and run interruption.',
         `startup-approval-fence:${record.runRevision}:${record.attempt}`,
         scope,
+        {
+          expectedRunRevision: record.runRevision,
+          expectedAttempt: record.attempt,
+        },
       )
       decisions.push({
         runId: record.runId,
