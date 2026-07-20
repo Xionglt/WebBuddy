@@ -14,7 +14,10 @@ import type { AgentRunController } from '../kernel/run-controller.js'
 import {
   FileSessionRecorder,
   FileSessionStore,
+  restoreSessionState,
+  sanitizeRestoredMessagesForResume,
   type AgentSession,
+  type RestoredSessionState,
   type SessionRecorder,
 } from '../session/index.js'
 import { evaluateCompletionContract } from '../task/completion-contract.js'
@@ -76,6 +79,8 @@ export interface WebTaskExecutionHost {
   controller?: Pick<AgentRunController, 'signal' | 'pauseRequested'>
   sessionId?: string
   durableSession?: boolean
+  restoredSession?: RestoredSessionState
+  readOnlyAuthority?: boolean
   onSessionReady?: (session: AgentSession) => void | Promise<void>
   persistenceSanitizer?: (value: unknown) => unknown
 }
@@ -330,6 +335,14 @@ export function createWebTaskRuntimeDriver(
 
 const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = createWebTaskRuntimeDriver()
 
+export function listGenericWebTaskToolDefs(readOnlyAuthority = false) {
+  const generic = listLocalToolDefs()
+    .filter((tool) => !['resume_query', 'job_match_candidates', 'plan_form_fill'].includes(tool.name))
+  return readOnlyAuthority
+    ? generic.filter((tool) => tool.execution.readOnly || tool.name === 'agent_done')
+    : generic
+}
+
 async function executeGenericWebTask(
   request: Parameters<WebTaskRuntimeDriver['execute']>[0],
   host: WebTaskExecutionHost,
@@ -344,33 +357,64 @@ async function executeGenericWebTask(
       goal: request.input.goal.instruction,
       sanitize: host.persistenceSanitizer,
     })
-    const sessionId = host.sessionId ?? request.input.sessionRef?.id ?? `web-task-${request.input.runId}`
+    const executionContext = request.runtime?.executionContext
+    const sessionId = host.sessionId
+      ?? executionContext?.sessionRef?.id
+      ?? request.input.sessionRef?.id
+      ?? `web-task-${request.input.runId}`
     const llm = new LlmGateway(config.model)
     let session: SessionRecorder | undefined
-    let sessionRef = request.input.sessionRef
+    let sessionRef = executionContext?.sessionRef ?? request.input.sessionRef
+    let restoredMessages: ReturnType<typeof sanitizeRestoredMessagesForResume> | undefined
     try {
       if (host.durableSession) {
         const store = new FileSessionStore({
           rootDir: join(config.trace.outDir, 'sessions'),
           sanitize: host.persistenceSanitizer,
         })
-        const created = await store.create({
-          sessionId,
-          runId: request.input.runId,
-          source: 'web',
-          goal: request.input.goal.instruction,
-          mode: 'generic-web-task',
-          traceRunId: request.input.runId,
-        })
-        session = new FileSessionRecorder(store, created)
-        sessionRef = {
-          schemaVersion: 'session-ref/v1',
-          provider: 'file-session-store',
-          id: created.sessionId,
-          runId: request.input.runId,
-          attempt: request.input.sessionRef?.attempt ?? 1,
+        if (host.restoredSession) {
+          if (executionContext?.recoveryMode !== 'read_only_reobserve/v1'
+            || host.readOnlyAuthority !== true) {
+            throw new Error('Generic session recovery requires explicit read-only authority.')
+          }
+          const expectedRef = executionContext.sessionRef
+          if (!expectedRef
+            || expectedRef.provider !== 'file-session-store'
+            || expectedRef.id !== sessionId
+            || expectedRef.runId !== request.input.runId) {
+            throw new Error('Generic recovery SessionRef does not match the current run.')
+          }
+          const current = await store.get(sessionId)
+          if (!current
+            || current.sessionId !== host.restoredSession.session.sessionId
+            || current.runId !== host.restoredSession.session.runId
+            || current.runId !== request.input.runId) {
+            throw new Error('Generic recovery session is missing or changed.')
+          }
+          const restored = await restoreSessionState({ session: current })
+          restoredMessages = sanitizeRestoredMessagesForResume(restored.restoredMessages)
+          session = new FileSessionRecorder(store, current)
+          sessionRef = expectedRef
+          await host.onSessionReady?.(current)
+        } else {
+          const created = await store.create({
+            sessionId,
+            runId: request.input.runId,
+            source: 'web',
+            goal: request.input.goal.instruction,
+            mode: 'generic-web-task',
+            traceRunId: request.input.runId,
+          })
+          session = new FileSessionRecorder(store, created)
+          sessionRef = {
+            schemaVersion: 'session-ref/v1',
+            provider: 'file-session-store',
+            id: created.sessionId,
+            runId: request.input.runId,
+            attempt: executionContext?.attempt ?? request.input.sessionRef?.attempt ?? 1,
+          }
+          await host.onSessionReady?.(created)
         }
-        await host.onSessionReady?.(created)
       }
       if (request.input.startUrl) {
         const opened = await browserOpen({ url: request.input.startUrl, sessionId, waitUntil: 'domcontentloaded' })
@@ -390,7 +434,7 @@ async function executeGenericWebTask(
           ...(sessionRef ? { sessionRef } : {}),
         }
       }
-      const genericDefs = listLocalToolDefs().filter((tool) => !['resume_query', 'job_match_candidates', 'plan_form_fill'].includes(tool.name))
+      const genericDefs = listGenericWebTaskToolDefs(host.readOnlyAuthority === true)
       const loop = await runAgentLoop({
         goal: request.input.goal.instruction,
         contextItems: request.contextItems,
@@ -405,6 +449,7 @@ async function executeGenericWebTask(
         permissionMode: config.human.permissionMode,
         allowFinalSubmit: false,
         session,
+        restoredMessages,
         abortSignal: host.controller?.signal,
         shouldPause: () => host.controller?.pauseRequested ?? false,
         persistenceSanitizer: host.persistenceSanitizer,
@@ -416,6 +461,13 @@ async function executeGenericWebTask(
         }),
       })
       const traceSummary = trace.finish()
+      const evidence = (loop.evidence ?? []).map((item) => ({
+        ...item,
+        binding: {
+          ...item.binding,
+          ...(sessionRef ? { sessionRef } : {}),
+        },
+      }))
       return {
         status: host.controller?.signal.aborted
           ? 'cancelled'
@@ -425,7 +477,7 @@ async function executeGenericWebTask(
               ? 'completed'
               : 'failed',
         summary: loop.summary,
-        evidence: loop.evidence ?? [],
+        evidence,
         artifacts: [],
         metrics: metricsFor(trace, config, traceSummary.tracePath),
         actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
