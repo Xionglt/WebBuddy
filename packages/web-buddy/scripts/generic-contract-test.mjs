@@ -48,6 +48,14 @@ assert.equal('onEvent' in snapshot, false, 'callbacks must not enter the durable
 assert.equal(snapshot.sha256.length, 64)
 assert.equal(digestCanonicalJson({ b: 2, a: 1 }), digestCanonicalJson({ a: 1, b: 2 }), 'canonical digest must ignore object key order')
 assert.equal(canonicalJson({ b: 2, a: 1 }), '{"a":1,"b":2}')
+const protoAuthorityDenied = JSON.parse('{"metadata":{"__proto__":{"browserWriteAuthority":false},"safe":true}}')
+const protoAuthorityGranted = JSON.parse('{"metadata":{"__proto__":{"browserWriteAuthority":true},"safe":true}}')
+assert.match(canonicalJson(protoAuthorityDenied), /"__proto__"/, 'canonical JSON must retain dangerous own keys as data')
+assert.notEqual(
+  digestCanonicalJson(protoAuthorityDenied),
+  digestCanonicalJson(protoAuthorityGranted),
+  'authority-bearing own keys must change the canonical digest',
+)
 
 assert.throws(
   () => validateContextItem(contextItem({ id: 'secret', sensitivity: 'secret', allowedUses: ['prompt'] })),

@@ -176,6 +176,52 @@ for (const [label, payload] of [
   assert.equal(decision.reasonCode, 'binding_mismatch')
 }
 
+const protoApprovedPayload = JSON.parse('{"message":"approved","__proto__":{"browserWriteAuthority":false}}')
+const protoEscalatedPayload = JSON.parse('{"message":"approved","__proto__":{"browserWriteAuthority":true}}')
+const protoBoundAction = createSinkActionBinding({
+  contractId: 'm6-proto-binding',
+  revision: 1,
+  runId: 'm6-proto-binding-run',
+  actionId: 'm6-proto-binding-action',
+  toolName: 'send_message',
+  args: protoApprovedPayload,
+  sourceItems: [sourceItem()],
+  sourceOrigin: 'https://source.example',
+  destinationOrigin: 'https://destination.example',
+  actionSeq: 1,
+  expiresAt: '2030-01-01T00:00:00.000Z',
+})
+assert.equal(
+  evaluateSinkPolicy({
+    actionKind: 'send',
+    runId: 'm6-proto-binding-run',
+    revision: 1,
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'ask',
+      rules: [],
+    },
+    sourceItems: [sourceItem()],
+    payload: protoEscalatedPayload,
+    sourceOrigin: 'https://source.example',
+    destinationOrigin: 'https://destination.example',
+    actionBinding: protoBoundAction,
+    approvalBinding: {
+      schemaVersion: 'approval-binding/v1',
+      approvalId: 'm6-proto-binding-approval',
+      actionBindingSha256: digestCanonicalJson(protoBoundAction),
+      decision: 'approved',
+      issuedAt: '2026-07-19T00:00:00.000Z',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+      nonce: 'm6-proto-binding-nonce',
+    },
+    consumedApprovalNonces: new Set(),
+    now: new Date('2026-07-19T00:00:01.000Z'),
+  }).action,
+  'deny',
+  '__proto__ payload mutation must invalidate an exact action approval',
+)
+
 const negativeControls = [
   {
     name: 'unsafe-action',

@@ -769,7 +769,7 @@ function canonicalize(value: unknown, seen: WeakSet<object>, path: string): Json
     if (Array.isArray(value)) return value.map((item, index) => canonicalize(item, seen, `${path}[${index}]`))
     const prototype = Object.getPrototypeOf(value)
     if (prototype !== Object.prototype && prototype !== null) invalid(`${path} contains a non-plain object.`)
-    const output: JsonObject = {}
+    const output = Object.create(null) as JsonObject
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       const nested = (value as Record<string, unknown>)[key]
       if (nested === undefined) invalid(`${path}.${key} is undefined; omit it explicitly.`)

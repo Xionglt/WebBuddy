@@ -511,7 +511,7 @@ function redactExactSecrets(value: unknown, secrets: string[]): JsonValue {
   }
   if (Array.isArray(value)) return value.map((item) => redactExactSecrets(item, secrets))
   if (value && typeof value === 'object') {
-    const output: JsonObject = {}
+    const output = Object.create(null) as JsonObject
     for (const [key, child] of Object.entries(value)) {
       output[key] = redactExactSecrets(child, secrets)
     }
