@@ -51,6 +51,8 @@ import {
   digestCanonicalJson,
   snapshotWebTaskInput,
   validateArtifactRef,
+  validateCheckpointRef,
+  validateSessionRef,
   type ArtifactRef,
   type JsonObject,
   type OwnerScope,
@@ -1577,14 +1579,38 @@ function validateWebTaskServiceResult(
   if (digestCanonicalJson(result.ownerScope ?? null) !== digestCanonicalJson(launched.ownerScope ?? null)) {
     throw new Error('WebTaskResult owner scope does not match the launched Run.')
   }
+  if (result.sessionRef) {
+    validateSessionRef(result.sessionRef, launched.runId, launched.attempt)
+    if (launched.sessionRef
+      && (result.sessionRef.provider !== launched.sessionRef.provider
+        || result.sessionRef.id !== launched.sessionRef.id)) {
+      throw new Error('WebTaskResult SessionRef does not match the launched Run session.')
+    }
+  }
+  if (result.checkpointRef) {
+    validateCheckpointRef(result.checkpointRef)
+    const resultSession = result.sessionRef ?? launched.sessionRef
+    if (!resultSession) throw new Error('WebTaskResult checkpoint has no bound SessionRef.')
+    if (resultSession.checkpointRef
+      && digestCanonicalJson(resultSession.checkpointRef) !== digestCanonicalJson(result.checkpointRef)) {
+      throw new Error('WebTaskResult checkpoint does not match its SessionRef.')
+    }
+  }
   for (const artifact of result.artifacts) {
     validateArtifactRef(artifact, launched.runId, launched.runRevision)
     if (artifact.sensitivity === 'secret') {
       throw new Error(`Artifact ${artifact.id} cannot use ordinary storage for secret content.`)
     }
-    if (artifact.ownerScope
-      && digestCanonicalJson(artifact.ownerScope) !== digestCanonicalJson(launched.ownerScope ?? null)) {
+    if (digestCanonicalJson(artifact.ownerScope ?? null) !== digestCanonicalJson(launched.ownerScope ?? null)) {
       throw new Error(`Artifact ${artifact.id} owner scope does not match the launched Run.`)
+    }
+    if (artifact.binding.sessionRef) {
+      validateSessionRef(artifact.binding.sessionRef, launched.runId, launched.attempt)
+      const resultSession = result.sessionRef ?? launched.sessionRef
+      if (!resultSession
+        || digestCanonicalJson(artifact.binding.sessionRef) !== digestCanonicalJson(resultSession)) {
+        throw new Error(`Artifact ${artifact.id} SessionRef does not match the WebTaskResult.`)
+      }
     }
     if (digestCanonicalJson(artifact) !== digestCanonicalJson(security.sanitize(artifact))) {
       throw new Error(`Artifact ${artifact.id} contains material rejected by the service secret boundary.`)

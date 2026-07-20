@@ -24,8 +24,10 @@ import {
   isContextItemEligible,
   snapshotWebTaskInput,
   validateArtifactRef,
+  validateCheckpointRef,
   validateContextItem,
   validateEvidenceRef,
+  validateSessionRef,
   type ContextItem,
   type RunSnapshot,
   type WebTaskEvent,
@@ -130,10 +132,31 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   }
 
   try {
+    const expectedAttempt = snapshot.sessionRef?.attempt ?? 1
     outcome.evidence.forEach((item) => validateEvidenceRef(item, runId, revision))
     outcome.artifacts.forEach((item) => validateArtifactRef(item, runId, revision))
     assertUniqueResultIds(outcome.evidence, 'evidence')
     assertUniqueResultIds(outcome.artifacts, 'artifact')
+    if (outcome.sessionRef) {
+      validateSessionRef(outcome.sessionRef, runId, expectedAttempt)
+      if (snapshot.sessionRef
+        && (outcome.sessionRef.provider !== snapshot.sessionRef.provider
+          || outcome.sessionRef.id !== snapshot.sessionRef.id)) {
+        throw new WebTaskContractError('BINDING_MISMATCH', 'Runtime SessionRef does not match the frozen input session.')
+      }
+    }
+    if (outcome.checkpointRef) {
+      validateCheckpointRef(outcome.checkpointRef)
+      const resultSession = outcome.sessionRef ?? snapshot.sessionRef
+      if (!resultSession) {
+        throw new WebTaskContractError('BINDING_MISMATCH', 'Runtime checkpoint has no bound SessionRef.')
+      }
+      if (resultSession.checkpointRef
+        && (resultSession.checkpointRef.provider !== outcome.checkpointRef.provider
+          || resultSession.checkpointRef.id !== outcome.checkpointRef.id)) {
+        throw new WebTaskContractError('BINDING_MISMATCH', 'Runtime checkpoint does not match its SessionRef.')
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message), data: { code: 'BINDING_MISMATCH' } })

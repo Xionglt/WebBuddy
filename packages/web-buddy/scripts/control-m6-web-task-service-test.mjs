@@ -39,8 +39,20 @@ const driver = {
           tenantId: 'foreign-tenant',
           userId: 'foreign-user',
         }
-      : request.input.ownerScope
+      : outcomeMode === 'missing-owner'
+        ? undefined
+        : request.input.ownerScope
     const artifact = comparisonArtifact(request.input.runId, request.input.revision, artifactOwnerScope)
+    if (outcomeMode === 'foreign-session') {
+      artifact.binding.sessionRef = {
+        schemaVersion: 'session-ref/v1',
+        provider: 'foreign-store',
+        id: 'foreign-session',
+        runId: 'foreign-run',
+        attempt: 9,
+      }
+    }
+    if (outcomeMode === 'negative-action-sequence') artifact.binding.actionSeq = -1
     return {
       status: 'completed',
       summary: outcomeMode === 'artifact'
@@ -55,6 +67,26 @@ const driver = {
         profile: 'deterministic',
       }),
       actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+      ...(outcomeMode === 'foreign-result-session'
+        ? {
+            sessionRef: {
+              schemaVersion: 'session-ref/v1',
+              provider: 'foreign-store',
+              id: 'foreign-result-session',
+              runId: 'foreign-run',
+              attempt: 9,
+            },
+          }
+        : {}),
+      ...(outcomeMode === 'checkpoint-without-session'
+        ? {
+            checkpointRef: {
+              schemaVersion: 'checkpoint-ref/v1',
+              provider: 'orphan-checkpoint-store',
+              id: 'orphan-checkpoint',
+            },
+          }
+        : {}),
     }
   },
 }
@@ -95,6 +127,26 @@ try {
   const rejectedArtifacts = await json(base, `/api/runs/${encodeURIComponent(foreignArtifact.runId)}/artifacts`)
   assert.equal(rejectedArtifacts.items.length, 0)
 
+  for (const bindingMode of [
+    'missing-owner',
+    'foreign-session',
+    'negative-action-sequence',
+    'foreign-result-session',
+    'checkpoint-without-session',
+  ]) {
+    outcomeMode = bindingMode
+    const invalid = await createGenericRun(
+      base,
+      `m6-generic-${bindingMode}`,
+      genericSnapshot(`client-${bindingMode}`),
+    )
+    const invalidRun = await waitForState(base, invalid.runId, ['completed', 'failed', 'blocked_on_human'])
+    assert.equal(invalidRun.state, 'failed', `${bindingMode} was accepted by the service binding boundary`)
+    const invalidArtifacts = await json(base, `/api/runs/${encodeURIComponent(invalid.runId)}/artifacts`)
+    assert.equal(invalidArtifacts.items.length, 0, `${bindingMode} attached an ArtifactRef`)
+  }
+
+  outcomeMode = 'artifact'
   const genericCallsBeforeLegacy = driverRequests.length
   const legacyResponse = await request(base, '/api/run', {
     method: 'POST',

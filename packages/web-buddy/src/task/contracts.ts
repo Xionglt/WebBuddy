@@ -448,9 +448,7 @@ export function validateWebTaskInput(input: WebTaskInput): void {
   }
   unique((input.contextProviders ?? []).map((provider) => provider.id), 'context provider id')
   if (input.policy) validateTaskPolicy(input.policy)
-  if (input.sessionRef && input.runId && input.sessionRef.runId !== input.runId) {
-    throw new WebTaskContractError('BINDING_MISMATCH', 'sessionRef.runId must match input.runId.')
-  }
+  if (input.sessionRef) validateSessionRef(input.sessionRef, input.runId ?? input.sessionRef.runId)
 }
 
 export function validateTaskContract(contract: TaskContract): void {
@@ -517,8 +515,19 @@ export function validateEvidenceRef(evidence: EvidenceRef, runId: string, revisi
   isoTimestamp(evidence.createdAt, `${evidence.id}.createdAt`)
   if (evidence.expiresAt) isoTimestamp(evidence.expiresAt, `${evidence.id}.expiresAt`)
   if (evidence.binding.runId !== runId || evidence.binding.revision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', `${evidence.id} does not match the current run/revision.`)
+  if (evidence.binding.sessionRef) validateSessionRef(evidence.binding.sessionRef, runId)
+  if (evidence.binding.actionSeq !== undefined) nonNegativeInteger(evidence.binding.actionSeq, `${evidence.id}.binding.actionSeq`)
   if (evidence.authority === 'subagent_advisory' && evidence.trust !== 'non_authoritative') invalid(`${evidence.id}: subagent evidence must be non_authoritative.`)
-  if (evidence.actionBinding) validateActionBinding(evidence.actionBinding, runId, revision)
+  if (evidence.actionBinding) {
+    validateActionBinding(evidence.actionBinding, runId, revision)
+    if (evidence.binding.actionSeq !== undefined && evidence.binding.actionSeq !== evidence.actionBinding.actionSeq) {
+      throw new WebTaskContractError('BINDING_MISMATCH', `${evidence.id}.binding.actionSeq does not match its ActionBinding.`)
+    }
+    if (evidence.binding.sessionRef && evidence.actionBinding.sessionRef
+      && digestCanonicalJson(evidence.binding.sessionRef) !== digestCanonicalJson(evidence.actionBinding.sessionRef)) {
+      throw new WebTaskContractError('BINDING_MISMATCH', `${evidence.id}.binding.sessionRef does not match its ActionBinding.`)
+    }
+  }
 }
 
 export function validateArtifactRef(artifact: ArtifactRef, runId: string, revision: number): void {
@@ -527,6 +536,8 @@ export function validateArtifactRef(artifact: ArtifactRef, runId: string, revisi
   nonEmpty(artifact.kind, `${artifact.id}.kind`)
   isoTimestamp(artifact.createdAt, `${artifact.id}.createdAt`)
   if (artifact.binding.runId !== runId || artifact.binding.revision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', `${artifact.id} does not match the current run/revision.`)
+  if (artifact.binding.sessionRef) validateSessionRef(artifact.binding.sessionRef, runId)
+  if (artifact.binding.actionSeq !== undefined) nonNegativeInteger(artifact.binding.actionSeq, `${artifact.id}.binding.actionSeq`)
   if (!Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 0) invalid(`${artifact.id}.byteLength must be a non-negative integer.`)
   if (!/^[a-f0-9]{64}$/i.test(artifact.sha256)) invalid(`${artifact.id}.sha256 must be a SHA-256 hex digest.`)
   if (!artifact.immutable) invalid(`${artifact.id} must be immutable.`)
@@ -541,9 +552,29 @@ export function validateActionBinding(binding: ActionBinding, runId = binding.ru
   if (binding.runId !== runId || binding.contractRevision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', 'Action binding does not match the current run/revision.')
   nonEmpty(binding.actionId, 'actionBinding.actionId')
   nonEmpty(binding.toolName, 'actionBinding.toolName')
+  if (binding.sessionRef) validateSessionRef(binding.sessionRef, runId)
+  nonNegativeInteger(binding.actionSeq, 'actionBinding.actionSeq')
+  isoTimestamp(binding.expiresAt, 'actionBinding.expiresAt')
   if (!/^[a-f0-9]{64}$/i.test(binding.argsSha256)) invalid('actionBinding.argsSha256 must be a SHA-256 hex digest.')
   if (binding.sourceOrigin) validateFullOrigin(binding.sourceOrigin, 'actionBinding.sourceOrigin')
   if (binding.destinationOrigin) validateFullOrigin(binding.destinationOrigin, 'actionBinding.destinationOrigin')
+}
+
+export function validateSessionRef(ref: SessionRef, runId: string, expectedAttempt?: number): void {
+  if (ref.schemaVersion !== 'session-ref/v1') unsupported('SessionRef', ref.schemaVersion)
+  if (ref.runId !== runId || (expectedAttempt !== undefined && ref.attempt !== expectedAttempt)) {
+    throw new WebTaskContractError('BINDING_MISMATCH', 'SessionRef does not match the current run/attempt.')
+  }
+  nonEmpty(ref.provider, 'sessionRef.provider')
+  nonEmpty(ref.id, 'sessionRef.id')
+  positiveInteger(ref.attempt, 'sessionRef.attempt')
+  if (ref.checkpointRef) validateCheckpointRef(ref.checkpointRef)
+}
+
+export function validateCheckpointRef(ref: CheckpointRef): void {
+  if (ref.schemaVersion !== 'checkpoint-ref/v1') unsupported('CheckpointRef', ref.schemaVersion)
+  nonEmpty(ref.provider, 'checkpointRef.provider')
+  nonEmpty(ref.id, 'checkpointRef.id')
 }
 
 export function consumeApprovalBinding(
