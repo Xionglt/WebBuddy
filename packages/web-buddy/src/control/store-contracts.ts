@@ -349,8 +349,9 @@ export function validateRunRecord(record: RunRecord): void {
   unique(record.resourceRefs.map((item) => item.id), 'resourceRefs.id')
   for (const artifact of record.artifactRefs) {
     if (artifact.schemaVersion !== 'artifact-ref/v1') unsupported('ArtifactRef', artifact.schemaVersion)
-    if (artifact.binding.runId !== record.runId || artifact.binding.revision > record.runRevision) {
-      binding(`Artifact ${artifact.id} is not bound to this run revision.`)
+    if (artifact.binding.runId !== record.runId
+      || artifact.binding.revision !== record.inputSnapshot.revision) {
+      binding(`Artifact ${artifact.id} is not bound to this run and immutable task revision.`)
     }
   }
   for (const resource of record.resourceRefs) {

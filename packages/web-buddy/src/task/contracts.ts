@@ -357,10 +357,19 @@ export interface WebTaskRuntimeDriver {
   execute(request: WebTaskRuntimeRequest): Promise<WebTaskRuntimeOutcome>
 }
 
+export interface RunExecutionContext {
+  schemaVersion: 'run-execution-context/v1'
+  runRevision: number
+  attempt: number
+  sessionRef?: SessionRef
+  recoveryMode?: 'read_only_reobserve/v1'
+}
+
 export interface RuntimeOptions {
   maxSteps?: number
   traceOutDir?: string
   headless?: boolean
+  executionContext?: RunExecutionContext
   driver?: WebTaskRuntimeDriver
 }
 
@@ -705,6 +714,42 @@ export function validateSessionRef(ref: SessionRef, runId: string, expectedAttem
   nonEmpty(ref.id, 'sessionRef.id')
   positiveInteger(ref.attempt, 'sessionRef.attempt')
   if (ref.checkpointRef) validateCheckpointRef(ref.checkpointRef)
+}
+
+export function validateRunExecutionContext(
+  context: RunExecutionContext,
+  runId: string,
+  taskRevision: number,
+): void {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    invalid('RunExecutionContext must be an object.')
+  }
+  if (context.schemaVersion !== 'run-execution-context/v1') {
+    unsupported('RunExecutionContext', context.schemaVersion)
+  }
+  exactKeys(context as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'runRevision',
+    'attempt',
+    'sessionRef',
+    'recoveryMode',
+  ], 'RunExecutionContext')
+  integer(context.runRevision, 'executionContext.runRevision')
+  if (context.runRevision < taskRevision) {
+    throw new WebTaskContractError(
+      'STALE_REVISION',
+      'Lifecycle run revision cannot precede the immutable task revision.',
+    )
+  }
+  positiveInteger(context.attempt, 'executionContext.attempt')
+  if (context.sessionRef) validateSessionRef(context.sessionRef, runId, context.attempt)
+  if (context.recoveryMode !== undefined
+    && context.recoveryMode !== 'read_only_reobserve/v1') {
+    unsupported('RunExecutionContext recovery mode', context.recoveryMode)
+  }
+  if (context.recoveryMode && !context.sessionRef) {
+    invalid('Recovery execution requires an exact SessionRef.')
+  }
 }
 
 export function validateCheckpointRef(ref: CheckpointRef): void {

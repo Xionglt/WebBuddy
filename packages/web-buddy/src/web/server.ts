@@ -52,6 +52,7 @@ import {
   snapshotWebTaskInput,
   validateArtifactRef,
   validateCheckpointRef,
+  validateEvidenceRef,
   validateSessionRef,
   validateWebTaskInputSnapshot,
   type ArtifactRef,
@@ -1695,8 +1696,9 @@ function validateWebTaskServiceResult(
   if (result.schemaVersion !== 'web-task-result/v1') {
     throw new Error(`Unsupported WebTaskResult schema: ${String(result.schemaVersion)}`)
   }
-  if (result.runId !== launched.runId || result.revision !== launched.runRevision) {
-    throw new Error('WebTaskResult does not match the launched run/revision.')
+  if (result.runId !== launched.runId
+    || result.revision !== launched.inputSnapshot.revision) {
+    throw new Error('WebTaskResult does not match the launched run and immutable task revision.')
   }
   if (digestCanonicalJson(result.ownerScope ?? null) !== digestCanonicalJson(launched.ownerScope ?? null)) {
     throw new Error('WebTaskResult owner scope does not match the launched Run.')
@@ -1718,8 +1720,19 @@ function validateWebTaskServiceResult(
       throw new Error('WebTaskResult checkpoint does not match its SessionRef.')
     }
   }
+  const resultSession = result.sessionRef ?? launched.sessionRef
+  for (const evidence of result.evidence) {
+    validateEvidenceRef(evidence, launched.runId, launched.inputSnapshot.revision)
+    if (evidence.binding.sessionRef) {
+      validateSessionRef(evidence.binding.sessionRef, launched.runId, launched.attempt)
+      if (!resultSession
+        || digestCanonicalJson(evidence.binding.sessionRef) !== digestCanonicalJson(resultSession)) {
+        throw new Error(`Evidence ${evidence.id} SessionRef does not match the WebTaskResult.`)
+      }
+    }
+  }
   for (const artifact of result.artifacts) {
-    validateArtifactRef(artifact, launched.runId, launched.runRevision)
+    validateArtifactRef(artifact, launched.runId, launched.inputSnapshot.revision)
     if (artifact.sensitivity === 'secret') {
       throw new Error(`Artifact ${artifact.id} cannot use ordinary storage for secret content.`)
     }
@@ -1728,7 +1741,6 @@ function validateWebTaskServiceResult(
     }
     if (artifact.binding.sessionRef) {
       validateSessionRef(artifact.binding.sessionRef, launched.runId, launched.attempt)
-      const resultSession = result.sessionRef ?? launched.sessionRef
       if (!resultSession
         || digestCanonicalJson(artifact.binding.sessionRef) !== digestCanonicalJson(resultSession)) {
         throw new Error(`Artifact ${artifact.id} SessionRef does not match the WebTaskResult.`)

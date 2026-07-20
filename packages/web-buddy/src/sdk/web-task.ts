@@ -21,14 +21,17 @@ import { evaluateCompletionContract } from '../task/completion-contract.js'
 import { classifyContentSecurity, toContextSecurityFields } from '../security/content-trust.js'
 import {
   WebTaskContractError,
+  digestCanonicalJson,
   isContextItemEligible,
   snapshotWebTaskInput,
   validateArtifactRef,
   validateCheckpointRef,
   validateContextItem,
   validateEvidenceRef,
+  validateRunExecutionContext,
   validateSessionRef,
   type ContextItem,
+  type RunExecutionContext,
   type RunSnapshot,
   type WebTaskEvent,
   type WebTaskInput,
@@ -51,6 +54,7 @@ export type {
   OwnerScope,
   RunSnapshot,
   RuntimeOptions,
+  RunExecutionContext,
   SensitiveActionRule,
   SessionRef,
   TaskContract,
@@ -79,7 +83,11 @@ export interface WebTaskExecutionHost {
 export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   const snapshot = snapshotWebTaskInput(input)
   const runId = snapshot.runId
-  const revision = snapshot.revision
+  const taskRevision = snapshot.revision
+  const executionContext = resolveExecutionContext(input.runtime?.executionContext, snapshot)
+  const runRevision = executionContext.runRevision
+  const attempt = executionContext.attempt
+  const executionSessionRef = executionContext.sessionRef ?? snapshot.sessionRef
   let sequence = 0
   const emit = (event: Omit<WebTaskEvent, 'schemaVersion' | 'sequence' | 'timestamp'>) => {
     const value: WebTaskEvent = {
@@ -93,28 +101,28 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   const lifecycle = (state: RunSnapshot['state'], reason?: string): RunSnapshot => ({
     schemaVersion: 'run-snapshot/v1',
     runId,
-    ...(snapshot.sessionRef ? { sessionRef: snapshot.sessionRef } : {}),
-    revision,
-    attempt: snapshot.sessionRef?.attempt ?? 1,
+    ...(executionSessionRef ? { sessionRef: executionSessionRef } : {}),
+    revision: runRevision,
+    attempt,
     state,
     updatedAt: new Date().toISOString(),
     ...(reason ? { reason } : {}),
   })
 
-  emit({ type: 'run_queued', runId, revision, snapshot: lifecycle('queued') })
+  emit({ type: 'run_queued', runId, revision: runRevision, snapshot: lifecycle('queued') })
 
   let contextItems: ContextItem[]
   try {
-    contextItems = await resolveContextItems(input, runId, revision)
+    contextItems = await resolveContextItems(input, runId, taskRevision, executionSessionRef)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const code = error instanceof WebTaskContractError ? error.code : 'PROVIDER_FAILED'
-    emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message), data: { code } })
-    return failedResult(input, runId, revision, message)
+    emit({ type: 'run_failed', runId, revision: runRevision, snapshot: lifecycle('failed', message), data: { code } })
+    return failedResult(input, runId, taskRevision, message, executionSessionRef)
   }
 
   const driver = input.runtime?.driver ?? defaultWebTaskRuntimeDriver
-  emit({ type: 'run_started', runId, revision, snapshot: lifecycle('running') })
+  emit({ type: 'run_started', runId, revision: runRevision, snapshot: lifecycle('running') })
 
   let outcome: WebTaskRuntimeOutcome
   try {
@@ -122,32 +130,49 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
       schemaVersion: 'web-task-runtime-request/v1',
       input: snapshot,
       contextItems,
-      ...(input.runtime ? { runtime: { maxSteps: input.runtime.maxSteps, traceOutDir: input.runtime.traceOutDir, headless: input.runtime.headless } } : {}),
-      emit: (event) => emit(event),
+      runtime: {
+        maxSteps: input.runtime?.maxSteps,
+        traceOutDir: input.runtime?.traceOutDir,
+        headless: input.runtime?.headless,
+        executionContext,
+      },
+      emit: (event) => emit({ ...event, runId, revision: runRevision }),
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message) })
-    return failedResult(input, runId, revision, message)
+    emit({ type: 'run_failed', runId, revision: runRevision, snapshot: lifecycle('failed', message) })
+    return failedResult(input, runId, taskRevision, message, executionSessionRef)
   }
 
   try {
-    const expectedAttempt = snapshot.sessionRef?.attempt ?? 1
-    outcome.evidence.forEach((item) => validateEvidenceRef(item, runId, revision))
-    outcome.artifacts.forEach((item) => validateArtifactRef(item, runId, revision))
+    outcome.evidence.forEach((item) => validateEvidenceRef(item, runId, taskRevision))
+    outcome.artifacts.forEach((item) => validateArtifactRef(item, runId, taskRevision))
     assertUniqueResultIds(outcome.evidence, 'evidence')
     assertUniqueResultIds(outcome.artifacts, 'artifact')
     if (outcome.sessionRef) {
-      validateSessionRef(outcome.sessionRef, runId, expectedAttempt)
-      if (snapshot.sessionRef
-        && (outcome.sessionRef.provider !== snapshot.sessionRef.provider
-          || outcome.sessionRef.id !== snapshot.sessionRef.id)) {
-        throw new WebTaskContractError('BINDING_MISMATCH', 'Runtime SessionRef does not match the frozen input session.')
+      validateSessionRef(outcome.sessionRef, runId, attempt)
+      if (executionSessionRef
+        && digestSessionRef(outcome.sessionRef) !== digestSessionRef(executionSessionRef)) {
+        throw new WebTaskContractError('BINDING_MISMATCH', 'Runtime SessionRef does not match the current execution session.')
+      }
+    }
+    const resultSession = outcome.sessionRef ?? executionSessionRef
+    if (executionContext.recoveryMode) {
+      if (!resultSession) {
+        throw new WebTaskContractError('BINDING_MISMATCH', 'Recovery result has no current execution session.')
+      }
+      for (const ref of [...outcome.evidence, ...outcome.artifacts]) {
+        if (!ref.binding.sessionRef
+          || digestSessionRef(ref.binding.sessionRef) !== digestSessionRef(resultSession)) {
+          throw new WebTaskContractError(
+            'BINDING_MISMATCH',
+            `${ref.id} is not bound to the current execution session.`,
+          )
+        }
       }
     }
     if (outcome.checkpointRef) {
       validateCheckpointRef(outcome.checkpointRef)
-      const resultSession = outcome.sessionRef ?? snapshot.sessionRef
       if (!resultSession) {
         throw new WebTaskContractError('BINDING_MISMATCH', 'Runtime checkpoint has no bound SessionRef.')
       }
@@ -159,14 +184,14 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message), data: { code: 'BINDING_MISMATCH' } })
-    return failedResult(input, runId, revision, message)
+    emit({ type: 'run_failed', runId, revision: runRevision, snapshot: lifecycle('failed', message), data: { code: 'BINDING_MISMATCH' } })
+    return failedResult(input, runId, taskRevision, message, executionSessionRef)
   }
 
   const completion = evaluateCompletionContract({
     contract: input.contract,
     runId,
-    revision,
+    revision: taskRevision,
     evidence: outcome.evidence,
     artifacts: outcome.artifacts,
     formState: outcome.formState,
@@ -184,23 +209,49 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   emit({
     type: `run_${status}`,
     runId,
-    revision,
+    revision: runRevision,
     snapshot: lifecycle(state, status === 'completed' ? undefined : summary),
     data: { missingCriteria: completion.missingCriteria },
   })
   return {
     schemaVersion: 'web-task-result/v1',
     runId,
-    revision,
+    revision: taskRevision,
     status,
     summary,
     evidence: outcome.evidence,
     artifacts: outcome.artifacts,
     metrics: outcome.metrics,
-    ...(outcome.sessionRef ?? snapshot.sessionRef ? { sessionRef: outcome.sessionRef ?? snapshot.sessionRef } : {}),
+    ...(outcome.sessionRef ?? executionSessionRef ? { sessionRef: outcome.sessionRef ?? executionSessionRef } : {}),
     ...(outcome.checkpointRef ? { checkpointRef: outcome.checkpointRef } : {}),
     ...(snapshot.ownerScope ? { ownerScope: snapshot.ownerScope } : {}),
   }
+}
+
+function resolveExecutionContext(
+  candidate: RunExecutionContext | undefined,
+  snapshot: ReturnType<typeof snapshotWebTaskInput>,
+): RunExecutionContext {
+  const context: RunExecutionContext = candidate ?? {
+    schemaVersion: 'run-execution-context/v1',
+    runRevision: snapshot.revision,
+    attempt: snapshot.sessionRef?.attempt ?? 1,
+    ...(snapshot.sessionRef ? { sessionRef: snapshot.sessionRef } : {}),
+  }
+  validateRunExecutionContext(context, snapshot.runId, snapshot.revision)
+  if (snapshot.sessionRef
+    && (!context.sessionRef
+      || digestSessionRef(snapshot.sessionRef) !== digestSessionRef(context.sessionRef))) {
+    throw new WebTaskContractError(
+      'BINDING_MISMATCH',
+      'Frozen and execution SessionRef values must match.',
+    )
+  }
+  return structuredClone(context)
+}
+
+function digestSessionRef(ref: NonNullable<RunExecutionContext['sessionRef']>): string {
+  return digestCanonicalJson(ref)
 }
 
 function assertUniqueResultIds(
@@ -212,7 +263,12 @@ function assertUniqueResultIds(
   }
 }
 
-async function resolveContextItems(input: WebTaskInput, runId: string, revision: number): Promise<ContextItem[]> {
+async function resolveContextItems(
+  input: WebTaskInput,
+  runId: string,
+  revision: number,
+  sessionRef?: NonNullable<RunExecutionContext['sessionRef']>,
+): Promise<ContextItem[]> {
   const resolved = [...(input.contextItems ?? [])]
   for (const provider of input.contextProviders ?? []) {
     let items: ContextItem[]
@@ -222,7 +278,7 @@ async function resolveContextItems(input: WebTaskInput, runId: string, revision:
         goal: input.goal,
         runId,
         revision,
-        ...(input.sessionRef ? { sessionRef: input.sessionRef } : {}),
+        ...(sessionRef ? { sessionRef } : {}),
         ...(input.ownerScope ? { ownerScope: input.ownerScope } : {}),
       })
     } catch (error) {
@@ -413,7 +469,13 @@ function metricsFor(trace: TraceRecorder, config: AgentConfig, _tracePath: strin
   return emptyRunMetrics({ runId: trace.runId, source: 'sdk', scenario: trace.scenario, profile: trace.profile, warnings: ['Metrics aggregation failed.'] })
 }
 
-function failedResult(input: WebTaskInput, runId: string, revision: number, summary: string): WebTaskResult {
+function failedResult(
+  input: WebTaskInput,
+  runId: string,
+  revision: number,
+  summary: string,
+  sessionRef?: NonNullable<RunExecutionContext['sessionRef']>,
+): WebTaskResult {
   return {
     schemaVersion: 'web-task-result/v1',
     runId,
@@ -423,7 +485,7 @@ function failedResult(input: WebTaskInput, runId: string, revision: number, summ
     evidence: [],
     artifacts: [],
     metrics: emptyRunMetrics({ runId, source: 'sdk', scenario: input.goal.scenario, profile: 'generic', warnings: [summary] }),
-    ...(input.sessionRef ? { sessionRef: input.sessionRef } : {}),
+    ...(sessionRef ?? input.sessionRef ? { sessionRef: sessionRef ?? input.sessionRef } : {}),
     ...(input.ownerScope ? { ownerScope: input.ownerScope } : {}),
   }
 }

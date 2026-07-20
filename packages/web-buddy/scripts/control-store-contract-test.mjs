@@ -156,6 +156,45 @@ validateRunMutation(run, {
   event: runningEvent,
   idempotencyKey: runningEvent.idempotencyKey,
 })
+const taskBoundArtifact = {
+  schemaVersion: 'artifact-ref/v1',
+  id: 'control-task-bound-artifact',
+  kind: 'research_summary',
+  payloadSchemaVersion: 'research-summary/v1',
+  mediaType: 'application/json',
+  byteLength: 64,
+  sha256: 'a'.repeat(64),
+  createdAt: now,
+  immutable: true,
+  locator: 'opaque:control-task-bound-artifact',
+  producer: { id: 'control-fixture', version: '1' },
+  parentEvidenceIds: [],
+  parentArtifactIds: [],
+  origin: 'artifact',
+  trust: 'derived_untrusted',
+  sensitivity: 'internal',
+  retention: { scope: 'run', deleteWithSession: true },
+  ownerScope,
+  binding: { runId, revision: inputSnapshot.revision },
+  requiresMainWorkflowVerification: false,
+  authoritativeCompletionEvidence: true,
+  redaction: { status: 'not_required', policyId: 'control-fixture/v1' },
+  scanner: { status: 'clean', scannerId: 'control-fixture/v1' },
+}
+assert.equal(
+  decodeRunRecord({ ...running, artifactRefs: [taskBoundArtifact] }).artifactRefs[0].binding.revision,
+  inputSnapshot.revision,
+)
+assertStoreError(
+  () => decodeRunRecord({
+    ...running,
+    artifactRefs: [{
+      ...taskBoundArtifact,
+      binding: { runId, revision: running.runRevision },
+    }],
+  }),
+  'BINDING_MISMATCH',
+)
 assertStoreError(
   () => validateRunMutation(run, {
     expectedRecordRevision: 7,

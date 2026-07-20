@@ -10,6 +10,7 @@ export type {
   EvidenceRef,
   EvidenceRequirement,
   OwnerScope,
+  RunExecutionContext,
   RunSnapshot,
   RuntimeOptions,
   SensitiveActionRule,

@@ -11,6 +11,7 @@ await blockedOutcomeCannotEscalate()
 await duplicateResultRefsFailClosed()
 await staleEvidenceCannotComplete()
 await forgedProviderTrustFailsClosed()
+await lifecycleEpochDoesNotRewriteTaskRevision()
 
 console.log('generic-web-task-test: PASS')
 
@@ -249,6 +250,87 @@ async function forgedProviderTrustFailsClosed() {
     assert.match(result.summary, forged.origin === 'system' ? /cannot supply trusted system context/ : /failed security classification/)
     assert.equal(events.at(-1)?.data?.code, 'INVALID_CONTRACT')
   }
+}
+
+async function lifecycleEpochDoesNotRewriteTaskRevision() {
+  const events = []
+  const sessionRef = {
+    schemaVersion: 'session-ref/v1',
+    provider: 'file-session-store',
+    id: 'generic-resume-session',
+    runId: 'run-lifecycle-epoch',
+    attempt: 2,
+  }
+  const contract = evidenceContract('lifecycle-epoch-contract', 'page')
+  contract.revision = 7
+  const result = await runWebTask({
+    schemaVersion: 'web-task-input/v1',
+    goal: { instruction: 'Resume a read-only task after re-observation.' },
+    contract,
+    runId: 'run-lifecycle-epoch',
+    revision: 7,
+    runtime: {
+      executionContext: {
+        schemaVersion: 'run-execution-context/v1',
+        runRevision: 8,
+        attempt: 2,
+        sessionRef,
+        recoveryMode: 'read_only_reobserve/v1',
+      },
+      driver: driver((request) => {
+        assert.equal(request.input.revision, 7, 'the frozen TaskContract revision must not change')
+        assert.equal(request.runtime.executionContext.runRevision, 8)
+        const observed = evidence(request, 'page')
+        observed.binding.sessionRef = sessionRef
+        return {
+          ...outcome('Resumed observation completed.', [observed]),
+          sessionRef,
+        }
+      }),
+    },
+    onEvent(event) { events.push(event) },
+  })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.revision, 7, 'WebTaskResult remains bound to the immutable task revision')
+  assert.equal(result.sessionRef.attempt, 2)
+  assert.equal(events[0].revision, 8, 'events use the lifecycle run revision')
+  assert.equal(events[0].snapshot.revision, 8)
+  assert.equal(events[0].snapshot.attempt, 2)
+
+  const staleSessionResult = await runWebTask({
+    schemaVersion: 'web-task-input/v1',
+    goal: { instruction: 'Reject evidence from the old attempt.' },
+    contract,
+    runId: 'run-lifecycle-stale-session',
+    revision: 7,
+    runtime: {
+      executionContext: {
+        schemaVersion: 'run-execution-context/v1',
+        runRevision: 8,
+        attempt: 2,
+        sessionRef: { ...sessionRef, runId: 'run-lifecycle-stale-session' },
+        recoveryMode: 'read_only_reobserve/v1',
+      },
+      driver: driver((request) => {
+        const stale = evidence(request, 'page')
+        stale.binding.sessionRef = {
+          ...sessionRef,
+          runId: request.input.runId,
+          attempt: 1,
+        }
+        return {
+          ...outcome('Old attempt evidence.', [stale]),
+          sessionRef: {
+            ...sessionRef,
+            runId: request.input.runId,
+            attempt: 2,
+          },
+        }
+      }),
+    },
+  })
+  assert.equal(staleSessionResult.status, 'failed')
+  assert.match(staleSessionResult.summary, /current execution session/i)
 }
 
 function evidenceContract(contractId, kind) {
