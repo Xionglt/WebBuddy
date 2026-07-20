@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { browserOpen } from '../dist/browser/open.js'
@@ -15,6 +16,8 @@ process.env.PLAYWRIGHT_HEADLESS = 'true'
 process.env.PLAYWRIGHT_ALLOW_DATA_URLS = 'true'
 process.env.PLAYWRIGHT_TYPE_DELAY_MS = '0'
 process.env.PLAYWRIGHT_SLOWMO_MS = '0'
+process.env.PLAYWRIGHT_BLOCK_LOCALHOST = 'false'
+process.env.PLAYWRIGHT_ALLOWED_DOMAINS = '127.0.0.1'
 
 class FirstRunLlm {
   constructor() {
@@ -205,6 +208,7 @@ function testProfile() {
 
 async function main() {
   const root = mkdtempSync(join(tmpdir(), 'mfa-resume-loop-e2e-'))
+  let handoffServer
 
   try {
     const resumePath = join(root, 'fixture-resume.txt')
@@ -263,7 +267,7 @@ async function main() {
     )
     assertToolBoundariesIntact(restored.restoredMessages)
 
-    await openHandoffFixture('resume-loop-e2e')
+    handoffServer = await openHandoffFixture('resume-loop-e2e')
     const handoffGate = new HandoffFixtureGate('resume-loop-e2e')
     const resumeLlm = new HandoffResumeLlm(resumePath)
     const resumed = await runAgentLoop({
@@ -278,6 +282,34 @@ async function main() {
       restoredMessages: restored.restoredMessages,
       requiresCurrentResumeUpload: true,
       taskType: 'fill_form',
+      taskContract: {
+        schemaVersion: 'web-task-contract/v1',
+        contractId: 'resume-loop-e2e-explicit-sinks',
+        revision: 0,
+        criteria: [{
+          id: 'final-submit-not-performed',
+          kind: 'action_boundary',
+          description: 'The fixture must stop before final submit.',
+          actionKinds: ['submit'],
+          outcome: 'not_performed',
+        }],
+        sensitiveActions: [{
+          id: 'resume-loop-explicit-sink-contract',
+          actionKinds: ['upload', 'submit'],
+          decision: 'ask',
+          requireApprovalBinding: true,
+        }],
+      },
+      taskPolicy: {
+        schemaVersion: 'task-policy/v1',
+        defaultSensitiveAction: 'deny',
+        rules: [{
+          id: 'resume-loop-explicit-upload-approval',
+          actionKinds: ['upload', 'submit'],
+          decision: 'ask',
+          requireApprovalBinding: true,
+        }],
+      },
       contextBudget: { modelName: 'gpt-5-mini' },
     })
 
@@ -305,21 +337,38 @@ async function main() {
     console.log('resume-loop-e2e-test: PASS')
   } finally {
     await sessionManager.closeAll().catch(() => {})
+    await closeServer(handoffServer)
     rmSync(root, { recursive: true, force: true })
   }
 }
 
 async function openHandoffFixture(sessionId) {
   const html = readFileSync(new URL('./fixtures/handoff-resume-flow.html', import.meta.url), 'utf8')
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end(html)
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  assert(address && typeof address === 'object')
   const result = await browserOpen({
     sessionId,
-    url: `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+    url: `http://127.0.0.1:${address.port}/handoff`,
     waitUntil: 'domcontentloaded',
   })
   assert.equal(result.ok, true, result.observation)
   const page = sessionManager.get(sessionId)?.page
   assert(page, 'handoff fixture page should exist after browser_open')
   await setFixturePage(page, 'login')
+  return server
+}
+
+function closeServer(server) {
+  if (!server?.listening) return Promise.resolve()
+  return new Promise((resolve) => server.close(() => resolve()))
 }
 
 async function setFixturePage(page, kind) {
