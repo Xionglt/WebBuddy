@@ -36,16 +36,24 @@ const result = await runWebTask(input)
 ```
 
 稳定入口还提供 `createComparisonStarter()`、`createFormDraftStarter()`、
-`createSkillScaffold()`、`createRunClient()` 和 `createApprovalClient()`。所有公开
-DTO 都带 schema version；未知 major 默认拒绝，而不是静默猜测兼容。
+`createSkillScaffold()`、`createRunClient()` 和 `createApprovalClient()`。公开的
+顶层请求、响应与持久资源 envelope 都带 schema version；未知 major 默认拒绝，
+而不是静默猜测兼容。
+
+Schema 迁移遵循 fail-closed：公开 DTO 使用显式 `*/v1` 或 `*/v2`；仅对没有
+版本字段的已知 legacy session/transcript 提供受限 v1 读取，显式未知版本会被
+拒绝。Run revision/attempt、Approval action binding、Artifact owner scope 以及
+origin/trust/sensitivity 不会在迁移时被忽略、重新解释或提升权限；需要升级的
+数据应由独立迁移工具写入新记录并保留旧记录，而不是由 Runtime 原地猜测。
 
 仓库中的 `examples/research`、`examples/comparison`、`examples/form-draft`
 均只使用包根导入。招聘能力是通用 Runtime 上的 Scenario Adapter 示例；
 `job-agent` 与 `job-agent-web` 暂时保留兼容 wrapper 并输出 deprecated warning，
 新代码应使用 `runWebTask()` 或通用 `web-agent` 入口。
 
-package metadata 已具备发布边界；是否已出现在 npm registry 取决于独立发布流程，
-不能仅根据仓库版本号推断。
+技术打包边界已经过外部 consumer 验证；仓库当前尚未选择并提交开源许可证，
+因此不得据此直接发布到公共 npm registry。许可证决策和实际发布仍是独立流程，
+不能仅根据 `private=false` 或仓库版本号推断。
 
 ## Service 安全边界
 
@@ -242,7 +250,8 @@ npm run demo:form          # headful 本地表单 demo
 npm run demo:form:offline  # headless/no-key 稳定 QA 路径
 npm run demo:research      # 本地只读 research demo
 npm run demo:match         # Alibaba read-only match preset
-npm run web                # Web UI
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
+npm run web                # 认证后的 Web UI；页面输入同一个 token
 npm run report:safety      # 生成 safety-report.json
 ```
 
@@ -346,6 +355,7 @@ npm run test:resume-ingest
 
 ```bash
 cd packages/web-buddy
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
 npm run web
 ```
 
@@ -355,9 +365,12 @@ npm run web
 http://localhost:5178
 ```
 
-Web UI 用于配置模型和任务、上传可选资料、运行通用 Raw/Match workflow，并查看
-事件、截图、trace 和 metrics。`npm run web` 只构建并启动 Web Buddy 自有
-Runtime。
+Web UI 是认证后的通用 Harness 控制台。启动后在页面输入同一个 service token，
+即可查看由 Public SDK/API 创建的通用 Run，以及 durable task list、Approval
+inbox、Trace、Artifact 和控制操作。页面上的 Raw/Match 新建预设目前仍走带
+deprecation 语义的 recruiting compatibility adapter；它们不代表第二套 Agent
+Loop。模型 endpoint 和 credential 只读自服务器配置；页面不接收模型密钥、
+resume path 或资料上传。`npm run web` 只构建并启动 Web Buddy 自有 Runtime。
 
 ### 单 runtime 版本说明
 
@@ -485,6 +498,7 @@ npm run benchmark:research
 如果你想把 Node、Playwright Chromium、系统依赖和 Web UI 封起来：
 
 ```bash
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
 docker compose build
 docker compose up agent
 ```
@@ -504,7 +518,8 @@ docker compose run --rm agent node packages/web-buddy/dist/cli/demo.js demo-form
 docker compose run --rm agent npm --prefix packages/web-buddy run report:safety
 ```
 
-模型 key 放根目录 `.env`，不要写进镜像或提交。
+Compose 在 token 缺失时会拒绝启动，容器 healthcheck 也使用同一 token 访问
+`/api/config`。可将 token 和模型 key 放根目录 `.env`，但不要写进镜像或提交。
 
 ## MCP Server
 
@@ -516,27 +531,20 @@ npm run build
 node ./dist/server.js
 ```
 
-可用浏览器工具来自 `src/tools/catalog.ts`，包括：
+默认 MCP compatibility surface 只暴露观察类工具：
 
 ```text
-browser_open
 browser_snapshot
 browser_form_snapshot
 browser_form_audit
 browser_inspect_options
-browser_click
-browser_click_text
-browser_type
-browser_fill_by_label
-browser_select
-browser_select_by_text
-browser_set_field
 browser_wait
 browser_screenshot
-browser_upload_file
 ```
 
-本地 runtime 还有只在 local loop 暴露的工具：
+导航、点击、输入、选择、上传和最终提交不会通过 MCP 绕过本地 Agent Loop 的
+TaskPolicy/Human Gate；这类 MCP 调用 fail-closed。完整浏览器写能力只由单一
+browser writer 的本地 runtime 持有。本地 runtime 还提供：
 
 ```text
 resume_query
@@ -544,6 +552,9 @@ ask_user
 plan_form_fill
 agent_done
 ```
+
+浏览器顶层导航按完整 origin（scheme/host/port）绑定。HTTP 3xx 会停在第一跳并
+要求显式导航到下一 URL；跨 origin click/popup 在目标网络请求前阻断。
 
 ## 交给其它 AI 的执行清单
 

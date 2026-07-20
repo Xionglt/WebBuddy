@@ -27,6 +27,6 @@ RUN npm --prefix packages/web-buddy run build \
 EXPOSE 5178
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:5178/api/config').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "const token=process.env.WEB_BUDDY_API_TOKEN;if(!token)process.exit(1);fetch('http://127.0.0.1:5178/api/config',{headers:{authorization:'Bearer '+token}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "packages/web-buddy/dist/web/server.js"]

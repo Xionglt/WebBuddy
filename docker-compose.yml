@@ -16,6 +16,7 @@ services:
     environment:
       PORT: "5178"
       TRACE_OUT_DIR: /app/output
+      WEB_BUDDY_API_TOKEN: "${WEB_BUDDY_API_TOKEN:?WEB_BUDDY_API_TOKEN is required}"
       RESUME_PDF_PATH: ${RESUME_PDF_PATH:-/app/tmp/pdfs/resume.pdf}
 
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}

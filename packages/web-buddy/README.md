@@ -37,15 +37,24 @@ const result = await runWebTask(input)
 
 The stable root also exports `createComparisonStarter()`,
 `createFormDraftStarter()`, `createSkillScaffold()`, `createRunClient()`, and
-`createApprovalClient()`. Public DTOs are versioned and unknown major versions
-fail closed. See `examples/research`, `examples/comparison`, and
-`examples/form-draft`; every example imports only the package root.
+`createApprovalClient()`. Public top-level request, response, and durable
+resource envelopes are versioned; unknown major versions fail closed. See
+`examples/research`, `examples/comparison`, and `examples/form-draft`; every
+example imports only the package root.
 
-Package metadata is publication-ready, but registry availability is controlled
-by the separate release process. Recruiting remains a Scenario Adapter example.
-The `job-agent` and `job-agent-web` bins are compatibility wrappers that emit a
-deprecation warning; new integrations should call `runWebTask()` or use the
-generic `web-agent` entry.
+Schema migration is fail-closed. Public DTOs use explicit `*/v1` or `*/v2`
+versions. Only known legacy session/transcript records with no version receive
+the narrow v1 reader; an explicit unknown version is rejected. Migration must
+write a new record and preserve the old one—it must not ignore or reinterpret
+Run revision/attempt, Approval action bindings, Artifact ownership,
+origin/trust/sensitivity, or authority in place.
+
+The technical package/consumer boundary is verified, but this repository does
+not yet contain an explicit open-source license. Public registry publication is
+therefore blocked until the owner chooses and commits a license. Recruiting
+remains a Scenario Adapter example. The `job-agent` and `job-agent-web` bins are
+compatibility wrappers that emit a deprecation warning; new integrations should
+call `runWebTask()` or use the generic `web-agent` entry.
 
 ## Authenticated Service Boundary
 
@@ -82,6 +91,10 @@ execute; `PermissionEngine` maps policy to allow/ask/deny according to
 Trace, metrics, and `safety-report.json` are diagnostic artifacts, not runtime
 state sources.
 
+Top-level browser navigation is bound to the exact scheme, host, and port.
+HTTP redirects stop at the first 3xx and require an explicit next navigation;
+cross-origin click and popup targets are blocked before their network request.
+
 ## Quickstart
 
 ```bash
@@ -94,7 +107,8 @@ npm run demo:form
 # Local read-only web research. No key, login, or network.
 npm run demo:research
 
-# Web console. Select the Venue scenario for a non-resume, multi-step test.
+# Authenticated Web console. Enter the same token in the page.
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
 npm run web
 
 # Generate safety-report.json for the latest trace.
@@ -116,13 +130,15 @@ npm run test:mvp
 
 ## Scenario Extension: Resume and Matching v2
 
-Resume inputs for CLI/Web UI are `.pdf`, `.json`, and `.txt`. The v2 SDK
+Resume inputs for CLI/SDK recruiting adapters are `.pdf`, `.json`, and `.txt`. The v2 SDK
 parser (`readResumeV2` / `ingestResume`) returns `resume-profile/v2` with
 field-level confidence, short sanitized evidence, schema validation, optional
 LLM parsing, heuristic fallback, and deterministic email/phone repair. The
 current orchestrator still consumes the compatible `ResumeProfile` shape, so
-operator-facing runs use the same `--resume` flag while tests and SDK callers
-can inspect v2 output directly.
+CLI recruiting runs use the same `--resume` flag while tests and SDK callers
+can inspect v2 output directly. The authenticated Web console never accepts a
+resume path or upload; sensitive profile Context must come from a dedicated
+server-side provider.
 
 ```bash
 npm run test:resume
@@ -243,78 +259,40 @@ Some Plan 2 artifacts are also copied to `output/<runId>/` for legacy scripts.
 Artifacts are for debugging and audit. They may include screenshots, URLs, and
 resume-derived summaries, so keep `output/` out of commits.
 
-## Phase 2 Kernel Notes
+## Current Runtime And Control Boundaries
 
-Phase 2 is splitting the local runtime in small compatibility-preserving steps.
-Plan 2 wrapped the runtime entry in Kernel control:
-
-```text
-AgentRuntime.run()
-  -> AgentKernel.start()
-    -> QueryLoop.run()
-      -> runAgentLoop()
-```
-
-Plan 3 moves single-tool execution out of `runAgentLoop` without making
-`QueryLoop` own tool scheduling yet:
+`runWebTask()` is the generic entry and owns Completion Contract evaluation.
+Recruiting calls it through a deprecated Scenario Adapter; there is no second
+Agent Loop.
 
 ```text
-QueryLoop
-  -> runAgentLoop
-    -> ToolExecutionService
+runWebTask
+  -> AgentKernel / runAgentLoop
+    -> TaskPolicy + PermissionEngine
+      -> durable Human Gate when required
+        -> ToolExecutionService
 ```
 
-`ToolExecutionService v1` is an execution layer for one already-approved tool
-call. It owns tool use context, execution state, timeout, abort-before-execution,
-and error normalization. It preserves normal successful observations and
-existing `FAILED (...)` observations so the model-visible behavior stays
-compatible.
+The Web service stores Run and Approval state through `RunService` and durable
+Stores. Pause is a request acknowledged only at a safe turn boundary; it is not
+a process sleep. Restart classifies eligible read-only sessions as recoverable,
+invalidates old approvals, and never replays the last write action. Generic
+service runs currently advertise `restartSafe=false`, so their resume endpoint
+fails closed until a compatible durable adapter exists.
 
-Boundaries:
+Artifacts and Trace references remain bound to run ID, revision, attempt, and
+owner scope. Approval resolution is additionally bound to the exact action,
+arguments digest, source/destination origin, and expiry. A late result after
+cancel cannot attach artifacts or change the terminal state.
 
-- `PolicyEngine` decides risk and allow / gate / block / auto-confirm before
-  tools execute.
-- `HumanGate` keeps user confirmation and handoff behavior.
-- The future `PermissionEngine` will own general permission rules and approval
-  queues; it is not part of ToolExecutionService v1.
-- Workflow state and future evidence checks remain outside the execution
-  service.
+Multi-Agent helpers may inspect or produce bound Artifacts, but only the parent
+runtime owns browser write authority. Memory lifecycle records use v2
+provenance, sensitivity, TTL, conflict handling, and explicit user deletion;
+untrusted Context cannot silently upgrade trust during a memory write.
 
-Phase 2C v1 does not claim full pause/resume, automatic retry, concurrent tool
-execution, streaming tool output, or forced cancellation of an already-running
-Playwright action.
-
-Plan 3 adds the dedicated service-level verification command
-`npm run test:tool-execution-service`; keep `npm run test:tool-execution`,
-`npm run test:agent-loop`, `npm run test:kernel`, `npm run test:session`, and
-`npm run test:mvp` as compatibility checks around it.
-
-Plan 4 / Phase 2D is the permission boundary step after ToolExecutionService:
-
-```text
-runAgentLoop
-  -> PolicyEngine
-  -> PermissionEngine
-  -> ApprovalQueue if ask
-  -> HumanGate if ask
-  -> ToolExecutionService
-```
-
-The split is intentionally narrow:
-
-- `PolicyEngine` remains the risk and policy recommendation layer
-  (`allow` / `gate` / `block` / `auto_confirm`).
-- `PermissionEngine` maps the policy recommendation and runtime context to
-  `allow` / `ask` / `deny`.
-- `ApprovalQueue v1` records in-memory pending/resolved approvals for the
-  current process; it does not decide risk, persist permissions, or replace UI.
-- `HumanGate` still performs the actual user prompt or handoff.
-
-Phase 2D v1 does not claim a complete Task Cockpit approval UI, persistent
-permission store, cross-process approval recovery, or "always allow" rules.
-When implemented, it should add `npm run test:permission` and either
-`npm run test:approval-queue` or include approval queue coverage inside
-`test:permission`.
+Use `npm run test:m6-release` for the focused security, recovery, Eval,
+Multi-Agent, Memory, SDK consumer, tenant, and chaos matrix. The complete
+compatibility suite remains `npm run test:release-gate` plus `npm run test:mvp`.
 
 ## CLI
 
@@ -349,17 +327,23 @@ handoff mode, not final-submit authorization.
 ## Web UI
 
 ```bash
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
 npm run web
 ```
 
-Open `http://localhost:5178` to configure a model and task, attach optional
-profile data, run Raw/Match workflows, and inspect live events, screenshots,
-trace steps, and metrics.
+Open `http://localhost:5178`, enter the same service token, and connect. The
+console displays generic runs created through the Public SDK/API and exposes the
+durable task list, Approval inbox, pause/resume/cancel controls, Trace, and
+Artifact links. Its built-in Raw/Match launch presets currently use the
+deprecated recruiting compatibility adapter; they do not create a second Agent
+Loop. Model endpoint and credential status are server-managed and read-only.
+The console does not accept model keys, resume paths, or profile uploads.
 
 From the repository root, the same UI and headless local checks can run inside
 Docker:
 
 ```bash
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
 docker compose build
 docker compose up agent
 docker compose run --rm agent npm --prefix packages/web-buddy run test:e2e-auto-apply
@@ -387,8 +371,9 @@ src/
 ```
 
 The local runtime and MCP server share tool definitions through
-`src/tools/catalog.ts`. Execution paths stay separate: local runtime tools still
-call existing browser handlers, and MCP clients call the MCP adapter.
+`src/tools/catalog.ts`, but not authority. The local runtime is the single
+browser writer. The default MCP adapter exposes only observation tools and
+rejects navigation or mutation before calling a handler or network boundary.
 
 Observation is runtime memory first and artifact second. `browser_snapshot` and
 `browser_form_snapshot` refresh PageState/FormState for context and write
@@ -411,19 +396,21 @@ blocked, or handed off.
 
 ## MCP Server
 
-The same browser capabilities are exposed over MCP stdio from `dist/server.js`:
-`browser_open`, `browser_snapshot`, `browser_click`, `browser_type`,
-`browser_select`, `browser_wait`, `browser_screenshot`,
-`browser_form_snapshot`, `browser_click_text`, `browser_fill_by_label`,
-`browser_select_by_text`, and `browser_upload_file`.
+The MCP stdio entry is `dist/server.js`. Its default compatibility surface is
+observation-only: `browser_snapshot`, `browser_form_snapshot`,
+`browser_form_audit`, `browser_inspect_options`, `browser_wait`, and
+`browser_screenshot`. Navigation, click, input, selection, upload, and submit
+calls fail closed; use `runWebTask()` for policy-governed browser writes.
 
-See [../../configs/mcp.playwright.example.json](../../configs/mcp.playwright.example.json).
+See the repository
+[MCP configuration example](https://github.com/Xionglt/WebBuddy/blob/main/configs/mcp.playwright.example.json).
 
 ## Scripts
 
 ```bash
 npm run build                 # compile src to dist
-npm run web                   # Web UI dashboard
+export WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)"
+npm run web                   # authenticated control console
 npm run demo:form             # local form demo
 npm run demo:research         # local read-only research demo
 npm run demo:match            # Alibaba read-only match preset
@@ -442,6 +429,8 @@ npm run test:direct-submit-flow    # direct-submit review fixtures
 npm run test:risk-timeline    # risk-decisions artifact and counters
 npm run test:e2e-auto-apply   # localhost sandbox auto-apply
 npm run test:mvp              # full MVP regression entry
+npm run test:m6-release       # focused M6 security/service/release matrix
+npm run test:release-gate     # complete deterministic release gate
 npm run alibaba:apply:raw     # local raw runtime comparison path
 ```
 
