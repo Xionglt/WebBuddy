@@ -1,4 +1,4 @@
-import { AutoHumanGate, CliHumanGate } from './human.js'
+import { AutoHumanGate, CliHumanGate, type HumanGate } from './human.js'
 import { LlmGateway } from './llm.js'
 import { loadConfig, hasModelKey, type AgentConfig } from './config.js'
 import { TraceRecorder } from './trace.js'
@@ -10,6 +10,13 @@ import { createLocalTools } from '../tools/local-adapter.js'
 import { listLocalToolDefs } from '../tools/catalog.js'
 import { emptyRunMetrics } from '../metrics/schema.js'
 import { generateAndWriteMetrics } from '../metrics/writer.js'
+import type { AgentRunController } from '../kernel/run-controller.js'
+import {
+  FileSessionRecorder,
+  FileSessionStore,
+  type AgentSession,
+  type SessionRecorder,
+} from '../session/index.js'
 import { evaluateCompletionContract } from '../task/completion-contract.js'
 import { classifyContentSecurity, toContextSecurityFields } from '../security/content-trust.js'
 import {
@@ -27,6 +34,7 @@ import {
   type WebTaskRuntimeDriver,
   type WebTaskRuntimeOutcome,
 } from '../task/contracts.js'
+import { join } from 'node:path'
 
 export type {
   ActionBinding,
@@ -55,6 +63,16 @@ export type {
 } from '../task/contracts.js'
 
 export { WebTaskContractError, snapshotWebTaskInput } from '../task/contracts.js'
+
+export interface WebTaskExecutionHost {
+  config?: AgentConfig
+  gate?: HumanGate
+  controller?: Pick<AgentRunController, 'signal' | 'pauseRequested'>
+  sessionId?: string
+  durableSession?: boolean
+  onSessionReady?: (session: AgentSession) => void | Promise<void>
+  persistenceSanitizer?: (value: unknown) => unknown
+}
 
 export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   const snapshot = snapshotWebTaskInput(input)
@@ -212,9 +230,21 @@ function secureContextItem(item: ContextItem): ContextItem {
   return secured
 }
 
-const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
-  async execute(request): Promise<WebTaskRuntimeOutcome> {
-    const config = loadConfig()
+export function createWebTaskRuntimeDriver(
+  host: WebTaskExecutionHost = {},
+): WebTaskRuntimeDriver {
+  return {
+    execute: (request) => executeGenericWebTask(request, host),
+  }
+}
+
+const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = createWebTaskRuntimeDriver()
+
+async function executeGenericWebTask(
+  request: Parameters<WebTaskRuntimeDriver['execute']>[0],
+  host: WebTaskExecutionHost,
+): Promise<WebTaskRuntimeOutcome> {
+    const config = host.config ?? loadConfig()
     applyGenericBrowserEnv(config, request.runtime, request.input.runId)
     const trace = new TraceRecorder(request.runtime?.traceOutDir ?? config.trace.outDir, {
       runId: request.input.runId,
@@ -222,10 +252,36 @@ const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
       scenario: request.input.goal.scenario ?? 'generic-web-task',
       profile: 'generic',
       goal: request.input.goal.instruction,
+      sanitize: host.persistenceSanitizer,
     })
-    const sessionId = request.input.sessionRef?.id ?? `web-task-${request.input.runId}`
+    const sessionId = host.sessionId ?? request.input.sessionRef?.id ?? `web-task-${request.input.runId}`
     const llm = new LlmGateway(config.model)
+    let session: SessionRecorder | undefined
+    let sessionRef = request.input.sessionRef
     try {
+      if (host.durableSession) {
+        const store = new FileSessionStore({
+          rootDir: join(config.trace.outDir, 'sessions'),
+          sanitize: host.persistenceSanitizer,
+        })
+        const created = await store.create({
+          sessionId,
+          runId: request.input.runId,
+          source: 'web',
+          goal: request.input.goal.instruction,
+          mode: 'generic-web-task',
+          traceRunId: request.input.runId,
+        })
+        session = new FileSessionRecorder(store, created)
+        sessionRef = {
+          schemaVersion: 'session-ref/v1',
+          provider: 'file-session-store',
+          id: created.sessionId,
+          runId: request.input.runId,
+          attempt: request.input.sessionRef?.attempt ?? 1,
+        }
+        await host.onSessionReady?.(created)
+      }
       if (request.input.startUrl) {
         const opened = await browserOpen({ url: request.input.startUrl, sessionId, waitUntil: 'domcontentloaded' })
         if (!opened.ok) throw new Error(opened.error.message)
@@ -241,6 +297,7 @@ const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
           artifacts: [],
           metrics: metricsFor(trace, config, traceSummary.tracePath),
           actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+          ...(sessionRef ? { sessionRef } : {}),
         }
       }
       const genericDefs = listLocalToolDefs().filter((tool) => !['resume_query', 'job_match_candidates', 'plan_form_fill'].includes(tool.name))
@@ -252,11 +309,15 @@ const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
         llm,
         registry: new ToolRegistry(createLocalTools(genericDefs)),
         ctx: { sessionId, highlight: config.browser.visualHighlight, trace },
-        gate: config.human.mode === 'auto' ? new AutoHumanGate() : new CliHumanGate(),
+        gate: host.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate() : new CliHumanGate()),
         maxSteps: request.runtime?.maxSteps ?? config.agent.maxSteps,
         safetyMode: 'guarded',
         permissionMode: config.human.permissionMode,
         allowFinalSubmit: false,
+        session,
+        abortSignal: host.controller?.signal,
+        shouldPause: () => host.controller?.pauseRequested ?? false,
+        persistenceSanitizer: host.persistenceSanitizer,
         onEvent: (event) => request.emit({
           type: 'runtime_event',
           runId: request.input.runId,
@@ -266,12 +327,19 @@ const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
       })
       const traceSummary = trace.finish()
       return {
-        status: loop.blocked ? 'blocked' : loop.done ? 'completed' : 'failed',
+        status: host.controller?.signal.aborted
+          ? 'cancelled'
+          : loop.paused || loop.blocked
+            ? 'blocked'
+            : loop.done
+              ? 'completed'
+              : 'failed',
         summary: loop.summary,
         evidence: loop.evidence ?? [],
         artifacts: [],
         metrics: metricsFor(trace, config, traceSummary.tracePath),
         actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+        ...(sessionRef ? { sessionRef } : {}),
       }
     } catch (error) {
       const summary = error instanceof Error ? error.message : String(error)
@@ -284,11 +352,11 @@ const defaultWebTaskRuntimeDriver: WebTaskRuntimeDriver = {
         artifacts: [],
         metrics: metricsFor(trace, config, traceSummary.tracePath),
         actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+        ...(sessionRef ? { sessionRef } : {}),
       }
     } finally {
       await sessionManager.close(sessionId).catch(() => {})
     }
-  },
 }
 
 function metricsFor(trace: TraceRecorder, config: AgentConfig, _tracePath: string) {

@@ -41,15 +41,23 @@ import {
 import { serviceScopeKey, type ServiceScope } from '../public/service-contracts.js'
 import { loadConfig, type AgentConfig } from '../sdk/config.js'
 import { runJobApplicationAgent, type AgentEvent, type AgentRunResult, type RunOptions } from '../sdk/orchestrator.js'
+import {
+  createWebTaskRuntimeDriver,
+  runWebTask,
+} from '../sdk/web-task.js'
 import { sessionManager } from '../session/manager.js'
 import { FileSessionStore } from '../session/index.js'
 import {
   digestCanonicalJson,
   snapshotWebTaskInput,
+  validateArtifactRef,
+  type ArtifactRef,
   type JsonObject,
   type OwnerScope,
   type WebTaskInput,
   type WebTaskInputSnapshot,
+  type WebTaskResult,
+  type WebTaskRuntimeDriver,
 } from '../task/contracts.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
@@ -91,6 +99,7 @@ interface LiveExecution {
   gate: DurableHumanGate
   runRevision: number
   attempt: number
+  settled?: Promise<void>
 }
 
 export interface WebControlServerOptions {
@@ -98,6 +107,8 @@ export interface WebControlServerOptions {
   memoryDir?: string
   disableExecution?: boolean
   serviceSecurity?: WebServiceSecurityOptions
+  /** Test/embedding seam for runtime outcomes; runWebTask still owns validation and completion. */
+  webTaskRuntimeDriver?: WebTaskRuntimeDriver
 }
 
 export function createWebControlServer(options: WebControlServerOptions = {}) {
@@ -189,8 +200,28 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     channels.delete(record.runId)
   }
 
+  const endWebTaskRun = (record: RunRecord, result?: WebTaskResult, error?: string) => {
+    const channel = channelFor(record.runId)
+    const terminal = JSON.stringify(security.sanitize({
+      _end: true,
+      state: record.state,
+      error,
+      status: result?.status,
+      summary: result?.summary,
+    }))
+    for (const subscriber of channel.subscribers) {
+      subscriber.write(`data: ${terminal}\n\n`)
+      subscriber.end()
+    }
+    channel.subscribers.clear()
+    channels.delete(record.runId)
+  }
+
   async function launch(record: RunRecord, launchOptions = launchOptionsFromRecord(record)): Promise<void> {
     if (options.disableExecution) return
+    if (executionAdapterFor(record) !== 'recruiting_compat') {
+      throw new HttpError(409, 'Stored run is not bound to the recruiting compatibility adapter.')
+    }
     const scope = scoped(record.ownerScope)
     const controller = createAgentRunController()
     const running = await runService.transition(record.runId, {
@@ -253,7 +284,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       onEvent: (event) => emitRun(running.runId, event),
     }
 
-    void runJobApplicationAgent(runtimeOptions)
+    const settled = runJobApplicationAgent(runtimeOptions)
       .then((result) => settleExecution(running, controller, result))
       .catch((error) => settleExecution(running, controller, undefined, String(error)))
       .finally(() => {
@@ -262,6 +293,84 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           executions.delete(running.runId)
         }
       })
+    const active = executions.get(running.runId)
+    if (active) active.settled = settled
+    void settled
+  }
+
+  async function launchWebTask(record: RunRecord): Promise<void> {
+    if (options.disableExecution) return
+    if (executionAdapterFor(record) !== 'generic_web_task') {
+      throw new HttpError(409, 'Stored run is not bound to the generic WebTask adapter.')
+    }
+    assertStoredInputDigest(record)
+    const scope = scoped(record.ownerScope)
+    const controller = createAgentRunController()
+    const running = await runService.transition(record.runId, {
+      to: 'running',
+      idempotencyKey: `launch-web-task:${record.runRevision}:${record.attempt}`,
+      expectedRunRevision: record.runRevision,
+      expectedAttempt: record.attempt,
+    }, scope)
+    const sessionId = `control-${running.runId}-a${running.attempt}`
+    const gate = new DurableHumanGate({
+      runs: runService,
+      approvals: approvalService,
+      runId: running.runId,
+      runRevision: running.runRevision,
+      attempt: running.attempt,
+      taskContract: running.inputSnapshot.contract,
+      sessionId,
+      abortSignal: controller.signal,
+      ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
+    })
+    executions.set(running.runId, {
+      controller,
+      gate,
+      runRevision: running.runRevision,
+      attempt: running.attempt,
+    })
+    const config = await runtimeConfig()
+    config.human.mode = 'auto'
+    const driver = options.webTaskRuntimeDriver ?? createWebTaskRuntimeDriver({
+      config,
+      gate,
+      controller,
+      sessionId,
+      durableSession: true,
+      persistenceSanitizer: (value) => security.sanitize(value),
+      onSessionReady: async (session) => {
+        await runService.attachSession(running.runId, {
+          schemaVersion: 'session-ref/v1',
+          provider: 'file-session-store',
+          id: session.sessionId,
+          runId: running.runId,
+          attempt: running.attempt,
+        }, `web-task-session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
+      },
+    })
+    const input = webTaskInputFromRecord(running, driver, (event) => {
+      emitRun(running.runId, {
+        phase: event.type,
+        level: event.type === 'run_failed' ? 'error'
+          : event.type === 'run_completed' ? 'done'
+            : event.type === 'run_blocked' ? 'gate'
+              : 'info',
+        message: event.snapshot?.reason ?? event.type,
+      })
+    })
+    const settled = runWebTask(input)
+      .then((result) => settleWebTaskExecution(running, controller, result))
+      .catch((error) => settleWebTaskExecution(running, controller, undefined, String(error)))
+      .finally(() => {
+        const active = executions.get(running.runId)
+        if (active?.runRevision === running.runRevision && active.attempt === running.attempt) {
+          executions.delete(running.runId)
+        }
+      })
+    const active = executions.get(running.runId)
+    if (active) active.settled = settled
+    void settled
   }
 
   async function settleExecution(
@@ -369,6 +478,118 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     endRun(decision.record, result, safeError)
   }
 
+  async function settleWebTaskExecution(
+    launched: RunRecord,
+    controller: AgentRunController,
+    result?: WebTaskResult,
+    error?: string,
+  ): Promise<void> {
+    let safeError = error === undefined ? undefined : String(security.sanitize(error))
+    let artifactRefs: ArtifactRef[] = []
+    if (!safeError && result) {
+      try {
+        validateWebTaskServiceResult(result, launched, security)
+        artifactRefs = result.artifacts.map((artifact) => structuredClone(artifact))
+      } catch (validationError) {
+        safeError = String(security.sanitize(
+          validationError instanceof Error ? validationError.message : String(validationError),
+        ))
+      }
+    }
+    const safeSummary = result?.summary === undefined
+      ? undefined
+      : String(security.sanitize(result.summary))
+    const scope = scoped(launched.ownerScope)
+    let current = await runService.get(launched.runId, scope)
+    if (!current) return
+    const traceRef = {
+      schemaVersion: 'control-resource-ref/v1' as const,
+      id: `trace:${launched.runId}:${launched.attempt}`,
+      kind: 'trace' as const,
+      locator: `traces/run_${launched.runId}`,
+    }
+
+    if (current.runRevision !== launched.runRevision || current.attempt !== launched.attempt) {
+      const rejected = await runService.acceptResult({
+        runId: launched.runId,
+        runRevision: launched.runRevision,
+        attempt: launched.attempt,
+        terminalState: safeError || result?.status === 'failed' ? 'failed'
+          : result?.status === 'cancelled' ? 'cancelled'
+            : 'completed',
+        reason: safeError ?? safeSummary,
+        idempotencyKey: `late-web-task-result:${launched.runRevision}:${launched.attempt}`,
+        ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
+      })
+      endWebTaskRun(rejected.record, result, safeError)
+      return
+    }
+
+    if (current.state === 'pausing' || controller.pauseRequested) {
+      current = await runService.acknowledgePause(launched.runId, {
+        schemaVersion: 'safe-turn-boundary-ref/v1',
+        runId: launched.runId,
+        runRevision: launched.runRevision,
+        attempt: launched.attempt,
+        turnId: `web-task-attempt-${launched.attempt}-settled`,
+        actionSeq: channelFor(launched.runId).events.length,
+        observedAt: new Date().toISOString(),
+        ...(result?.sessionRef ? { sessionRef: result.sessionRef } : {}),
+        ...(result?.checkpointRef ? { checkpointRef: result.checkpointRef } : {}),
+      }, `web-task-pause-ack:${launched.runRevision}:${launched.attempt}`, scope, {
+        artifactRefs,
+        resourceRefs: [traceRef],
+      })
+      endWebTaskRun(current, result, safeError)
+      return
+    }
+
+    if (current.state === 'cancelling' || controller.signal.aborted || result?.status === 'cancelled') {
+      const decision = await runService.acceptResult({
+        runId: launched.runId,
+        runRevision: launched.runRevision,
+        attempt: launched.attempt,
+        terminalState: 'cancelled',
+        reason: String(security.sanitize(controller.reason ?? safeSummary ?? 'Cancelled by user.')),
+        artifactRefs,
+        resourceRefs: [traceRef],
+        idempotencyKey: `web-task-cancelled:${launched.runRevision}:${launched.attempt}`,
+        ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
+      })
+      endWebTaskRun(decision.record, result, safeError)
+      return
+    }
+
+    if (!safeError && result?.status === 'blocked') {
+      current = await runService.transition(launched.runId, {
+        to: 'blocked_on_human',
+        reason: safeSummary,
+        idempotencyKey: `web-task-blocked:${launched.runRevision}:${launched.attempt}`,
+        expectedRunRevision: launched.runRevision,
+        expectedAttempt: launched.attempt,
+        update: (record) => ({
+          artifactRefs: mergeResourceRefs(record.artifactRefs, artifactRefs),
+          resourceRefs: mergeResourceRefs(record.resourceRefs, [traceRef]),
+        }),
+      }, scope)
+      endWebTaskRun(current, result)
+      return
+    }
+
+    const decision = await runService.acceptResult({
+      runId: launched.runId,
+      runRevision: launched.runRevision,
+      attempt: launched.attempt,
+      terminalState: safeError || result?.status !== 'completed' ? 'failed' : 'completed',
+      reason: safeError ?? safeSummary,
+      artifactRefs,
+      resourceRefs: [traceRef],
+      idempotencyKey: `web-task-result:${launched.runRevision}:${launched.attempt}`,
+      ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
+    })
+    endWebTaskRun(decision.record, result, safeError)
+  }
+
   async function createRun(
     body: Record<string, unknown>,
     idempotencyKey: string,
@@ -419,11 +640,12 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       }
       const created = await runService.create(prepared.snapshot, { idempotencyKey })
       channelFor(runId)
-      if (!created.replayed) await launch(created.record, launchOptionsFromRecord(created.record))
+      if (!created.replayed) await launchWebTask(created.record)
       return (await runService.get(runId, scope)) ?? created.record
     }
     const launchOptions = prepared.launchOptions
     const metadata: JsonObject = {
+      executionAdapter: 'recruiting_compat',
       mode: launchOptions.mode,
       headless: launchOptions.headless ?? false,
       restartSafe: launchOptions.restartSafe,
@@ -565,6 +787,12 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if ((path === '/api/run' || path === '/api/runs') && req.method === 'POST') {
       const body = await readJsonBody(req)
       assertBodyScope(body, principal)
+      if (path === '/api/run' && body.schemaVersion === 'run-client-create/v1') {
+        return respond(400, {
+          error: 'generic_web_task_requires_api_runs',
+          message: 'Use POST /api/runs for run-client-create/v1; /api/run is the deprecated recruiting compatibility route.',
+        })
+      }
       const externalKey = path === '/api/runs'
         ? requireIdempotencyKey(req, body)
         : requestIdempotencyKey(req, body, `create:${randomUUID()}`)
@@ -690,6 +918,12 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         storeScope,
       )
       const resuming = await runService.resume(runId, idempotencyKey, storeScope)
+      if (executionAdapterFor(resuming) !== 'recruiting_compat') {
+        return respond(409, {
+          error: 'generic_resume_not_supported',
+          message: 'Generic service runs are not restartable until a durable generic checkpoint adapter is available.',
+        })
+      }
       await launch(resuming, { ...launchOptionsFromRecord(resuming), restoredSessionId })
       const resumed = (await runService.get(runId, storeScope)) ?? resuming
       await security.audit({
@@ -979,7 +1213,13 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     controlStoreDir,
     recoverStartupRuns,
     async close() {
-      for (const execution of executions.values()) execution.controller.abort('Web control server is shutting down.')
+      const active = [...executions.values()]
+      for (const execution of active) execution.controller.abort('Web control server is shutting down.')
+      await Promise.allSettled(
+        active
+          .map((execution) => execution.settled)
+          .filter((settled): settled is Promise<void> => Boolean(settled)),
+      )
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
       await sessionManager.closeAll().catch(() => {})
     },
@@ -1041,9 +1281,21 @@ function prepareRunInput(
   if (input.startUrl !== undefined && !startUrl) {
     throw new HttpError(400, 'startUrl must use HTTP(S) and must not target a private network')
   }
+  const goal = plainRecord(input.goal, 'input.goal')
+  const callerMetadata = goal.metadata === undefined
+    ? {}
+    : plainRecord(goal.metadata, 'input.goal.metadata')
   const candidate: WebTaskInput = {
     schemaVersion: 'web-task-input/v1',
-    goal: input.goal as WebTaskInput['goal'],
+    goal: {
+      instruction: typeof goal.instruction === 'string' ? goal.instruction : '',
+      ...(typeof goal.scenario === 'string' ? { scenario: goal.scenario } : {}),
+      metadata: {
+        ...callerMetadata,
+        executionAdapter: 'generic_web_task',
+        restartSafe: false,
+      } as JsonObject,
+    },
     contract: input.contract as WebTaskInput['contract'],
     ...(startUrl ? { startUrl } : {}),
     ...(Array.isArray(input.contextItems)
@@ -1251,6 +1503,92 @@ function launchOptionsFromRecord(record: RunRecord): LegacyLaunchOptions {
     ...(parseTaskType(metadata.taskType) ? { taskType: parseTaskType(metadata.taskType) } : {}),
     requiresCurrentResumeUpload: metadata.requiresCurrentResumeUpload === true,
     restartSafe: metadata.restartSafe === true,
+  }
+}
+
+function executionAdapterFor(record: RunRecord): 'generic_web_task' | 'recruiting_compat' | 'unknown' {
+  const marker = record.inputSnapshot.goal.metadata?.executionAdapter
+  if (marker === 'generic_web_task' || marker === 'recruiting_compat') return marker
+  return record.inputSnapshot.contract.contractId === 'web-control-plane-legacy-adapter'
+    ? 'recruiting_compat'
+    : 'unknown'
+}
+
+function webTaskInputFromRecord(
+  record: RunRecord,
+  driver: WebTaskRuntimeDriver,
+  onEvent: NonNullable<WebTaskInput['onEvent']>,
+): WebTaskInput {
+  const snapshot = record.inputSnapshot
+  if (snapshot.contextProviders.length > 0) {
+    throw new HttpError(409, 'Stored generic run references unavailable Context Providers.')
+  }
+  return {
+    schemaVersion: 'web-task-input/v1',
+    goal: structuredClone(snapshot.goal),
+    contract: structuredClone(snapshot.contract),
+    ...(snapshot.startUrl ? { startUrl: snapshot.startUrl } : {}),
+    contextItems: structuredClone(snapshot.contextItems),
+    ...(snapshot.policy ? { policy: structuredClone(snapshot.policy) } : {}),
+    runId: snapshot.runId,
+    revision: snapshot.revision,
+    ...(snapshot.ownerScope ? { ownerScope: structuredClone(snapshot.ownerScope) } : {}),
+    runtime: {
+      driver,
+      ...(typeof snapshot.goal.metadata?.headless === 'boolean'
+        ? { headless: snapshot.goal.metadata.headless }
+        : {}),
+    },
+    onEvent,
+  }
+}
+
+function assertStoredInputDigest(record: RunRecord): void {
+  const snapshot = record.inputSnapshot
+  const input = webTaskInputFromRecord(snapshotRecord(record), {
+    async execute() {
+      throw new Error('Digest-only runtime driver must not execute.')
+    },
+  }, () => {})
+  const rebuilt = snapshotWebTaskInput(input, snapshot.runId)
+  if (snapshot.sha256 !== record.inputDigest || rebuilt.sha256 !== record.inputDigest) {
+    throw new ControlStoreError('INVALID_RECORD', 'Stored WebTask input digest does not match its frozen snapshot.')
+  }
+}
+
+function snapshotRecord(record: RunRecord): RunRecord {
+  return {
+    ...record,
+    inputSnapshot: structuredClone(record.inputSnapshot),
+  }
+}
+
+function validateWebTaskServiceResult(
+  result: WebTaskResult,
+  launched: RunRecord,
+  security: WebServiceSecurityBoundary,
+): void {
+  if (result.schemaVersion !== 'web-task-result/v1') {
+    throw new Error(`Unsupported WebTaskResult schema: ${String(result.schemaVersion)}`)
+  }
+  if (result.runId !== launched.runId || result.revision !== launched.runRevision) {
+    throw new Error('WebTaskResult does not match the launched run/revision.')
+  }
+  if (digestCanonicalJson(result.ownerScope ?? null) !== digestCanonicalJson(launched.ownerScope ?? null)) {
+    throw new Error('WebTaskResult owner scope does not match the launched Run.')
+  }
+  for (const artifact of result.artifacts) {
+    validateArtifactRef(artifact, launched.runId, launched.runRevision)
+    if (artifact.sensitivity === 'secret') {
+      throw new Error(`Artifact ${artifact.id} cannot use ordinary storage for secret content.`)
+    }
+    if (artifact.ownerScope
+      && digestCanonicalJson(artifact.ownerScope) !== digestCanonicalJson(launched.ownerScope ?? null)) {
+      throw new Error(`Artifact ${artifact.id} owner scope does not match the launched Run.`)
+    }
+    if (digestCanonicalJson(artifact) !== digestCanonicalJson(security.sanitize(artifact))) {
+      throw new Error(`Artifact ${artifact.id} contains material rejected by the service secret boundary.`)
+    }
   }
 }
 

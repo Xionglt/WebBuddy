@@ -279,6 +279,7 @@ export class RunService {
     boundary: SafeTurnBoundaryRef,
     idempotencyKey: string,
     scope?: ScopedStoreQuery,
+    references?: Pick<LateResultInput, 'artifactRefs' | 'resourceRefs'>,
   ): Promise<RunRecord> {
     if (boundary.runId !== runId) throw new RunServiceError('INVALID_CONTROL', 'Safe boundary is bound to another run.')
     return this.transition(runId, {
@@ -288,10 +289,16 @@ export class RunService {
       expectedAttempt: boundary.attempt,
       eventType: 'safe_boundary_reached',
       data: { turnId: boundary.turnId, actionSeq: boundary.actionSeq },
-      update: () => ({
+      update: (record) => ({
         lastSafeBoundary: boundary,
         ...(boundary.sessionRef ? { sessionRef: boundary.sessionRef } : {}),
         ...(boundary.checkpointRef ? { checkpointRef: boundary.checkpointRef } : {}),
+        ...(references?.artifactRefs
+          ? { artifactRefs: mergeById(record.artifactRefs, references.artifactRefs) }
+          : {}),
+        ...(references?.resourceRefs
+          ? { resourceRefs: mergeById(record.resourceRefs, references.resourceRefs) }
+          : {}),
       }),
     }, scope)
   }
