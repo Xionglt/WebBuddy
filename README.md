@@ -11,6 +11,30 @@ Skill、Policy 和 Workflow 承载。
 这个仓库只发布 `packages/web-buddy` 主项目。根目录中的 Docker 与配置文件
 用于构建和运行 Web Buddy；本地计划和设计文档不进入远端版本。
 
+## V3.0.0 交付状态
+
+Agent Harness V3 的 M1-M6 技术验收已经完成。源码发布分支为
+`cl/personal/web-buddy/kai/v-3.0.0`，同一提交作为 `main` 的 V3 集成基线。
+`runWebTask()` 是通用主入口；招聘保留为 deprecated Scenario Adapter，安全、
+Control Plane、Multi-Agent、Memory、Public SDK 和 tenant service 继续共用同一
+Agent Loop 与 fail-closed 边界。
+
+维护者可用以下命令重放 V3 验收：
+
+```bash
+cd packages/web-buddy
+npm run typecheck
+npm run build
+npm run test:mvp
+npm run test:release-gate
+npm run test:m6-release
+```
+
+这里的 `v3.0.0` 表示 Agent Harness 源码交付线。npm manifest 当前仍为
+`1.0.0`；在选择 LICENSE、确认发布者权限并重新执行 package smoke 之前，不得
+据此发布到公共 npm registry。`PLAN/`、环境变量、本地输出、构建产物和依赖目录
+仍按仓库规则排除在 Git 交付之外。
+
 ## Public SDK（推荐入口）
 
 Node.js `>=20` 的外部项目只从包根导入稳定 API；`dist/*`、`src/*` 和其他深路径

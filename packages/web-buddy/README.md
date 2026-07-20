@@ -10,6 +10,31 @@ booking preparation, and recruiting assistance all run through the same
 Agent Harness; task prompts, Skills, Policies, and Workflows provide the
 scenario-specific behavior.
 
+## V3.0.0 Delivery Status
+
+Agent Harness V3 has completed the M1-M6 technical acceptance. Its source
+release branch is `cl/personal/web-buddy/kai/v-3.0.0`, and the same commit is
+the V3 integration baseline on `main`. `runWebTask()` is the generic primary
+entry; recruiting remains a deprecated Scenario Adapter over the same Agent
+Loop and fail-closed security, Control Plane, Multi-Agent, Memory, Public SDK,
+and tenant-service boundaries.
+
+Maintainers can replay the V3 acceptance with:
+
+```bash
+npm run typecheck
+npm run build
+npm run test:mvp
+npm run test:release-gate
+npm run test:m6-release
+```
+
+The `v3.0.0` label identifies the Agent Harness source delivery line. The npm
+manifest remains `1.0.0`; public registry publication is not authorized until
+a LICENSE is selected, publisher authority is confirmed, and the package smoke
+is rerun. Local `PLAN/`, environment files, output, build artifacts, and
+dependency directories remain outside the Git delivery.
+
 ## Public SDK
 
 Use Node.js `>=20` and import only the package root. Deep imports such as
