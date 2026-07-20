@@ -7,6 +7,9 @@ await researchWithoutResume()
 await comparisonArtifact()
 await nonRecruitingFormDraft()
 await prematureDoneIsRejected()
+await blockedOutcomeCannotEscalate()
+await duplicateResultRefsFailClosed()
+await staleEvidenceCannotComplete()
 await forgedProviderTrustFailsClosed()
 
 console.log('generic-web-task-test: PASS')
@@ -105,6 +108,112 @@ async function prematureDoneIsRejected() {
   })
   assert.equal(result.status, 'blocked')
   assert.match(result.summary, /Missing completion criteria: evidence/)
+}
+
+async function blockedOutcomeCannotEscalate() {
+  const result = await runWebTask({
+    schemaVersion: 'web-task-input/v1',
+    goal: { instruction: 'Stop for approval before submission.' },
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'blocked-outcome-contract',
+      revision: 0,
+      criteria: [{
+        id: 'submit-not-performed',
+        kind: 'action_boundary',
+        description: 'Submission must remain unperformed.',
+        actionKinds: ['submit'],
+        outcome: 'not_performed',
+      }],
+    },
+    runId: 'run-blocked-outcome',
+    runtime: {
+      driver: driver(() => ({
+        ...outcome('Approval required.', []),
+        status: 'blocked',
+        actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+      })),
+    },
+  })
+  assert.equal(result.status, 'blocked', 'a blocked runtime outcome must never be promoted to completed')
+  assert.equal(result.summary, 'Approval required.')
+}
+
+async function duplicateResultRefsFailClosed() {
+  for (const kind of ['evidence', 'artifact']) {
+    const result = await runWebTask({
+      schemaVersion: 'web-task-input/v1',
+      goal: { instruction: `Require two distinct ${kind} refs.` },
+      contract: {
+        schemaVersion: 'web-task-contract/v1',
+        contractId: `duplicate-${kind}-contract`,
+        revision: 0,
+        criteria: kind === 'evidence'
+          ? [{
+              id: 'two-evidence',
+              kind: 'evidence_present',
+              description: 'Two distinct observations are required.',
+              evidenceKinds: ['page'],
+              minCount: 2,
+              allowedAuthorities: ['main_runtime'],
+            }]
+          : [{
+              id: 'two-artifacts',
+              kind: 'artifact_present',
+              description: 'Two distinct artifacts are required.',
+              artifactKinds: ['comparison'],
+              minCount: 2,
+              schemaVersions: ['comparison/v1'],
+            }],
+      },
+      runId: `run-duplicate-${kind}`,
+      runtime: {
+        driver: driver((request) => {
+          const duplicate = kind === 'evidence'
+            ? evidence(request, 'page')
+            : artifact(request, 'comparison', 'comparison/v1')
+          return outcome(
+            'Duplicated one reference.',
+            kind === 'evidence' ? [duplicate, duplicate] : [],
+            kind === 'artifact' ? [duplicate, duplicate] : [],
+          )
+        }),
+      },
+    })
+    assert.equal(result.status, 'failed', `duplicate ${kind} IDs must fail closed`)
+    assert.match(result.summary, new RegExp(`Duplicate ${kind}`, 'i'))
+  }
+}
+
+async function staleEvidenceCannotComplete() {
+  const result = await runWebTask({
+    schemaVersion: 'web-task-input/v1',
+    goal: { instruction: 'Use only current page evidence.' },
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'stale-evidence-contract',
+      revision: 0,
+      criteria: [{
+        id: 'fresh-page',
+        kind: 'evidence_present',
+        description: 'A page observation from the last second is required.',
+        evidenceKinds: ['page'],
+        minCount: 1,
+        allowedAuthorities: ['main_runtime'],
+        maxAgeMs: 1_000,
+      }],
+    },
+    runId: 'run-stale-evidence',
+    runtime: {
+      driver: driver((request) => {
+        const stale = evidence(request, 'page')
+        stale.createdAt = '2020-01-01T00:00:00.000Z'
+        return outcome('Old evidence supplied.', [stale])
+      }),
+    },
+  })
+  assert.equal(result.status, 'blocked')
+  assert.match(result.summary, /Missing completion criteria: fresh-page/)
 }
 
 async function forgedProviderTrustFailsClosed() {

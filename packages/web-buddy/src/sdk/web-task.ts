@@ -132,6 +132,8 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
   try {
     outcome.evidence.forEach((item) => validateEvidenceRef(item, runId, revision))
     outcome.artifacts.forEach((item) => validateArtifactRef(item, runId, revision))
+    assertUniqueResultIds(outcome.evidence, 'evidence')
+    assertUniqueResultIds(outcome.artifacts, 'artifact')
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     emit({ type: 'run_failed', runId, revision, snapshot: lifecycle('failed', message), data: { code: 'BINDING_MISMATCH' } })
@@ -147,12 +149,12 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     formState: outcome.formState,
     actions: outcome.actions,
   })
-  const status = outcome.status === 'failed' || outcome.status === 'cancelled'
+  const status = outcome.status === 'failed' || outcome.status === 'cancelled' || outcome.status === 'blocked'
     ? outcome.status
     : completion.completed
       ? 'completed'
       : 'blocked'
-  const summary = completion.completed || outcome.status === 'failed' || outcome.status === 'cancelled'
+  const summary = outcome.status !== 'completed' || completion.completed
     ? outcome.summary
     : `${outcome.summary} Missing completion criteria: ${completion.missingCriteria.join(', ')}.`
   const state = status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : status === 'failed' ? 'failed' : 'blocked_on_human'
@@ -175,6 +177,15 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     ...(outcome.sessionRef ?? snapshot.sessionRef ? { sessionRef: outcome.sessionRef ?? snapshot.sessionRef } : {}),
     ...(outcome.checkpointRef ? { checkpointRef: outcome.checkpointRef } : {}),
     ...(snapshot.ownerScope ? { ownerScope: snapshot.ownerScope } : {}),
+  }
+}
+
+function assertUniqueResultIds(
+  refs: readonly { id: string }[],
+  kind: 'evidence' | 'artifact',
+): void {
+  if (new Set(refs.map((item) => item.id)).size !== refs.length) {
+    throw new WebTaskContractError('BINDING_MISMATCH', `Duplicate ${kind} reference IDs are not allowed.`)
   }
 }
 

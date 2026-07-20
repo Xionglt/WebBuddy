@@ -466,6 +466,7 @@ export function validateTaskContract(contract: TaskContract): void {
       nonEmptyArray(criterion.evidenceKinds, `${criterion.id}.evidenceKinds`)
       positiveInteger(criterion.minCount, `${criterion.id}.minCount`)
       nonEmptyArray(criterion.allowedAuthorities, `${criterion.id}.allowedAuthorities`)
+      if (criterion.maxAgeMs !== undefined) nonNegativeInteger(criterion.maxAgeMs, `${criterion.id}.maxAgeMs`)
     } else if (criterion.kind === 'artifact_present') {
       nonEmptyArray(criterion.artifactKinds, `${criterion.id}.artifactKinds`)
       positiveInteger(criterion.minCount, `${criterion.id}.minCount`)
@@ -484,6 +485,7 @@ export function validateTaskContract(contract: TaskContract): void {
     nonEmptyArray(requirement.kinds, `${requirement.id}.kinds`)
     nonEmptyArray(requirement.allowedAuthorities, `${requirement.id}.allowedAuthorities`)
     positiveInteger(requirement.minCount, `${requirement.id}.minCount`)
+    if (requirement.maxAgeMs !== undefined) nonNegativeInteger(requirement.maxAgeMs, `${requirement.id}.maxAgeMs`)
   }
 }
 
@@ -512,6 +514,8 @@ export function validateEvidenceRef(evidence: EvidenceRef, runId: string, revisi
   nonEmpty(evidence.id, 'evidence.id')
   nonEmpty(evidence.kind, `${evidence.id}.kind`)
   nonEmpty(evidence.verifier, `${evidence.id}.verifier`)
+  isoTimestamp(evidence.createdAt, `${evidence.id}.createdAt`)
+  if (evidence.expiresAt) isoTimestamp(evidence.expiresAt, `${evidence.id}.expiresAt`)
   if (evidence.binding.runId !== runId || evidence.binding.revision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', `${evidence.id} does not match the current run/revision.`)
   if (evidence.authority === 'subagent_advisory' && evidence.trust !== 'non_authoritative') invalid(`${evidence.id}: subagent evidence must be non_authoritative.`)
   if (evidence.actionBinding) validateActionBinding(evidence.actionBinding, runId, revision)
@@ -521,6 +525,7 @@ export function validateArtifactRef(artifact: ArtifactRef, runId: string, revisi
   if (artifact.schemaVersion !== 'artifact-ref/v1') unsupported('ArtifactRef', artifact.schemaVersion)
   nonEmpty(artifact.id, 'artifact.id')
   nonEmpty(artifact.kind, `${artifact.id}.kind`)
+  isoTimestamp(artifact.createdAt, `${artifact.id}.createdAt`)
   if (artifact.binding.runId !== runId || artifact.binding.revision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', `${artifact.id} does not match the current run/revision.`)
   if (!Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 0) invalid(`${artifact.id}.byteLength must be a non-negative integer.`)
   if (!/^[a-f0-9]{64}$/i.test(artifact.sha256)) invalid(`${artifact.id}.sha256 must be a SHA-256 hex digest.`)
@@ -708,6 +713,17 @@ function integer(value: number, path: string): void {
 
 function positiveInteger(value: number, path: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) invalid(`${path} must be a positive safe integer.`)
+}
+
+function nonNegativeInteger(value: number, path: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) invalid(`${path} must be a non-negative safe integer.`)
+}
+
+function isoTimestamp(value: string, path: string): void {
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    invalid(`${path} must be a canonical UTC ISO timestamp.`)
+  }
 }
 
 function unique(values: string[], description: string): void {

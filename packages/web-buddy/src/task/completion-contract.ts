@@ -41,10 +41,10 @@ const AUTHORITATIVE = new Set<EvidenceAuthority>(['main_runtime', 'user'])
 
 export function evaluateCompletionContract(input: EvaluateCompletionContractInput): CompletionContractEvaluation {
   const now = input.now ?? new Date()
-  const evidence = input.evidence.filter((item) => evidenceIsCurrentAndVerified(item, input.runId, input.revision, now))
-  const artifacts = input.artifacts.filter((item) => artifactIsUsable(item, input.runId, input.revision))
+  const evidence = uniqueRefs(input.evidence).filter((item) => evidenceIsCurrentAndVerified(item, input.runId, input.revision, now))
+  const artifacts = uniqueRefs(input.artifacts).filter((item) => artifactIsUsable(item, input.runId, input.revision))
   const criteria = [
-    ...input.contract.criteria.map((criterion) => evaluateCriterion(criterion, evidence, artifacts, input.formState, input.actions ?? [])),
+    ...input.contract.criteria.map((criterion) => evaluateCriterion(criterion, evidence, artifacts, input.formState, input.actions ?? [], now)),
     ...(input.contract.requiredEvidence ?? []).map((requirement) => evaluateEvidenceRequirement(requirement, evidence, now)),
   ]
   const requiredIds = new Set(input.contract.criteria.filter((criterion) => criterion.required !== false).map((criterion) => criterion.id))
@@ -65,6 +65,8 @@ export function evidenceIsCurrentAndVerified(evidence: EvidenceRef, runId: strin
   if (evidence.verificationStatus !== 'verified') return false
   if (evidence.freshness.validity !== 'current' && evidence.freshness.validity !== 'not_applicable') return false
   if (evidence.binding.runId !== runId || evidence.binding.revision !== revision) return false
+  const createdAt = Date.parse(evidence.createdAt)
+  if (!Number.isFinite(createdAt) || createdAt > now.getTime()) return false
   if (evidence.expiresAt && Date.parse(evidence.expiresAt) <= now.getTime()) return false
   return true
 }
@@ -85,9 +87,14 @@ function evaluateCriterion(
   artifacts: ArtifactRef[],
   formState: CompletionFormState | undefined,
   actions: readonly ActionOutcome[],
+  now: Date,
 ): CriterionEvaluation {
   if (criterion.kind === 'evidence_present') {
-    const matches = evidence.filter((item) => criterion.evidenceKinds.includes(item.kind) && criterion.allowedAuthorities.includes(item.authority))
+    const matches = evidence.filter((item) => (
+      criterion.evidenceKinds.includes(item.kind)
+      && criterion.allowedAuthorities.includes(item.authority)
+      && (criterion.maxAgeMs === undefined || now.getTime() - Date.parse(item.createdAt) <= criterion.maxAgeMs)
+    ))
     return evaluated(criterion.id, matches.length >= criterion.minCount, `Found ${matches.length}/${criterion.minCount} required evidence item(s).`, matches.map((item) => item.id), [])
   }
   if (criterion.kind === 'artifact_present') {
@@ -129,4 +136,13 @@ function evaluated(id: string, passed: boolean, reason: string, evidenceIds: str
 
 function unique(values: string[]): string[] {
   return [...new Set(values)]
+}
+
+function uniqueRefs<T extends { id: string }>(values: readonly T[]): T[] {
+  const seen = new Set<string>()
+  return values.filter((value) => {
+    if (seen.has(value.id)) return false
+    seen.add(value.id)
+    return true
+  })
 }
