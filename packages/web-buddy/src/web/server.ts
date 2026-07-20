@@ -116,7 +116,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       ?? process.env.WEB_BUDDY_MEMORY_DIR
       ?? join(controlStoreDir, 'memory'),
   )
-  const sessionStore = new FileSessionStore({ rootDir: join(outputDir(), 'sessions') })
+  const sessionStore = new FileSessionStore({
+    rootDir: join(outputDir(), 'sessions'),
+    sanitize: (value) => security.sanitize(value),
+  })
   const recoveryService = new RecoveryService(runService, approvalService, {
     canRestoreSession: async (record) => Boolean(record.sessionRef && await sessionStore.get(record.sessionRef.id)),
   })
@@ -228,6 +231,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       controller,
       gate,
       sessionId,
+      persistenceSanitizer: (value) => security.sanitize(value),
       ...(launchOptions.restoredSessionId ? { restoredSessionId: launchOptions.restoredSessionId } : {}),
       onSessionReady: async (session) => {
         await runService.attachSession(running.runId, {

@@ -12,6 +12,10 @@ import { generateAndWriteMetrics } from '../metrics/writer.js'
 import { createAgentState, type AgentState, type AgentStateFinalStatus } from '../state/agent-state.js'
 import { agentStatePathForTraceDir, writeAgentStateSafe } from '../state/store.js'
 import type { ToolCategory } from '../tools/types.js'
+import {
+  sanitizeForPersistence,
+  type PersistenceSanitizer,
+} from '../security/redaction.js'
 
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3' | 'L4'
 export type StepStatus = 'ok' | 'warn' | 'blocked' | 'error'
@@ -49,6 +53,8 @@ export interface TraceRecorderOptions {
   scenario?: string
   profile?: string
   goal?: string
+  /** Trusted write-time sanitizer supplied by an embedding secret provider. */
+  sanitize?: PersistenceSanitizer
 }
 
 /**
@@ -76,6 +82,7 @@ export class TraceRecorder {
   private maxRisk: RiskLevel | undefined
   private readonly traceFile: string
   private readonly goal?: string
+  private readonly sanitize?: PersistenceSanitizer
   private agentStatePath?: string
   private agentState?: AgentState
 
@@ -86,7 +93,10 @@ export class TraceRecorder {
     this.source = options.source ?? 'local-runtime'
     this.scenario = options.scenario
     this.profile = options.profile ?? 'debug'
-    this.goal = options.goal
+    this.sanitize = options.sanitize
+    this.goal = options.goal === undefined
+      ? undefined
+      : String(sanitizeForPersistence(options.goal, this.sanitize))
     this.dir = join(outDir, this.runId)
     mkdirSync(this.dir, { recursive: true })
     this.traceFile = join(this.dir, 'trace.jsonl')
@@ -98,6 +108,7 @@ export class TraceRecorder {
       scenario: this.scenario,
       profile: this.profile,
       userPrompt: this.goal,
+      sanitize: this.sanitize,
       metadata: {
         legacyTraceDir: this.dir,
         profile: this.profile,
@@ -182,7 +193,10 @@ export class TraceRecorder {
   record(step: Omit<TraceStep, 'step' | 'ts'>): TraceStep {
     this.stepCount += 1
     const url = step.url ? truncateUrl(step.url) : step.url
-    const full: TraceStep = { step: this.stepCount, ts: new Date().toISOString(), ...step, url }
+    const full = sanitizeForPersistence(
+      { step: this.stepCount, ts: new Date().toISOString(), ...step, url },
+      this.sanitize,
+    ) as unknown as TraceStep
     this.lastStatus = full.status
     if (full.risk) this.maxRisk = higherRisk(this.maxRisk, full.risk)
     appendFileSync(this.traceFile, JSON.stringify(full) + '\n')

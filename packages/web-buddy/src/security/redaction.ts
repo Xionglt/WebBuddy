@@ -14,6 +14,8 @@ export interface RedactionResult {
   changed: boolean
 }
 
+export type PersistenceSanitizer = (value: unknown) => unknown
+
 const SECRET_KEY = /(?:password|passwd|secret|token|cookie|authorization|api[-_]?key|otp|captcha|storageState)/i
 const PERSONAL_KEY = /(?:identity|id[-_]?number|passport|credit[-_]?card|card[-_]?number)/i
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi
@@ -29,6 +31,13 @@ export function redactSensitiveData(value: unknown): RedactionResult {
     findings,
     changed: findings.length > 0,
   }
+}
+
+export function sanitizeForPersistence(
+  value: unknown,
+  sanitizer?: PersistenceSanitizer,
+): JsonValue {
+  return redactSensitiveData(sanitizer ? sanitizer(value) : value).value
 }
 
 function visit(

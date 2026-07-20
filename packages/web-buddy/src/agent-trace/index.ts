@@ -2,6 +2,10 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
+import {
+  sanitizeForPersistence,
+  type PersistenceSanitizer,
+} from '../security/redaction.js'
 
 export type AgentTraceStatus = 'running' | 'success' | 'failed' | 'cancelled'
 export type AgentSpanStatus = 'success' | 'failed' | 'skipped'
@@ -42,6 +46,8 @@ export interface AgentTraceSessionOptions {
   redactionMode?: AgentRedactionMode
   metadata?: Record<string, unknown>
   appendOnly?: boolean
+  /** Always applied before redactionMode, including when mode=full. */
+  sanitize?: PersistenceSanitizer
 }
 
 export interface StartSpanInput {
@@ -146,6 +152,7 @@ export class AgentTraceSession {
   private readonly startedAt = new Date().toISOString()
   private finalized = false
   private readonly appendOnly: boolean
+  private readonly sanitize?: PersistenceSanitizer
   private spanCount = 0
   private llmCalls = 0
   private toolCalls = 0
@@ -165,26 +172,27 @@ export class AgentTraceSession {
     this.eventsFile = join(this.dir, 'events.jsonl')
     this.artifactsDir = join(this.dir, 'artifacts')
     this.appendOnly = Boolean(options.appendOnly)
+    this.sanitize = options.sanitize
 
     mkdirSync(this.artifactsDir, { recursive: true })
     this.session = {
       schemaVersion: 'agent-trace/v1',
       sessionId: this.sessionId,
       runId: this.runId,
-      source: options.source,
-      scenario: options.scenario,
-      profile: options.profile,
-      cwd: options.cwd || process.cwd(),
-      branch: options.branch,
-      commit: options.commit,
-      model: options.model,
-      provider: options.provider,
+      source: this.protectText(options.source),
+      scenario: this.protectOptionalText(options.scenario),
+      profile: this.protectOptionalText(options.profile),
+      cwd: this.protectText(options.cwd || process.cwd()),
+      branch: this.protectOptionalText(options.branch),
+      commit: this.protectOptionalText(options.commit),
+      model: this.protectOptionalText(options.model),
+      provider: this.protectOptionalText(options.provider),
       status: 'running',
       startedAt: this.startedAt,
-      userPrompt: payload(options.userPrompt, this.redactionMode),
-      finalAnswer: payload(options.finalAnswer, this.redactionMode),
+      userPrompt: this.protectedPayload(options.userPrompt),
+      finalAnswer: this.protectedPayload(options.finalAnswer),
       redactionMode: this.redactionMode,
-      metadata: payload(options.metadata, this.redactionMode),
+      metadata: this.protectedPayload(options.metadata),
       totals: {
         spans: 0,
         llmCalls: 0,
@@ -216,14 +224,14 @@ export class AgentTraceSession {
       spanId: `span_${randomUUID()}`,
       parentSpanId: input.parentSpanId || currentSpanId(),
       spanType,
-      name: input.name,
-      toolName: input.toolName,
-      skillName: input.skillName,
-      agentName: input.agentName,
-      toolCategory: input.toolCategory,
-      operation: input.operation,
-      input: payload(input.input, this.redactionMode),
-      metadata: payload(input.metadata, this.redactionMode),
+      name: this.protectText(input.name),
+      toolName: this.protectOptionalText(input.toolName),
+      skillName: this.protectOptionalText(input.skillName),
+      agentName: this.protectOptionalText(input.agentName),
+      toolCategory: this.protectOptionalText(input.toolCategory),
+      operation: this.protectOptionalText(input.operation),
+      input: this.protectedPayload(input.input),
+      metadata: this.protectedPayload(input.metadata),
       status: 'success',
       startedAt: new Date().toISOString(),
       endedAt: new Date().toISOString(),
@@ -248,8 +256,8 @@ export class AgentTraceSession {
           schemaVersion: 'agent-trace/v1',
           sessionId: this.sessionId,
           ts: new Date().toISOString(),
-          event,
-          data: payload(data, this.redactionMode),
+          event: this.protectText(event),
+          data: this.protectedPayload(data),
         })}\n`,
       )
     })
@@ -258,7 +266,8 @@ export class AgentTraceSession {
   writeArtifact(name: string, content: string | Buffer): string {
     const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-|-$/g, '') || 'artifact'
     const file = join(this.artifactsDir, safeName)
-    safe(() => writeFileSync(file, content))
+    const safeContent = Buffer.isBuffer(content) ? content : this.protectText(content)
+    safe(() => writeFileSync(file, safeContent))
     return file
   }
 
@@ -267,9 +276,9 @@ export class AgentTraceSession {
     this.finalized = true
     this.session.status = input.status
     this.session.endedAt = new Date().toISOString()
-    if (input.finalAnswer !== undefined) this.session.finalAnswer = payload(input.finalAnswer, this.redactionMode)
+    if (input.finalAnswer !== undefined) this.session.finalAnswer = this.protectedPayload(input.finalAnswer)
     if (input.metadata) {
-      this.session.metadata = payload({ existing: this.session.metadata, final: input.metadata }, this.redactionMode)
+      this.session.metadata = this.protectedPayload({ existing: this.session.metadata, final: input.metadata })
     }
     this.syncTotals()
     this.writeSession()
@@ -285,6 +294,18 @@ export class AgentTraceSession {
     this.syncTotals()
     safe(() => appendFileSync(this.spansFile, `${JSON.stringify(span)}\n`))
     if (!this.appendOnly) this.writeSession()
+  }
+
+  protectedPayload(value: unknown): TracePayload | undefined {
+    return payload(sanitizeForPersistence(value, this.sanitize), this.redactionMode)
+  }
+
+  protectText(value: string): string {
+    return String(sanitizeForPersistence(value, this.sanitize))
+  }
+
+  protectOptionalText(value: string | undefined): string | undefined {
+    return value === undefined ? undefined : this.protectText(value)
   }
 
   private syncTotals(): void {
@@ -322,11 +343,13 @@ export class TraceSpanHandle {
     const endedAt = new Date().toISOString()
     const finalSpan: TraceSpanFile = {
       ...this.span,
-      output: payload(input.output, this.trace.redactionMode),
-      metadata: input.metadata ? payload({ start: this.span.metadata, end: input.metadata }, this.trace.redactionMode) : this.span.metadata,
+      output: this.trace.protectedPayload(input.output),
+      metadata: input.metadata
+        ? this.trace.protectedPayload({ start: this.span.metadata, end: input.metadata })
+        : this.span.metadata,
       status: input.status,
-      errorCode: input.errorCode,
-      errorMessage: input.errorMessage,
+      errorCode: this.trace.protectOptionalText(input.errorCode),
+      errorMessage: this.trace.protectOptionalText(input.errorMessage),
       endedAt,
       latencyMs: Date.now() - this.startedAtMs,
     }

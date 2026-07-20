@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
+import {
+  sanitizeForPersistence,
+  type PersistenceSanitizer,
+} from '../security/redaction.js'
 
 export type ToolResultArtifactKind =
   | 'page_snapshot'
@@ -80,14 +84,26 @@ export interface ToolResultStore {
 export class FileToolResultStore implements ToolResultStore {
   private readonly rootDir: string
   private readonly now: () => Date
+  private readonly sanitize?: PersistenceSanitizer
 
-  constructor(options: { rootDir: string; now?: () => Date }) {
+  constructor(options: {
+    rootDir: string
+    now?: () => Date
+    sanitize?: PersistenceSanitizer
+  }) {
     this.rootDir = resolve(options.rootDir)
     this.now = options.now ?? (() => new Date())
+    this.sanitize = options.sanitize
   }
 
   async write(input: ToolResultStoreWriteInput): Promise<ToolResultArtifactRef> {
-    const content = normalizeStoredContent(input.content)
+    const sensitivity = input.sensitivity ?? 'internal'
+    if (sensitivity === 'secret') {
+      throw new Error('SECRET_ARTIFACT_REJECTED: ordinary tool-result storage cannot persist secret content.')
+    }
+    const rawContent = normalizeStoredContent(input.content)
+    const content = sanitizeForPersistence(rawContent, this.sanitize)
+    const changed = stableStringify(content) !== stableStringify(rawContent)
     const mediaType = input.mediaType ?? defaultMediaType(input.kind)
     const bytes = contentBytes(content, mediaType)
     const sha256 = sha256Hex(bytes)
@@ -95,7 +111,12 @@ export class FileToolResultStore implements ToolResultStore {
     const createdAt = this.now().toISOString()
     const dir = join(this.rootDir, safePathPart(input.sessionId), safePathPart(input.runId))
     const uri = join(dir, `${safePathPart(artifactId)}.json`)
-    const sensitivity = input.sensitivity ?? 'internal'
+    const safeSummary = input.summary === undefined
+      ? undefined
+      : String(sanitizeForPersistence(input.summary, this.sanitize))
+    const safeMetadata = input.metadata === undefined
+      ? undefined
+      : sanitizeForPersistence(input.metadata, this.sanitize) as StoredToolResultEnvelope['metadata']
     const ref: ToolResultArtifactRef = {
       schemaVersion: 'tool-result-artifact-ref/v1',
       artifactId,
@@ -115,14 +136,14 @@ export class FileToolResultStore implements ToolResultStore {
         deleteWithSession: input.retention?.deleteWithSession ?? true,
       },
       sensitivity,
-      redaction: redactionForSensitivity(sensitivity),
-      ...(input.summary ? { summary: input.summary } : {}),
+      redaction: redactionForWrite(changed),
+      ...(safeSummary ? { summary: safeSummary } : {}),
     }
     const envelope: StoredToolResultEnvelope = {
       schemaVersion: 'stored-tool-result/v1',
       ref,
       content,
-      ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...(safeMetadata ? { metadata: safeMetadata } : {}),
     }
 
     await mkdir(dir, { recursive: true })
@@ -221,11 +242,11 @@ function safePathPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-|-$/g, '').slice(0, 120) || 'item'
 }
 
-function redactionForSensitivity(sensitivity: ToolResultArtifactSensitivity): ToolResultRedaction {
-  if (sensitivity === 'secret') {
+function redactionForWrite(changed: boolean): ToolResultRedaction {
+  if (changed) {
     return {
-      status: 'contains_sensitive',
-      reason: 'Marked secret by tool result writer.',
+      status: 'redacted',
+      reason: 'Persistence-boundary sanitizer changed the stored payload.',
     }
   }
   return { status: 'not_needed' }

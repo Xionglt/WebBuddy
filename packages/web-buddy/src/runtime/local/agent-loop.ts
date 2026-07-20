@@ -228,6 +228,8 @@ export interface AgentLoopInput {
   completionGate?: AgentLoopCompletionGate
   /** Optional store for large tool-result artifacts. Defaults to the run trace artifact directory. */
   toolResultStore?: ToolResultStore
+  /** Trusted write-time sanitizer supplied by an embedding service secret provider. */
+  persistenceSanitizer?: (value: unknown) => unknown
   /** Trusted rollout controls; `parallel` is a narrow Wave-5 allowlisted path. */
   toolOrchestration?: Partial<ToolOrchestrationOptions>
   /** Wave 6 pilot adapter. Only trusted background-eligible mappings may be supplied. */
@@ -415,6 +417,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
   const toolResultStore = input.toolResultStore ?? new FileToolResultStore({
     rootDir: join(ctx.trace.agentTrace?.dir ?? ctx.trace.dir, 'artifacts', 'tool-results'),
+    sanitize: input.persistenceSanitizer,
   })
 
   let step = 0

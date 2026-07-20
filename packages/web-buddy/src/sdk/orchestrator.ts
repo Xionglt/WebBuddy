@@ -147,6 +147,8 @@ export interface RunOptions {
   sessionId?: string
   /** Called after the durable session is created/restored, before browser/model work. */
   onSessionReady?: (session: AgentSession) => void | Promise<void>
+  /** Internal embedding hook: sanitize ordinary persistence with the service secret provider. */
+  persistenceSanitizer?: (value: unknown) => unknown
 }
 
 export interface AsyncTaskRuntimeFactoryInput {
@@ -408,6 +410,7 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
     scenario: mode,
     profile: runtimeProfile,
     goal: options.taskPrompt,
+    sanitize: options.persistenceSanitizer,
   })
   const sessionSetup = await createRunSession({
     config,
@@ -418,6 +421,7 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
     emit,
     restoredSessionId: options.restoredSessionId,
     sessionId: options.sessionId,
+    persistenceSanitizer: options.persistenceSanitizer,
   })
   const sessionRecorder = sessionSetup.recorder
   await options.onSessionReady?.(sessionRecorder.session)
@@ -824,6 +828,7 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
         restoredAsyncTaskPromptAttachments: sessionSetup.restored?.asyncTaskPromptAttachments,
         abortSignal: options.controller?.signal,
         shouldPause: () => options.controller?.pauseRequested ?? false,
+        persistenceSanitizer: options.persistenceSanitizer,
       })
       await captureFinalScreenshot(sessionId, trace)
       const finalState: FinalState = loopResult.blocked
@@ -1452,8 +1457,12 @@ async function createRunSession(args: {
   emit: (e: AgentEvent) => void
   restoredSessionId?: string
   sessionId?: string
+  persistenceSanitizer?: (value: unknown) => unknown
 }): Promise<{ recorder: SessionRecorder; restored?: RestoredSessionState }> {
-  const store = new FileSessionStore({ rootDir: join(args.config.trace.outDir, 'sessions') })
+  const store = new FileSessionStore({
+    rootDir: join(args.config.trace.outDir, 'sessions'),
+    sanitize: args.persistenceSanitizer,
+  })
   if (args.restoredSessionId) {
     const session = await store.get(args.restoredSessionId)
     if (!session) throw new Error(`Cannot restore missing session ${args.restoredSessionId}.`)

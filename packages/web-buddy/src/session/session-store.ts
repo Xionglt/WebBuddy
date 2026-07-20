@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { KernelEvent } from '../kernel/kernel-events.js'
+import {
+  sanitizeForPersistence,
+  type PersistenceSanitizer,
+} from '../security/redaction.js'
 import { appendJsonLine } from './transcript.js'
 import { migrateAgentSession } from './migrations.js'
 import type {
@@ -14,13 +18,16 @@ import type {
 
 export interface FileSessionStoreOptions {
   rootDir?: string
+  sanitize?: PersistenceSanitizer
 }
 
 export class FileSessionStore implements SessionStore {
   readonly rootDir: string
+  private readonly sanitize?: PersistenceSanitizer
 
   constructor(options: FileSessionStoreOptions = {}) {
     this.rootDir = resolve(options.rootDir ?? join(process.cwd(), 'output', 'sessions'))
+    this.sanitize = options.sanitize
   }
 
   async create(input: CreateSessionInput): Promise<AgentSession> {
@@ -34,7 +41,7 @@ export class FileSessionStore implements SessionStore {
       runId,
       source: input.source,
       status: 'created',
-      goal: input.goal,
+      goal: String(sanitizeForPersistence(input.goal, this.sanitize)),
       ...(input.mode ? { mode: input.mode } : {}),
       createdAt: now,
       updatedAt: now,
@@ -46,11 +53,11 @@ export class FileSessionStore implements SessionStore {
     }
 
     await mkdir(outputDir, { recursive: true })
-    await writeSession(session)
+    await writeSession(this.protect(session))
     await writeFile(session.transcriptPath, '', { flag: 'a' })
     await writeFile(session.eventsPath, '', { flag: 'a' })
     await this.writeWorkflowSnapshot(sessionId, null)
-    await appendJsonLine(session.eventsPath, {
+    await appendJsonLine(session.eventsPath, this.protect({
       version: 1,
       type: 'session_created',
       sessionId,
@@ -58,7 +65,7 @@ export class FileSessionStore implements SessionStore {
       ts: now,
       message: 'Session created.',
       data: { source: input.source, mode: input.mode },
-    } satisfies KernelEvent)
+    } satisfies KernelEvent))
     return session
   }
 
@@ -74,14 +81,14 @@ export class FileSessionStore implements SessionStore {
   async update(sessionId: string, patch: Partial<AgentSession>): Promise<AgentSession> {
     const current = await this.get(sessionId)
     if (!current) throw new Error(`Session not found: ${sessionId}`)
-    const next: AgentSession = {
+    const next = this.protect<AgentSession>({
       ...current,
       ...patch,
       version: 1,
       sessionId: current.sessionId,
       runId: current.runId,
       updatedAt: patch.updatedAt ?? new Date().toISOString(),
-    }
+    })
     await writeSession(next)
     return next
   }
@@ -89,13 +96,13 @@ export class FileSessionStore implements SessionStore {
   async appendTranscript(entry: TranscriptEntry): Promise<void> {
     const session = await this.get(entry.sessionId)
     if (!session) throw new Error(`Session not found: ${entry.sessionId}`)
-    await appendJsonLine(session.transcriptPath, entry)
+    await appendJsonLine(session.transcriptPath, this.protect(entry))
   }
 
   async appendEvent(event: KernelEvent): Promise<void> {
     const session = await this.get(event.sessionId)
     if (!session) throw new Error(`Session not found: ${event.sessionId}`)
-    await appendJsonLine(session.eventsPath, event)
+    await appendJsonLine(session.eventsPath, this.protect(event))
   }
 
   async writeWorkflowSnapshot(sessionId: string, workflowState: unknown): Promise<void> {
@@ -104,13 +111,13 @@ export class FileSessionStore implements SessionStore {
     await mkdir(dirname(session.workflowPath), { recursive: true })
     await writeFile(
       session.workflowPath,
-      `${JSON.stringify({
+      `${JSON.stringify(this.protect({
         version: 1,
         sessionId: session.sessionId,
         runId: session.runId,
         updatedAt: new Date().toISOString(),
         workflowState,
-      }, null, 2)}\n`,
+      }), null, 2)}\n`,
       'utf8',
     )
   }
@@ -139,6 +146,10 @@ export class FileSessionStore implements SessionStore {
 
   private sessionJsonPath(sessionId: string): string {
     return join(this.rootDir, sessionId, 'session.json')
+  }
+
+  private protect<T>(value: T): T {
+    return sanitizeForPersistence(value, this.sanitize) as unknown as T
   }
 }
 
