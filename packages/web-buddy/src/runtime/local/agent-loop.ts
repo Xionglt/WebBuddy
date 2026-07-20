@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { browserSnapshot } from '../../browser/snapshot.js'
 import { browserFormSnapshot } from '../../browser/form-snapshot.js'
+import { browserFormAudit } from '../../browser/form-audit.js'
 import {
   buildLoopContext,
   renderInitialUserContext,
@@ -1080,7 +1081,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     const page = sessionManager.get(ctx.sessionId)?.page
     await page?.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
     await browserSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
-    await browserFormSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
+    const needsFullFormAudit = input.taskContract?.criteria.some(
+      (criterion) => criterion.kind === 'form_state' && criterion.requireFullAudit,
+    ) === true
+    if (needsFullFormAudit) {
+      await browserFormAudit({ sessionId: ctx.sessionId }).catch(() => undefined)
+    } else {
+      await browserFormSnapshot({ sessionId: ctx.sessionId }).catch(() => undefined)
+    }
     latestContext = await refreshLoopContext('Refreshed context before agent_done.', currentStep)
     syncFillLedgerSummary(latestContext)
     ctx.trace.record({
@@ -1473,7 +1481,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         continue
       }
       done = true
-      if (asyncTaskRuntime || (safetyMode !== 'raw' && isFinalSubmitBoundaryActive(workflowState, lastWorkflowEvaluation))) {
+      if (input.taskContract || asyncTaskRuntime || (safetyMode !== 'raw' && isFinalSubmitBoundaryActive(workflowState, lastWorkflowEvaluation))) {
         const completionGateDecision = completionGate.evaluate({
           done,
           blocked: false,
@@ -3345,7 +3353,7 @@ function sinkPolicyDecisionForPermission(
     reason: sink.reason,
     policyCode: `security.sink.${sink.reasonCode}`,
     ruleId: `security.sink.${sink.reasonCode}.v1`,
-    gateKind: 'high_risk_action',
+    gateKind: current.gateKind ?? 'high_risk_action',
     auditTags: [
       ...current.auditTags,
       'security:sink_policy',

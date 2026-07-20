@@ -18,7 +18,7 @@ export async function runRecruitingCompatibilityTask(
 ): Promise<AgentRunResult> {
   const runId = options.runId ?? `legacy-recruiting-${new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '')}`
   let legacyResult: AgentRunResult | undefined
-  const contract = recruitingTaskContract(options.taskType ?? defaultLegacyTaskType(options.mode))
+  const contract = recruitingTaskContract(resolveRecruitingTaskType(options.mode, options.taskType))
   const webResult = await runWebTask({
     schemaVersion: 'web-task-input/v1',
     goal: {
@@ -160,6 +160,15 @@ function legacyStatus(result: AgentRunResult): WebTaskRuntimeOutcome['status'] {
 
 function defaultLegacyTaskType(mode: RunOptions['mode']): WebBuddyTaskType {
   return mode === 'raw' || mode === 'match' || mode === 'demo-research' ? 'explore' : 'fill_form'
+}
+
+export function resolveRecruitingTaskType(
+  mode: RunOptions['mode'],
+  requested: WebBuddyTaskType | undefined,
+): WebBuddyTaskType {
+  const fallback = defaultLegacyTaskType(mode)
+  if (fallback !== 'fill_form') return requested ?? fallback
+  return requested === 'final_review' ? requested : 'fill_form'
 }
 
 function legacyGoal(options: RunOptions): string {

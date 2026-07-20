@@ -51,8 +51,12 @@ import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
 import { BackgroundToolBridge, createTraceSummarizationMappingV1 } from '../tools/background-tool-bridge.js'
 import { createLocalTools } from '../tools/local-adapter.js'
 import { listLocalToolDefs } from '../tools/catalog.js'
-import { runRecruitingCompatibilityTask } from '../scenarios/recruiting/adapter.js'
+import {
+  resolveRecruitingTaskType,
+  runRecruitingCompatibilityTask,
+} from '../scenarios/recruiting/adapter.js'
 import type { AgentRunController } from '../kernel/run-controller.js'
+import type { SensitiveActionRule, TaskContract, TaskPolicy } from '../task/contracts.js'
 
 /**
  * Unified local Web Agent orchestrator. One pipeline, plus safe demos:
@@ -159,9 +163,12 @@ export interface AsyncTaskRuntimeFactoryInput {
   trace: TraceRecorder
 }
 
-function mockApplicationFormUrl(profile: ResumeProfile): string {
-  const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+const DEMO_FORM_URL = 'https://demo-form.web-buddy.invalid/application'
+
+function mockApplicationFormHtml(): string {
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>站内简历草稿 (DEMO FORM)</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
 <style>
   body{font-family:-apple-system,"PingFang SC",sans-serif;background:#f5f7fa;margin:0;padding:32px;color:#1f2329}
   .wrap{max-width:680px;margin:0 auto;background:#fff;border-radius:8px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
@@ -177,21 +184,61 @@ function mockApplicationFormUrl(profile: ResumeProfile): string {
 <h1>站内简历草稿</h1>
 <div class="sub">DEMO FORM — local mock. Filling this never contacts a real site.</div>
 <div class="row">
-  <div><label for="name">姓名 Name</label><input id="name" name="name" type="text" placeholder="请输入姓名" /></div>
-  <div><label for="phone">手机 Phone</label><input id="phone" name="phone" type="tel" placeholder="请输入手机号" /></div>
+  <div><label for="name">姓名 Name</label><input id="name" name="name" type="text" placeholder="请输入姓名" required /></div>
+  <div><label for="phone">手机 Phone</label><input id="phone" name="phone" type="tel" placeholder="请输入手机号" required /></div>
 </div>
 <div class="row">
-  <div><label for="email">邮箱 Email</label><input id="email" name="email" type="email" placeholder="请输入邮箱" /></div>
-  <div><label for="city">期望城市 City</label><input id="city" name="city" type="text" placeholder="请输入城市" /></div>
+  <div><label for="email">邮箱 Email</label><input id="email" name="email" type="email" placeholder="请输入邮箱" required /></div>
+  <div><label for="city">期望城市 City</label><input id="city" name="city" type="text" placeholder="请输入城市" required /></div>
 </div>
-<label for="summary">个人简介 Summary</label><textarea id="summary" name="summary" rows="3" placeholder="一句话介绍"></textarea>
+<label for="summary">个人简介 Summary</label><textarea id="summary" name="summary" rows="3" placeholder="一句话介绍" required></textarea>
 <div class="btns">
   <button class="save" type="button">保存草稿 Save draft</button>
   <button class="submit" type="submit">投递申请 Submit application</button>
 </div>
-<div class="note" style="margin-top:16px;font-size:12px;color:#86909c">本页是本地 mock，${profile.name || '候选人'} 信息仅用于演示可视化填写。</div>
+<div class="note" style="margin-top:16px;font-size:12px;color:#86909c">本页是本地 mock，候选人信息仅用于演示可视化填写。</div>
 </div></body></html>`
-  return `data:text/html,${encodeURIComponent(html)}`
+}
+
+async function openMockApplicationForm(sessionId: string) {
+  const session = await sessionManager.getOrCreate(sessionId)
+  const page = session.page
+  await page.unroute(DEMO_FORM_URL)
+  await page.route(DEMO_FORM_URL, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      headers: {
+        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+      },
+      body: mockApplicationFormHtml(),
+    })
+  })
+
+  // The URL and response are both owned by this module: no caller-controlled
+  // destination and no network request cross the normal navigation allowlist.
+  const origin = new URL(DEMO_FORM_URL).origin
+  const actionSeq = sessionManager.authorizeNavigation(sessionId, origin)
+  try {
+    await page.goto(DEMO_FORM_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: Number(process.env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS || 30000),
+    })
+    const blocked = sessionManager.consumeBlockedNavigation(sessionId, actionSeq)
+    if (blocked) throw new Error(blocked.reason)
+    if (page.url() !== DEMO_FORM_URL) {
+      throw new Error('Offline demo form navigated away from its fixed fixture URL.')
+    }
+    sessionManager.commitNavigation(sessionId, page.url())
+    sessionManager.invalidateSnapshot(sessionId)
+    return page
+  } catch (error) {
+    const blocked = sessionManager.consumeBlockedNavigation(sessionId, actionSeq)
+    if (blocked) throw new Error(blocked.reason)
+    throw error
+  } finally {
+    sessionManager.cancelNavigation(sessionId)
+  }
 }
 
 function researchBriefingUrl(): string {
@@ -394,14 +441,14 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
 async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<AgentRunResult> {
   const config = options.config ?? loadConfig()
   const mode: AgentMode = options.mode ?? 'fill'
-  const taskType = options.taskType ?? defaultTaskTypeForMode(mode)
+  const taskType = resolveRecruitingTaskType(mode, options.taskType)
   const emit = options.onEvent ?? ((_e: AgentEvent) => {})
   const gate: HumanGate = options.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate(undefined, { allowLocalFinalSubmit: mode === 'auto-apply' }) : new CliHumanGate())
   const llm = options.llm ?? new LlmGateway(config.model)
   const highlight = config.browser.visualHighlight
 
   applyBrowserEnv(config)
-  if (mode === 'demo-form' || mode === 'demo-research') process.env.PLAYWRIGHT_ALLOW_DATA_URLS = 'true'
+  if (mode === 'demo-research') process.env.PLAYWRIGHT_ALLOW_DATA_URLS = 'true'
 
   const runtimeProfile = options.profile ?? 'debug'
   const trace = new TraceRecorder(config.trace.outDir, {
@@ -482,10 +529,8 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
       })
       emit({ phase: 'open_target', message: `Opened raw-agent target: ${startUrl}`, level: 'info' })
     } else if (mode === 'demo-form') {
-      const url = mockApplicationFormUrl(profile)
-      const open = await browserOpen({ url, sessionId, waitUntil: 'domcontentloaded' })
-      if (!open.ok) throw new Error(open.error.message)
-      trace.record({ phase: 'open_form', action: 'Opened local DEMO application form.', url, status: 'ok', screenshotPath: await trace.screenshot(sessionManager.get(sessionId)?.page, 'demo-form-open') })
+      const page = await openMockApplicationForm(sessionId)
+      trace.record({ phase: 'open_form', action: 'Opened local DEMO application form.', url: DEMO_FORM_URL, status: 'ok', screenshotPath: await trace.screenshot(page, 'demo-form-open') })
       emit({ phase: 'open_form', message: 'Opened local DEMO application form (offline, safe).', level: 'info' })
     } else if (mode === 'auto-apply') {
       if (!startUrl) throw new Error('auto-apply requires a target job-list URL.')
@@ -792,6 +837,10 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
         && config.agent.backgroundToolPilot.allowlist.length === 1
         && config.agent.backgroundToolPilot.allowlist[0] === 'trace_summarization'
         && Boolean(asyncTaskRuntime)
+      const loopSecurity = recruitingLoopSecurityContract(
+        taskType,
+        exactHttpOrigin(sessionManager.get(sessionId)?.page.url()),
+      )
       const loopResult = await runAgentLoop({
         goal, resume: profile, resumeV2: profileV2, llm,
         registry: new ToolRegistry(createLocalTools(listLocalToolDefs({
@@ -819,6 +868,8 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
           }),
         } : {}),
         taskType,
+        taskContract: loopSecurity.contract,
+        taskPolicy: loopSecurity.policy,
         requiresCurrentResumeUpload: options.requiresCurrentResumeUpload ?? false,
         onEvent: (e) => emit({ phase: 'agent', level: e.level, message: e.message }),
         session: sessionRecorder,
@@ -831,12 +882,15 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
         persistenceSanitizer: options.persistenceSanitizer,
       })
       await captureFinalScreenshot(sessionId, trace)
+      const loopCompleted = loopResult.done && !loopResult.blocked
       const finalState: FinalState = loopResult.blocked
         ? (loopResult.summary.toLowerCase().includes('submit') ? 'stopped_at_submit' : 'blocked')
-        : 'filled'
+        : loopCompleted
+          ? 'filled'
+          : 'blocked'
       return finalizeRun({
         mode, profile, matches, chosenJob, finalState,
-        message: loopResult.summary + (loopResult.blocked ? ' (stopped — not submitted)' : ' (draft filled — not submitted)'),
+        message: loopResult.summary + (loopCompleted ? ' (draft filled — not submitted)' : ' (stopped — not submitted)'),
         trace, emit,
         recordSessionFinal: false,
       })
@@ -1545,10 +1599,79 @@ function defaultGoalForMode(mode: AgentMode): string {
   return 'Fill the application form on the current page using the resume.'
 }
 
-function defaultTaskTypeForMode(mode: AgentMode): WebBuddyTaskType {
-  if (mode === 'raw') return 'explore'
-  if (mode === 'match' || mode === 'demo-research') return 'explore'
-  return 'fill_form'
+function recruitingLoopSecurityContract(
+  taskType: WebBuddyTaskType,
+  destinationOrigin: string,
+): { contract: TaskContract; policy: TaskPolicy } {
+  const approvedDraftActions: SensitiveActionRule = {
+    id: 'legacy-recruiting-explicit-draft-action',
+    actionKinds: ['navigate', 'type_or_paste', 'upload'],
+    decision: 'ask',
+    destinationOrigins: [destinationOrigin],
+    requireApprovalBinding: true,
+  }
+  const deniedSubmit: SensitiveActionRule = {
+    id: 'legacy-recruiting-final-submit-denied',
+    actionKinds: ['submit'],
+    decision: 'deny',
+    destinationOrigins: [destinationOrigin],
+    requireApprovalBinding: true,
+  }
+  const criteria: TaskContract['criteria'] = taskType === 'fill_form'
+    ? [{
+        id: 'legacy-form-draft-audited',
+        kind: 'form_state',
+        description: 'The recruiting form draft must be fully audited with every required field filled, remain error-free, and not be submitted.',
+        requireFullAudit: true,
+        requiredFieldCoverage: 1,
+        allowVisibleErrors: false,
+        requireDraftOnly: true,
+      }]
+    : taskType === 'final_review'
+      ? [{
+          id: 'legacy-final-review-confirmed',
+          kind: 'human_confirmation',
+          description: 'Final recruiting review requires explicit human confirmation.',
+          confirmationKind: 'final_review',
+        }]
+      : [{
+          id: `legacy-${taskType}-page-observed`,
+          kind: 'evidence_present',
+          description: 'The recruiting target page must be observed by the main runtime.',
+          evidenceKinds: ['page'],
+          minCount: 1,
+          allowedAuthorities: ['main_runtime'],
+        }]
+  criteria.push({
+    id: 'legacy-final-submit-not-performed',
+    kind: 'action_boundary',
+    description: 'The compatibility loop must stop before final submission.',
+    actionKinds: ['submit'],
+    outcome: 'not_performed',
+  })
+  return {
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: `legacy-recruiting-loop-${taskType}`,
+      revision: 0,
+      criteria,
+      sensitiveActions: [approvedDraftActions, deniedSubmit],
+    },
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'deny',
+      rules: [approvedDraftActions, deniedSubmit],
+    },
+  }
+}
+
+function exactHttpOrigin(url: string | undefined): string {
+  if (!url) throw new Error('Recruiting compatibility loop requires a current absolute HTTP(S) destination.')
+  const parsed = new URL(url)
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Recruiting compatibility loop requires a current absolute HTTP(S) destination.')
+  }
+  return parsed.origin
 }
 
 function currentResumeUploadContext(resumePath: string): string {

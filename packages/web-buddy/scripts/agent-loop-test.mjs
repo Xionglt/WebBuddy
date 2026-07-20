@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../dist/context/run-summary.js'
 import { observationManager } from '../dist/observation/observation-manager.js'
 import { ApprovalQueue } from '../dist/permission/index.js'
+import { browserOpen } from '../dist/browser/open.js'
 import { runJobApplicationAgent } from '../dist/sdk/orchestrator.js'
 import { loadConfig } from '../dist/sdk/config.js'
 import { writeSampleResumePdf } from '../dist/sdk/resume.js'
@@ -35,7 +36,8 @@ class MockLlm {
       { kind: 'type', field: /name|姓名/i, value: 'Zhang San' },
       { kind: 'type', field: /email|邮箱/i, value: 'zhangsan@example.com' },
       { kind: 'type', field: /phone|手机/i, value: '13800001234' },
-      { kind: 'done' },
+      { kind: 'type', field: /city|期望城市/i, value: 'Hangzhou' },
+      { kind: 'finish' },
     ]
     this._i = 0
   }
@@ -61,10 +63,30 @@ class MockLlm {
       assert(ref, `mock could not find ref for ${step.field}`)
       return { content: `Filling ${step.field}.`, toolCalls: [{ id: 'c2', name: 'browser_type', arguments: { ref, text: step.value } }] }
     }
-    if (step.kind === 'done') {
-      return { content: 'Done filling the draft.', toolCalls: [{ id: 'c3', name: 'agent_done', arguments: { summary: 'Filled name/email/phone; did not submit.', blocked: false } }] }
+    if (step.kind === 'finish') {
+      const ref = this._findRef(/summary|个人简介/i)
+      assert(ref, 'mock could not find ref for the summary field')
+      return {
+        content: 'Filling the final field, auditing the draft, and stopping before submit.',
+        toolCalls: [
+          { id: 'c-summary', name: 'browser_type', arguments: { ref, text: 'Frontend engineer' } },
+          { id: 'c-audit', name: 'browser_form_audit', arguments: {} },
+          { id: 'c-done', name: 'agent_done', arguments: { summary: 'Filled name/email/phone/city/summary; did not submit.', blocked: false } },
+        ],
+      }
     }
     return { content: '', toolCalls: [] }
+  }
+}
+
+class NarrationOnlyLlm {
+  constructor() {
+    this.hasKey = true
+    this.label = 'narration-only-llm'
+  }
+
+  async chatWithTools() {
+    return { content: 'The form looks ready.', toolCalls: [] }
   }
 }
 
@@ -73,6 +95,7 @@ config.browser.headless = true
 config.browser.visualHighlight = false
 config.browser.typeDelayMs = 0
 config.browser.slowMoMs = 0
+config.browser.allowedDomains = ['example.test']
 config.human.mode = 'auto'
 config.resumePath = '/tmp/mfa-agent-loop-resume.pdf'
 writeSampleResumePdf(config.resumePath)
@@ -91,6 +114,13 @@ console.log('result:', result.finalState, '—', result.message.slice(0, 80))
 
 assert.strictEqual(result.finalState, 'filled', `expected filled, got ${result.finalState}`)
 assert(/did not submit|not submitted/i.test(result.message), 'must state it did not submit')
+const demoPage = sessionManager.get('default')?.page
+assert.equal(demoPage?.url(), 'https://demo-form.web-buddy.invalid/application')
+assert.match(
+  await demoPage.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content'),
+  /default-src 'none'/,
+  'offline demo must ship a fail-closed CSP',
+)
 
 const traceDir = join(config.trace.outDir, 'traces', `run_${result.summary.runId}`)
 const metricsPath = join(traceDir, 'metrics.json')
@@ -107,6 +137,21 @@ assert.strictEqual(agentState.finalStatus, 'completed')
 // The agent must have used the agent loop (think/act/observe events).
 const sawAct = events.some((e) => e.level === 'act' && /browser_type/.test(e.message))
 assert(sawAct, 'agent loop should have typed via browser_type')
+
+const narrationOnly = await runJobApplicationAgent({
+  config: {
+    ...config,
+    agent: { ...config.agent, maxSteps: 2 },
+  },
+  mode: 'demo-form',
+  taskType: 'explore',
+  llm: new NarrationOnlyLlm(),
+})
+assert.equal(
+  narrationOnly.finalState,
+  'blocked',
+  'caller-supplied explore must not weaken demo-form completion or accept narration-only completion',
+)
 
 async function runPermissionScenarios() {
   const root = mkdtempSync(join(tmpdir(), 'mfa-agent-loop-permission-'))
@@ -440,7 +485,10 @@ async function runLoopScenario({
   workflowEngine,
   completionGate,
 }) {
-  if (seedFresh) seedFreshObservation(sessionId)
+  if (seedFresh) {
+    await openPermissionFixture(sessionId)
+    seedFreshObservation(sessionId)
+  }
   const toolCalls = []
   const queue = new ApprovalQueue()
   const gate = new RecordingGate(gateDecisions)
@@ -468,6 +516,20 @@ async function runLoopScenario({
   const session = withSession
     ? await createRecorder(store, `session-${sessionId}`, `${trace.runId}-${sessionId}`)
     : undefined
+  const sinkKind = call.name === 'browser_upload_file'
+    ? 'upload'
+    : call.name === 'browser_click_text' && /submit/i.test(String(call.arguments.text ?? ''))
+      ? 'submit'
+      : undefined
+  const sinkRule = sinkKind
+    ? {
+        id: `permission-fixture-${sinkKind}`,
+        actionKinds: [sinkKind],
+        decision: 'ask',
+        destinationOrigins: ['https://example.test'],
+        requireApprovalBinding: true,
+      }
+    : undefined
 
   const result = await runAgentLoop({
     goal: 'Exercise permission integration.',
@@ -484,11 +546,52 @@ async function runLoopScenario({
     session,
     workflowEngine,
     completionGate,
+    ...(sinkRule ? {
+      taskContract: {
+        schemaVersion: 'web-task-contract/v1',
+        contractId: `permission-fixture-${sessionId}`,
+        revision: 0,
+        criteria: [
+          {
+            id: 'final-submit-not-performed',
+            kind: 'action_boundary',
+            description: 'The permission fixture must not perform final submission.',
+            actionKinds: ['submit'],
+            outcome: 'not_performed',
+          },
+          ...(sinkKind === 'submit' ? [{
+            id: 'final-submit-human-completion-missing',
+            kind: 'human_confirmation',
+            description: 'Approving awareness of a final-submit boundary is not evidence that the human completed submission.',
+            confirmationKind: 'final_submit_completed',
+          }] : []),
+        ],
+        sensitiveActions: [sinkRule],
+      },
+      taskPolicy: {
+        schemaVersion: 'task-policy/v1',
+        defaultSensitiveAction: 'deny',
+        rules: [sinkRule],
+      },
+    } : {}),
   })
 
   const transcript = session ? await readJsonLines(session.session.transcriptPath) : []
   const events = session ? await readJsonLines(session.session.eventsPath) : []
   return { result, toolCalls, queue, gate, transcript, events }
+}
+
+async function openPermissionFixture(sessionId) {
+  const url = 'https://example.test/apply'
+  const page = (await sessionManager.getOrCreate(sessionId)).page
+  await page.unroute(url)
+  await page.route(url, (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/html; charset=utf-8',
+    body: '<!doctype html><html><head><title>Application form</title></head><body><input aria-label="Applicant name"><button type="button">Open details</button><button type="submit">Submit application</button></body></html>',
+  }))
+  const opened = await browserOpen({ sessionId, url, waitUntil: 'domcontentloaded' })
+  assert.equal(opened.ok, true, opened.observation)
 }
 
 async function runCompactionScenario() {
