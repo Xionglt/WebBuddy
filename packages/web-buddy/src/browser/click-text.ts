@@ -66,6 +66,7 @@ export async function browserClickText(input: {
   const exact = input.exact ?? false
   const timeout = input.timeoutMs ?? Number(process.env.PLAYWRIGHT_ACTION_TIMEOUT_MS || 10000)
 
+  let navigationActionSeq = 0
   try {
     const match = await session.page.evaluate(
       ({ marker: markerValue, text: targetText, exact: exactMatch, nth: targetIndex }) => {
@@ -175,7 +176,13 @@ export async function browserClickText(input: {
       await visualizeBeforeAction(session.page, locator, risk === 'L3' ? 'click_risky' : 'click_safe')
     }
 
+    navigationActionSeq = sessionManager.beginNavigationAction(session.id)
     await locator.click({ timeout })
+    await session.page.waitForTimeout(120).catch(() => {})
+    const blockedNavigation = sessionManager.consumeBlockedNavigation(session.id, navigationActionSeq)
+    if (blockedNavigation) {
+      return toolFailure('NAVIGATION_BLOCKED', blockedNavigation.reason, { recoverable: false })
+    }
     if (input.highlight && isHeadful()) await clearHighlight(session.page)
     sessionManager.invalidateSnapshot(session.id)
 
@@ -189,6 +196,10 @@ export async function browserClickText(input: {
       url: session.page.url(),
     }, true)
   } catch (error) {
+    const blockedNavigation = sessionManager.consumeBlockedNavigation(session.id, navigationActionSeq)
+    if (blockedNavigation) {
+      return toolFailure('NAVIGATION_BLOCKED', blockedNavigation.reason, { recoverable: false })
+    }
     const message = error instanceof Error ? error.message : String(error)
     if (input.highlight && isHeadful()) await clearHighlight(session.page)
     return toolFailure('ELEMENT_NOT_FOUND', `Failed to click visible text "${text}": ${message}`, {

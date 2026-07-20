@@ -59,6 +59,7 @@ export async function browserClick(input: {
     await visualizeBeforeAction(session.page, locator, action)
   }
 
+  const navigationActionSeq = sessionManager.beginNavigationAction(session.id)
   try {
     const before = await capturePostconditionSnapshot(session.page, {
       targetLocator: locator,
@@ -66,6 +67,10 @@ export async function browserClick(input: {
     })
     await locator.click({ timeout })
     await session.page.waitForTimeout(120).catch(() => {})
+    const blockedNavigation = sessionManager.consumeBlockedNavigation(session.id, navigationActionSeq)
+    if (blockedNavigation) {
+      return toolFailure('NAVIGATION_BLOCKED', blockedNavigation.reason, { recoverable: false })
+    }
     const after = await capturePostconditionSnapshot(session.page, {
       targetLocator: locator,
       captureTargetState: true,
@@ -105,6 +110,10 @@ export async function browserClick(input: {
       },
     }, postcondition.outcome !== 'no_op' && postcondition.outcome !== 'uncertain')
   } catch (error) {
+    const blockedNavigation = sessionManager.consumeBlockedNavigation(session.id, navigationActionSeq)
+    if (blockedNavigation) {
+      return toolFailure('NAVIGATION_BLOCKED', blockedNavigation.reason, { recoverable: false })
+    }
     const message = error instanceof Error ? error.message : String(error)
     if (input.highlight && isHeadful()) await clearHighlight(session.page)
     return toolFailure('ELEMENT_NOT_FOUND', `Failed to click ref ${input.ref}: ${message}`, {
