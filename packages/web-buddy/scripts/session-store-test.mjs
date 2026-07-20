@@ -165,6 +165,31 @@ try {
   assert.equal(listed.length, 1)
   assert.equal(listed[0].sessionId, session.sessionId)
 
+  const frozenFiles = {
+    session: readFileSync(join(session.outputDir, 'session.json'), 'utf8'),
+    transcript: readFileSync(session.transcriptPath, 'utf8'),
+    events: readFileSync(session.eventsPath, 'utf8'),
+    workflow: readFileSync(session.workflowPath, 'utf8'),
+  }
+  await assert.rejects(
+    store.create({
+      sessionId: session.sessionId,
+      runId: session.runId,
+      source: 'test',
+      goal: 'This duplicate create must not overwrite durable state.',
+      mode: 'test',
+      now: '2026-06-28T01:00:00.000Z',
+    }),
+    /already exists/,
+    'creating an existing durable session must fail closed',
+  )
+  assert.deepEqual({
+    session: readFileSync(join(session.outputDir, 'session.json'), 'utf8'),
+    transcript: readFileSync(session.transcriptPath, 'utf8'),
+    events: readFileSync(session.eventsPath, 'utf8'),
+    workflow: readFileSync(session.workflowPath, 'utf8'),
+  }, frozenFiles, 'a duplicate create must not overwrite transcript or workflow state')
+
   console.log('session-store-test: PASS')
 } finally {
   rmSync(root, { recursive: true, force: true })

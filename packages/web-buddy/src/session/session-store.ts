@@ -52,7 +52,15 @@ export class FileSessionStore implements SessionStore {
       ...(input.traceRunId ? { traceRunId: input.traceRunId } : {}),
     }
 
-    await mkdir(outputDir, { recursive: true })
+    await mkdir(this.rootDir, { recursive: true })
+    try {
+      await mkdir(outputDir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`Session already exists: ${sessionId}`)
+      }
+      throw error
+    }
     await writeSession(this.protect(session))
     await writeFile(session.transcriptPath, '', { flag: 'a' })
     await writeFile(session.eventsPath, '', { flag: 'a' })
