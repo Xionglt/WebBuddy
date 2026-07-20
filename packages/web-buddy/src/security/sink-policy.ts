@@ -181,8 +181,10 @@ export function createSinkActionBinding(input: {
 export function sensitiveActionKindForTool(
   toolName: string,
   gateKind?: string,
+  args?: Record<string, unknown>,
 ): SensitiveActionKind | undefined {
   if (toolName === 'browser_open') return 'navigate'
+  if (toolName === 'browser_press_key' && isPotentialSubmitKey(args?.key)) return 'submit'
   if (/upload/i.test(toolName)) return 'upload'
   if (/type|fill|paste|select/i.test(toolName)) return 'type_or_paste'
   if (/payment|purchase|checkout/i.test(toolName)) return 'payment'
@@ -192,6 +194,13 @@ export function sensitiveActionKindForTool(
   if (/memory.*write|remember/i.test(toolName)) return 'memory_write'
   if (/permission.*write/i.test(toolName)) return 'permission_write'
   return undefined
+}
+
+function isPotentialSubmitKey(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  if (value === ' ') return true
+  const key = value.trim().toLowerCase()
+  return key === 'enter' || key === 'space' || key === 'spacebar'
 }
 
 export function destinationOriginForTool(

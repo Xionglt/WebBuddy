@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { browserOpen } from '../dist/browser/open.js'
 import {
   createSinkActionBinding,
   evaluateSinkPolicy,
@@ -12,6 +14,7 @@ import { digestCanonicalJson } from '../dist/task/contracts.js'
 import { runAgentLoop } from '../dist/runtime/local/agent-loop.js'
 import { ToolRegistry } from '../dist/runtime/local/tool-registry.js'
 import { TraceRecorder } from '../dist/sdk/trace.js'
+import { sessionManager } from '../dist/session/manager.js'
 import { runDeterministicScenario } from '../dist/evals/index.js'
 
 const matrix = [
@@ -47,6 +50,18 @@ for (const [actionKind, toolName, args] of matrix) {
   assert.equal(decision.action, 'deny', `${actionKind} must fail closed`)
   assert.equal(decision.reasonCode, 'policy_denied')
 }
+for (const key of ['Enter', 'enter', 'Space', 'spacebar', ' ']) {
+  assert.equal(
+    sensitiveActionKindForTool('browser_press_key', undefined, { key }),
+    'submit',
+    `browser_press_key(${JSON.stringify(key)}) must be treated as a submit sink`,
+  )
+}
+assert.equal(
+  sensitiveActionKindForTool('browser_press_key', undefined, { key: 'Escape' }),
+  undefined,
+  'non-activating navigation keys must not be misclassified as submit',
+)
 
 const secretKinds = matrix.map(([actionKind]) => actionKind)
 for (const actionKind of secretKinds) {
@@ -286,7 +301,14 @@ try {
       `${actionKind} lacks an auditable block result`,
     )
   }
+  for (const key of ['Enter', 'Space']) {
+    const pressKeySubmit = await runPressKeySubmitFixture(root, key)
+    assert.equal(pressKeySubmit.executions.length, 0, `${key} must be blocked before browser_press_key executes`)
+    assert.equal(pressKeySubmit.posts, 0, `${key} must not submit the real form`)
+    assert.deepEqual(pressKeySubmit.gates, ['final_submit'], 'submit-like keys must retain the final_submit gate')
+  }
 } finally {
+  await sessionManager.closeAll().catch(() => {})
   await rm(root, { recursive: true, force: true })
 }
 
@@ -364,6 +386,139 @@ async function runThroughAgentLoop(root, actionKind, toolName, args) {
     return { result, executions }
   } finally {
     trace.finish()
+  }
+}
+
+async function runPressKeySubmitFixture(root, key) {
+  let posts = 0
+  const server = createServer((request, response) => {
+    if (request.method === 'POST') {
+      posts += 1
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end('<!doctype html><title>Submitted</title><p>submitted</p>')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.end('<!doctype html><title>Submit sink fixture</title><form method="post" action="/submitted"><label>Query <input name="query"></label><button type="submit">Submit</button></form>')
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  assert(address && typeof address === 'object')
+  const origin = `http://127.0.0.1:${address.port}`
+  const suffix = key.toLowerCase()
+  const sessionId = `m6-press-key-${suffix}-submit-session`
+  const executions = []
+  const gates = []
+  const trace = new TraceRecorder(root, {
+    runId: `m6-press-key-${suffix}-submit`,
+    source: 'm6-security-audit',
+    scenario: `m6-press-key-${suffix}-submit`,
+    profile: 'deterministic',
+    goal: 'Verify Enter cannot bypass the final-submit sink.',
+  })
+
+  process.env.PLAYWRIGHT_BLOCK_LOCALHOST = 'false'
+  process.env.PLAYWRIGHT_ALLOWED_DOMAINS = '127.0.0.1'
+  try {
+    const opened = await browserOpen({
+      sessionId,
+      url: `${origin}/form`,
+      waitUntil: 'domcontentloaded',
+    })
+    assert.equal(opened.ok, true, opened.observation)
+    const page = sessionManager.get(sessionId)?.page
+    assert(page)
+    await page.locator(key === 'Space' ? 'button[type="submit"]' : 'input[name="query"]').focus()
+
+    const registry = new ToolRegistry([{
+      name: 'browser_press_key',
+      description: 'Press a key in the real submit fixture.',
+      category: 'action',
+      inherentRisk: 'L0',
+      parameters: {
+        type: 'object',
+        properties: { key: { type: 'string' } },
+        required: ['key'],
+      },
+      async run(args) {
+        executions.push(structuredClone(args))
+        await page.keyboard.press(String(args.key))
+        await page.waitForTimeout(100)
+        return { observation: 'UNSAFE_KEY_EXECUTION', pageChanged: true }
+      },
+    }])
+    const llm = {
+      hasKey: true,
+      label: 'm6-press-key-fixture',
+      turns: 0,
+      async chatWithTools() {
+        this.turns += 1
+        return this.turns === 1
+          ? {
+              content: `Press ${key}.`,
+              toolCalls: [{
+                id: `press-${suffix}`,
+                name: 'browser_press_key',
+                arguments: { key },
+              }],
+            }
+          : { content: 'Stopped before submit.', toolCalls: [] }
+      },
+    }
+    await runAgentLoop({
+      goal: 'Stop before final form submission.',
+      taskContract: {
+        schemaVersion: 'web-task-contract/v1',
+        contractId: 'm6-press-key-submit-contract',
+        revision: 1,
+        criteria: [{
+          id: 'submit-not-performed',
+          kind: 'action_boundary',
+          description: 'Final submit must not be performed.',
+          actionKinds: ['submit'],
+          outcome: 'not_performed',
+        }],
+        sensitiveActions: [{
+          id: 'press-key-submit-approval',
+          actionKinds: ['submit'],
+          decision: 'ask',
+          destinationOrigins: [origin],
+          requireApprovalBinding: true,
+        }],
+      },
+      taskPolicy: {
+        schemaVersion: 'task-policy/v1',
+        defaultSensitiveAction: 'deny',
+        rules: [{
+          id: 'press-key-submit-approval',
+          actionKinds: ['submit'],
+          decision: 'ask',
+          destinationOrigins: [origin],
+          requireApprovalBinding: true,
+        }],
+      },
+      llm,
+      registry,
+      ctx: { sessionId, highlight: false, trace },
+      gate: {
+        async confirm(kind) {
+          gates.push(kind)
+          return 'approve'
+        },
+      },
+      maxSteps: 2,
+      safetyMode: 'guarded',
+      permissionMode: 'safe',
+    })
+    await page.waitForTimeout(150)
+    return { executions, gates, posts }
+  } finally {
+    trace.finish()
+    await sessionManager.close(sessionId).catch(() => {})
+    await new Promise((resolve) => server.close(() => resolve()))
   }
 }
 

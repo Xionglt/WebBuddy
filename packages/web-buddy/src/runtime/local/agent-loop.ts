@@ -1768,7 +1768,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         contextText,
         freshness: latestContext.freshness,
       })
-      const sinkActionKind = sensitiveActionKindForTool(call.name, policyDecision.gateKind)
+      const sinkActionKind = sensitiveActionKindForTool(call.name, policyDecision.gateKind, call.arguments)
       const sinkSourceItems = contextItems.filter((item) => item.allowedUses.includes('sink'))
       const sinkSourceOrigin = originForUrl(currentUrl)
       const sinkDestinationOrigin = destinationOriginForTool(call.name, call.arguments, currentUrl)
@@ -3353,7 +3353,9 @@ function sinkPolicyDecisionForPermission(
     reason: sink.reason,
     policyCode: `security.sink.${sink.reasonCode}`,
     ruleId: `security.sink.${sink.reasonCode}.v1`,
-    gateKind: current.gateKind ?? 'high_risk_action',
+    gateKind: sink.actionKind === 'submit'
+      ? 'final_submit'
+      : current.gateKind ?? 'high_risk_action',
     auditTags: [
       ...current.auditTags,
       'security:sink_policy',
