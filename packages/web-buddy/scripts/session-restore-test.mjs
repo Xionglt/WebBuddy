@@ -192,13 +192,12 @@ try {
     reason: 'Latest final result is blocked pending user confirmation.',
   })
   await appendJsonLine(session.transcriptPath, {
-    version: 99,
     sessionId: session.sessionId,
     runId: session.runId,
-    entryId: 'unknown-version-memory',
+    entryId: 'legacy-versionless-memory',
     ts: '2026-06-30T00:00:08.000Z',
     type: 'memory_snapshot',
-    memory: { note: 'Unknown schema version should warn but not be silently dropped.' },
+    memory: { note: 'A versionless legacy v1 record remains migratable.' },
   })
 
   const restored = await restoreSessionState({
@@ -212,9 +211,7 @@ try {
   assert.equal(restored.session.status, 'blocked')
   assert.equal(restored.transcriptCount, 15)
   assert.equal(restored.restoredAt, '2026-06-30T00:01:00.000Z')
-  assert.equal(restored.migrationWarnings.length, 1)
-  assert.equal(restored.migrationWarnings[0].code, 'unknown_transcript_entry_version')
-  assert.equal(restored.migrationWarnings[0].entryId, 'unknown-version-memory')
+  assert.equal(restored.migrationWarnings.length, 0)
   assert.equal(restored.latestWorkflowState?.phase, 'done')
   assert.equal(restored.latestWorkflowState?.observationPhase, 'done')
   assert.equal(restored.latestWorkflowEvaluation?.state.observationPhase, 'done')
@@ -282,6 +279,23 @@ try {
   assert.equal(fallbackRestored.latestWorkflowEvaluation, undefined)
   assert.deepEqual(fallbackRestored.missingCriteria, [gateFallbackCriterion])
   assert.deepEqual(fallbackRestored.blockers, [gateFallbackBlocker])
+
+  await appendJsonLine(session.transcriptPath, {
+    version: 99,
+    sessionId: session.sessionId,
+    runId: session.runId,
+    entryId: 'unknown-version-tool-call',
+    ts: '2026-06-30T00:00:09.000Z',
+    type: 'tool_call',
+    toolCallId: 'must-not-restore',
+    name: 'browser_click',
+    args: { ref: 'e-danger', confirmed: true },
+  })
+  await assert.rejects(
+    restoreSessionState({ store, sessionId: session.sessionId }),
+    /UNSUPPORTED_TRANSCRIPT_ENTRY_VERSION/,
+    'an explicit future transcript schema must never be interpreted as executable v1 history',
+  )
 
   console.log('session-restore-test: PASS')
 } finally {

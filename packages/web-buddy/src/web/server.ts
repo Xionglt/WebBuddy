@@ -121,7 +121,15 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     sanitize: (value) => security.sanitize(value),
   })
   const recoveryService = new RecoveryService(runService, approvalService, {
-    canRestoreSession: async (record) => Boolean(record.sessionRef && await sessionStore.get(record.sessionRef.id)),
+    canRestoreSession: async (record) => {
+      if (!record.sessionRef) return false
+      const session = await sessionStore.get(record.sessionRef.id)
+      return Boolean(
+        session
+        && session.sessionId === record.sessionRef.id
+        && session.runId === record.runId,
+      )
+    },
   })
   const channels = new Map<string, LiveChannel>()
   const executions = new Map<string, LiveExecution>()

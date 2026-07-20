@@ -20,16 +20,12 @@ export function migrateAgentSession(value: unknown): AgentSession {
 export function migrateAgentSessionWithWarnings(value: unknown): MigrationResult<AgentSession> {
   if (!isRecord(value)) throw new Error('Invalid session file: expected object')
   const version = value.version ?? 1
-  const warnings: MigrationWarning[] = []
   if (version !== 1) {
-    warnings.push({
-      code: 'unknown_session_version',
-      message: `Unknown session version ${String(version)}; interpreting as v1-compatible for restore.`,
-      version,
-      ...(typeof value.sessionId === 'string' ? { entryId: value.sessionId } : {}),
-    })
+    throw new Error(`UNSUPPORTED_SESSION_VERSION: ${String(version)}`)
   }
-  return { value: { ...value, version: 1 } as AgentSession, warnings }
+  const migrated = { ...value, version: 1 }
+  validateAgentSessionV1(migrated)
+  return { value: migrated as AgentSession, warnings: [] }
 }
 
 export function migrateTranscriptEntry(value: unknown): TranscriptEntry {
@@ -39,17 +35,12 @@ export function migrateTranscriptEntry(value: unknown): TranscriptEntry {
 export function migrateTranscriptEntryWithWarnings(value: unknown): MigrationResult<TranscriptEntry> {
   if (!isRecord(value)) throw new Error('Invalid transcript entry: expected object')
   const version = value.version ?? 1
-  const warnings: MigrationWarning[] = []
   if (version !== 1) {
-    warnings.push({
-      code: 'unknown_transcript_entry_version',
-      message: `Unknown transcript entry version ${String(version)}; interpreting as v1-compatible for restore.`,
-      version,
-      ...(typeof value.entryId === 'string' ? { entryId: value.entryId } : {}),
-      ...(typeof value.type === 'string' ? { type: value.type } : {}),
-    })
+    throw new Error(`UNSUPPORTED_TRANSCRIPT_ENTRY_VERSION: ${String(version)}`)
   }
-  return { value: { ...value, version: 1 } as TranscriptEntry, warnings }
+  const migrated = { ...value, version: 1 }
+  validateTranscriptEntryV1(migrated)
+  return { value: migrated as TranscriptEntry, warnings: [] }
 }
 
 export function migrateTranscriptEntries(values: unknown[]): TranscriptEntry[] {
@@ -70,3 +61,65 @@ export function migrateTranscriptEntriesWithWarnings(values: unknown[]): Migrati
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+function validateAgentSessionV1(
+  value: Record<string, unknown> & { version: number },
+): void {
+  for (const field of [
+    'sessionId',
+    'runId',
+    'source',
+    'status',
+    'goal',
+    'createdAt',
+    'updatedAt',
+    'outputDir',
+    'transcriptPath',
+    'eventsPath',
+    'workflowPath',
+  ]) {
+    if (typeof value[field] !== 'string' || value[field].length === 0) {
+      throw new Error(`INVALID_SESSION_V1: ${field} must be a non-empty string`)
+    }
+  }
+  if (!['cli', 'web', 'sdk', 'benchmark', 'test'].includes(value.source as string)) {
+    throw new Error(`INVALID_SESSION_V1: unsupported source ${String(value.source)}`)
+  }
+  if (!['created', 'running', 'blocked', 'completed', 'failed', 'aborted'].includes(value.status as string)) {
+    throw new Error(`INVALID_SESSION_V1: unsupported status ${String(value.status)}`)
+  }
+}
+
+function validateTranscriptEntryV1(value: Record<string, unknown> & { version: number }): void {
+  for (const field of ['sessionId', 'runId', 'entryId', 'ts', 'type']) {
+    if (typeof value[field] !== 'string' || value[field].length === 0) {
+      throw new Error(`INVALID_TRANSCRIPT_ENTRY_V1: ${field} must be a non-empty string`)
+    }
+  }
+  if (!TRANSCRIPT_ENTRY_TYPES.has(value.type as string)) {
+    throw new Error(`INVALID_TRANSCRIPT_ENTRY_V1: unsupported type ${String(value.type)}`)
+  }
+}
+
+const TRANSCRIPT_ENTRY_TYPES = new Set([
+  'user_message',
+  'assistant_message',
+  'tool_call',
+  'tool_result',
+  'policy_decision',
+  'permission_decision',
+  'approval_request',
+  'approval_decision',
+  'skill_context',
+  'workflow_snapshot',
+  'memory_snapshot',
+  'workflow_evidence',
+  'user_confirmation',
+  'user_answer',
+  'workflow_evaluation',
+  'completion_gate',
+  'context_compaction',
+  'async_task_notification_attachment',
+  'final_result',
+  'error',
+])

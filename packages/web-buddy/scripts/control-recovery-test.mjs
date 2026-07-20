@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -118,6 +118,27 @@ try {
   }), { idempotencyKey: 'create-missing-c4' })
   await runServiceA.start(missingSessionRunId, 'start-missing-c4')
 
+  const corruptSessionRunId = 'recovery-corrupt-session'
+  const corruptSession = await sessions.create({
+    sessionId: 'corrupt-session-recovery-c4',
+    runId: corruptSessionRunId,
+    source: 'web',
+    goal: 'This record has a future schema version.',
+    mode: 'demo-research',
+  })
+  await writeFile(
+    join(corruptSession.outputDir, 'session.json'),
+    `${JSON.stringify({ ...corruptSession, version: 999 }, null, 2)}\n`,
+  )
+  await runServiceA.create(snapshot(corruptSessionRunId, true, {
+    schemaVersion: 'session-ref/v1',
+    provider: 'file-session-store',
+    id: corruptSession.sessionId,
+    runId: corruptSessionRunId,
+    attempt: 1,
+  }), { idempotencyKey: 'create-corrupt-c4' })
+  await runServiceA.start(corruptSessionRunId, 'start-corrupt-c4')
+
   const cancellingRunId = 'recovery-cancelling'
   await runServiceA.create(snapshot(cancellingRunId, true), { idempotencyKey: 'create-cancelling-c4' })
   await runServiceA.start(cancellingRunId, 'start-cancelling-c4')
@@ -131,10 +152,15 @@ try {
     canRestoreSession: async (record) => Boolean(record.sessionRef && await sessions.get(record.sessionRef.id)),
   })
   const decisions = await recovery.recoverStartupRuns()
-  assert.equal(decisions.length, 4)
+  assert.equal(decisions.length, 5)
   assert.equal((await runServiceB.get(safeRunId))?.state, 'recoverable')
   assert.equal((await runServiceB.get(unsafeRunId))?.state, 'failed')
   assert.equal((await runServiceB.get(missingSessionRunId))?.state, 'failed')
+  assert.equal(
+    (await runServiceB.get(corruptSessionRunId))?.state,
+    'failed',
+    'one unknown session version fails only its own run',
+  )
   assert.equal((await runServiceB.get(cancellingRunId))?.state, 'failed')
   assert.equal(
     (await approvalServiceB.get('old-approval-c4'))?.status,

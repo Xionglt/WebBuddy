@@ -52,12 +52,21 @@ export class RecoveryService {
       }
 
       const restartSafe = record.inputSnapshot.goal.metadata?.restartSafe === true
-      const sessionExists = Boolean(record.sessionRef)
-        && (await this.options.canRestoreSession?.(record) ?? true)
+      let sessionExists = false
+      let restoreFailure: string | undefined
+      if (record.sessionRef) {
+        try {
+          sessionExists = await this.options.canRestoreSession?.(record) ?? true
+        } catch (error) {
+          restoreFailure = error instanceof Error ? error.message : String(error)
+        }
+      }
       const recoverable = restartSafe && sessionExists
       const reason = recoverable
         ? 'Process restarted; explicit resume may restore the durable session, re-observe the page and start a fenced new attempt.'
-        : 'Process restarted without both a restorable durable session and a read-only restart contract; write actions will not be replayed.'
+        : restoreFailure
+          ? `Process restarted but the durable session failed validation (${restoreFailure}); write actions will not be replayed.`
+          : 'Process restarted without both a restorable durable session and a read-only restart contract; write actions will not be replayed.'
       const classified = await this.runs.classifyInterrupted(
         record.runId,
         recoverable,
