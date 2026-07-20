@@ -146,7 +146,7 @@
     "test:control-recovery": "npm run build && node ./scripts/control-recovery-test.mjs",
     "test:control-durable-gate": "npm run build && node ./scripts/control-durable-human-gate-test.mjs",
     "test:control-plane": "npm run build && node ./scripts/control-store-contract-test.mjs && node ./scripts/control-file-store-test.mjs && node ./scripts/control-run-service-test.mjs && node ./scripts/control-web-api-test.mjs && node ./scripts/control-durable-human-gate-test.mjs && node ./scripts/control-recovery-test.mjs",
-    "test:control:m6": "npm run build && node ./scripts/control-m6-web-task-service-test.mjs && node ./scripts/session-restore-test.mjs && node ./scripts/control-recovery-test.mjs",
+    "test:control:m6": "npm run build && node ./scripts/control-m6-web-task-service-test.mjs && node ./scripts/generic-web-task-resume-runtime-test.mjs && node ./scripts/control-generic-resume-test.mjs && node ./scripts/control-generic-resume-e2e-test.mjs && node ./scripts/session-restore-test.mjs && node ./scripts/control-recovery-test.mjs",
     "test:m6-release": "npm run test:security:m6 && npm run test:control:m6 && npm run test:eval:deterministic && npm run test:eval:m4-multi-agent && npm run test:m4-a2 && npm run test:m4-b2 && npm run test:async-task-orchestration && npm run test:tool-orchestration-chaos && npm run test:m5-release",
     "test:phase-classifier": "npm run build && node ./scripts/phase-classifier-test.mjs",
     "test:direct-submit-flow": "npm run build && node ./scripts/direct-submit-flow-test.mjs",

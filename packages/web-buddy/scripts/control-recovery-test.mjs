@@ -339,7 +339,11 @@ function snapshot(runId, restartSafe, sessionRef, ownerScope) {
     revision: 0,
     goal: {
       instruction: restartSafe ? 'Research only.' : 'Potentially write to a form.',
-      metadata: { mode: restartSafe ? 'demo-research' : 'raw', restartSafe },
+      metadata: {
+        executionAdapter: 'recruiting_compat',
+        mode: restartSafe ? 'demo-research' : 'raw',
+        restartSafe,
+      },
     },
     startUrl: 'https://fixture.example/',
     ...(sessionRef ? { sessionRef } : {}),

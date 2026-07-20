@@ -46,7 +46,11 @@ import {
   runWebTask,
 } from '../sdk/web-task.js'
 import { sessionManager } from '../session/manager.js'
-import { FileSessionStore, restoreSessionState } from '../session/index.js'
+import {
+  FileSessionStore,
+  restoreSessionState,
+  type RestoredSessionState,
+} from '../session/index.js'
 import {
   digestCanonicalJson,
   snapshotWebTaskInput,
@@ -76,6 +80,7 @@ const SOURCE_FILE = fileURLToPath(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled'])
 const MAX_LIVE_EVENTS_PER_RUN = 1000
+const GENERIC_RECOVERY_MODE = 'read_only_reobserve/v1' as const
 
 function outputDir(): string {
   return resolve(loadConfig().trace.outDir)
@@ -104,6 +109,10 @@ interface LiveExecution {
   runRevision: number
   attempt: number
   settled?: Promise<void>
+}
+
+interface GenericLaunchOptions {
+  restoredSession?: RestoredSessionState
 }
 
 export interface WebControlServerOptions {
@@ -135,24 +144,55 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     rootDir: join(outputDir(), 'sessions'),
     sanitize: (value) => security.sanitize(value),
   })
-  const validateRestorableSession = async (record: RunRecord): Promise<boolean> => {
-    const sessionRef = record.sessionRef ?? record.lastSafeBoundary?.sessionRef
-    if (!sessionRef) return false
+  const restoreSessionForRecord = async (
+    record: RunRecord,
+  ): Promise<RestoredSessionState | undefined> => {
+    const boundarySessionRef = record.lastSafeBoundary?.sessionRef
+    if (record.sessionRef
+      && boundarySessionRef
+      && digestCanonicalJson(record.sessionRef) !== digestCanonicalJson(boundarySessionRef)) {
+      return undefined
+    }
+    const sessionRef = record.sessionRef ?? boundarySessionRef
+    if (!sessionRef
+      || sessionRef.runId !== record.runId
+      || sessionRef.attempt !== record.attempt) {
+      return undefined
+    }
     const session = await sessionStore.get(sessionRef.id)
     if (!session
       || session.sessionId !== sessionRef.id
       || session.runId !== record.runId) {
-      return false
+      return undefined
     }
     try {
       const restored = await restoreSessionState({ session })
       return restored.session.sessionId === sessionRef.id
         && restored.session.runId === record.runId
+        ? restored
+        : undefined
     } catch (error) {
       throw new Error(String(security.sanitize(
         error instanceof Error ? error.message : String(error),
       )))
     }
+  }
+  const validateRestorableSession = async (record: RunRecord): Promise<boolean> => {
+    if (record.inputSnapshot.goal.metadata?.restartSafe !== true) return false
+    const adapter = executionAdapterFor(record)
+    if (adapter === 'generic_web_task') {
+      if (options.webTaskRuntimeDriver
+        || record.inputSnapshot.goal.metadata?.recoveryMode !== GENERIC_RECOVERY_MODE
+        || !isReadOnlyGenericSnapshot(record.inputSnapshot)) {
+        return false
+      }
+      const sessionRef = record.sessionRef ?? record.lastSafeBoundary?.sessionRef
+      if (sessionRef?.provider !== 'file-session-store' || !record.sessionRef) return false
+    } else if (adapter !== 'recruiting_compat'
+      || record.inputSnapshot.goal.metadata?.mode !== 'demo-research') {
+      return false
+    }
+    return Boolean(await restoreSessionForRecord(record))
   }
   const recoveryService = new RecoveryService(runService, approvalService, {
     canRestoreSession: validateRestorableSession,
@@ -359,7 +399,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     }
   }
 
-  async function launchWebTask(record: RunRecord): Promise<void> {
+  async function launchWebTask(
+    record: RunRecord,
+    launchOptions: GenericLaunchOptions = {},
+  ): Promise<void> {
     if (options.disableExecution) return
     let controller: AgentRunController | undefined
     let launched = record
@@ -377,7 +420,17 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         expectedAttempt: record.attempt,
       }, scope)
       launched = running
-      const sessionId = `control-${running.runId}-a${running.attempt}`
+      const readOnlyAuthority =
+        running.inputSnapshot.goal.metadata?.recoveryMode === GENERIC_RECOVERY_MODE
+      if (launchOptions.restoredSession && (!readOnlyAuthority || options.webTaskRuntimeDriver)) {
+        throw new HttpError(
+          409,
+          'Generic recovery requires the built-in read-only runtime.',
+        )
+      }
+      const sessionId = launchOptions.restoredSession?.session.sessionId
+        ?? running.sessionRef?.id
+        ?? `control-${running.runId}-a${running.attempt}`
       const gate = new DurableHumanGate({
         runs: runService,
         approvals: approvalService,
@@ -403,6 +456,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         controller,
         sessionId,
         durableSession: true,
+        ...(launchOptions.restoredSession
+          ? { restoredSession: launchOptions.restoredSession }
+          : {}),
+        readOnlyAuthority,
         persistenceSanitizer: (value) => security.sanitize(value),
         onSessionReady: async (session) => {
           await runService.attachSession(running.runId, {
@@ -414,16 +471,21 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           }, `web-task-session:${running.runRevision}:${running.attempt}:${session.sessionId}`, scope)
         },
       })
-      const input = webTaskInputFromRecord(running, driver, (event) => {
-        emitRun(running.runId, {
-          phase: event.type,
-          level: event.type === 'run_failed' ? 'error'
-            : event.type === 'run_completed' ? 'done'
-              : event.type === 'run_blocked' ? 'gate'
-                : 'info',
-          message: event.snapshot?.reason ?? event.type,
-        })
-      })
+      const input = webTaskInputFromRecord(
+        running,
+        driver,
+        (event) => {
+          emitRun(running.runId, {
+            phase: event.type,
+            level: event.type === 'run_failed' ? 'error'
+              : event.type === 'run_completed' ? 'done'
+                : event.type === 'run_blocked' ? 'gate'
+                  : 'info',
+            message: event.snapshot?.reason ?? event.type,
+          })
+        },
+        launchOptions.restoredSession ? GENERIC_RECOVERY_MODE : undefined,
+      )
       const settled = runWebTask(input)
         .then((result) => settleWebTaskExecution(running, controller!, result))
         .catch((error) => settleWebTaskExecution(running, controller!, undefined, String(error)))
@@ -677,6 +739,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       runId,
       ownerScope,
       process.env.WEB_BUDDY_ALLOW_PRIVATE_NETWORK_FOR_TESTING === 'true',
+      options.webTaskRuntimeDriver === undefined && options.disableExecution !== true,
     )
     const quota = await security.reserveRun(principal, {
       idempotencyKey,
@@ -992,22 +1055,53 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         return
       }
       const current = visible
-      if (executionAdapterFor(current) !== 'recruiting_compat') {
+      const adapter = executionAdapterFor(current)
+      const genericRecovery = adapter === 'generic_web_task'
+      if (genericRecovery
+        && (!['paused', 'recoverable'].includes(current.state)
+          || executions.has(runId))) {
         return respond(409, {
-          error: 'generic_resume_not_supported',
-          message: 'Generic service runs are not restartable until a durable generic checkpoint adapter is available.',
+          error: 'generic_resume_requires_quiescent_run',
+          message: 'Generic resume requires a quiescent paused or recoverable run with no live execution.',
+        })
+      }
+      if (genericRecovery
+        && (options.webTaskRuntimeDriver
+          || current.inputSnapshot.goal.metadata?.recoveryMode !== GENERIC_RECOVERY_MODE
+          || !isReadOnlyGenericSnapshot(current.inputSnapshot))) {
+        return respond(409, {
+          error: 'generic_resume_requires_read_only_runtime',
+          message: 'Generic resume requires an explicitly opted-in read-only contract and the built-in recovery runtime.',
+        })
+      }
+      if (!genericRecovery
+        && (adapter !== 'recruiting_compat'
+          || current.inputSnapshot.goal.metadata?.mode !== 'demo-research')) {
+        return respond(409, {
+          error: 'resume_requires_safe_session',
+          message: 'This execution adapter is not authorized for read-only recovery.',
         })
       }
       const restartSafe = current.inputSnapshot.goal.metadata?.restartSafe === true
-      const restoredSessionId = current.sessionRef?.id ?? current.lastSafeBoundary?.sessionRef?.id
-      if (!restartSafe || !restoredSessionId) {
+      const priorSessionRef = genericRecovery
+        ? current.sessionRef
+        : current.sessionRef ?? current.lastSafeBoundary?.sessionRef
+      if (!restartSafe || !priorSessionRef) {
         return respond(409, {
           error: 'resume_requires_safe_session',
           message: 'Resume requires a durable session plus an explicit read-only restart contract; the server will not replay a prior write action.',
         })
       }
+      if (genericRecovery && priorSessionRef.provider !== 'file-session-store') {
+        return respond(409, {
+          error: 'resume_requires_safe_session',
+          message: 'Generic resume requires the built-in durable file session; no prior action was replayed.',
+        })
+      }
+      let restoredSession: RestoredSessionState | undefined
       try {
-        if (!await validateRestorableSession(current)) {
+        restoredSession = await restoreSessionForRecord(current)
+        if (!restoredSession) {
           return respond(409, {
             error: 'resume_requires_safe_session',
             message: 'Resume requires a valid durable session; no prior write action was replayed.',
@@ -1035,7 +1129,26 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         storeScope,
         controlExpectation,
       )
-      await launch(resuming, { ...launchOptionsFromRecord(resuming), restoredSessionId })
+      if (genericRecovery) {
+        try {
+          const rebound = await runService.attachSession(resuming.runId, {
+            schemaVersion: 'session-ref/v1',
+            provider: 'file-session-store',
+            id: priorSessionRef.id,
+            runId: resuming.runId,
+            attempt: resuming.attempt,
+          }, `generic-resume-session:${resuming.runRevision}:${resuming.attempt}:${priorSessionRef.id}`, storeScope)
+          await launchWebTask(rebound, { restoredSession })
+        } catch (error) {
+          await persistPrelaunchFailure(resuming, undefined, 'web-task', error)
+          throw error
+        }
+      } else {
+        await launch(resuming, {
+          ...launchOptionsFromRecord(resuming),
+          restoredSessionId: priorSessionRef.id,
+        })
+      }
       const resumed = (await runService.get(runId, storeScope)) ?? resuming
       await security.audit({
         principal,
@@ -1380,6 +1493,7 @@ function prepareRunInput(
   runId: string,
   ownerScope?: OwnerScope,
   allowPrivateNetwork = false,
+  genericRecoveryAvailable = true,
 ): PreparedRunInput {
   if (body.schemaVersion !== 'run-client-create/v1') {
     return { kind: 'legacy', launchOptions: parseLaunchOptions(body, allowPrivateNetwork) }
@@ -1410,15 +1524,28 @@ function prepareRunInput(
   const callerMetadata = goal.metadata === undefined
     ? {}
     : plainRecord(goal.metadata, 'input.goal.metadata')
+  const requestedRestartSafe = callerMetadata.restartSafe
+  const advisoryMetadata = { ...callerMetadata }
+  delete advisoryMetadata.executionAdapter
+  delete advisoryMetadata.restartSafe
+  delete advisoryMetadata.recoveryMode
+  const restartSafe = requestedRestartSafe === true
+    && genericRecoveryAvailable
+    && isReadOnlyGenericInput({
+      contract: input.contract as WebTaskInput['contract'],
+      policy: input.policy as WebTaskInput['policy'],
+      startUrl,
+    })
   const candidate: WebTaskInput = {
     schemaVersion: 'web-task-input/v1',
     goal: {
       instruction: typeof goal.instruction === 'string' ? goal.instruction : '',
       ...(typeof goal.scenario === 'string' ? { scenario: goal.scenario } : {}),
       metadata: {
-        ...callerMetadata,
+        ...advisoryMetadata,
         executionAdapter: 'generic_web_task',
-        restartSafe: false,
+        restartSafe,
+        ...(restartSafe ? { recoveryMode: GENERIC_RECOVERY_MODE } : {}),
       } as JsonObject,
     },
     contract: input.contract as WebTaskInput['contract'],
@@ -1435,6 +1562,33 @@ function prepareRunInput(
     kind: 'snapshot',
     snapshot: snapshotWebTaskInput(candidate, runId),
   }
+}
+
+function isReadOnlyGenericInput(
+  input: Pick<WebTaskInput, 'contract' | 'policy' | 'startUrl'>,
+): boolean {
+  if (!input.startUrl
+    || !input.policy
+    || input.policy.defaultSensitiveAction !== 'deny'
+    || input.policy.rules.some((rule) => rule.decision !== 'deny')
+    || !input.contract
+    || !input.contract.sensitiveActions?.length
+    || input.contract.sensitiveActions.some((rule) => rule.decision !== 'deny')) {
+    return false
+  }
+  return input.contract.criteria.every((criterion) => (
+    criterion.kind === 'evidence_present'
+    || criterion.kind === 'artifact_present'
+    || (criterion.kind === 'action_boundary' && criterion.outcome === 'not_performed')
+  ))
+}
+
+function isReadOnlyGenericSnapshot(snapshot: WebTaskInputSnapshot): boolean {
+  return isReadOnlyGenericInput({
+    contract: snapshot.contract,
+    policy: snapshot.policy,
+    startUrl: snapshot.startUrl,
+  })
 }
 
 function rejectInlineSecrets(
@@ -1613,7 +1767,7 @@ function parseLaunchOptions(
       : typeof body.prompt === 'string' ? { taskPrompt: body.prompt } : {}),
     ...(parseTaskType(body.taskType) ? { taskType: parseTaskType(body.taskType) } : {}),
     ...(body.requiresCurrentResumeUpload === true ? { requiresCurrentResumeUpload: true } : {}),
-    restartSafe: mode === 'demo-research' || body.restartSafe === true,
+    restartSafe: mode === 'demo-research',
   }
 }
 
@@ -1643,6 +1797,7 @@ function webTaskInputFromRecord(
   record: RunRecord,
   driver: WebTaskRuntimeDriver,
   onEvent: NonNullable<WebTaskInput['onEvent']>,
+  recoveryMode?: typeof GENERIC_RECOVERY_MODE,
 ): WebTaskInput {
   const snapshot = record.inputSnapshot
   if (snapshot.contextProviders.length > 0) {
@@ -1660,6 +1815,13 @@ function webTaskInputFromRecord(
     ...(snapshot.ownerScope ? { ownerScope: structuredClone(snapshot.ownerScope) } : {}),
     runtime: {
       driver,
+      executionContext: {
+        schemaVersion: 'run-execution-context/v1',
+        runRevision: record.runRevision,
+        attempt: record.attempt,
+        ...(record.sessionRef ? { sessionRef: structuredClone(record.sessionRef) } : {}),
+        ...(recoveryMode ? { recoveryMode } : {}),
+      },
       ...(typeof snapshot.goal.metadata?.headless === 'boolean'
         ? { headless: snapshot.goal.metadata.headless }
         : {}),
