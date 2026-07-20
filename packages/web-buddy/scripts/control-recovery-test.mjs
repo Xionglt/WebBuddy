@@ -351,7 +351,7 @@ function bootAndStopServer(extraEnv) {
     }, 10_000)
     const onData = (chunk) => {
       output += chunk.toString()
-      if (!output.includes('job-agent web UI')) return
+      if (!output.includes('Web Buddy Harness UI')) return
       child.stdout.off('data', onData)
       child.kill('SIGTERM')
     }

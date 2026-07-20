@@ -1244,7 +1244,7 @@ export async function startWebControlServer(port: number, retries = 0): Promise<
     }
   }
   const config = loadConfig()
-  console.log(`\n  job-agent web UI → http://localhost:${selectedPort}\n  provider: ${config.model.provider} | model: ${config.model.name} | key: ${config.model.apiKey || config.model.authToken ? 'set' : 'NOT SET'}\n`)
+  console.log(`\n  Web Buddy Harness UI → http://localhost:${selectedPort}\n  provider: ${config.model.provider} | model: ${config.model.name} | key: ${config.model.apiKey || config.model.authToken ? 'set' : 'NOT SET'}\n`)
   return control
 }
 
