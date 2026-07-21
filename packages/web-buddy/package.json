@@ -40,6 +40,7 @@
     "demo:form": "npm run build && node ./dist/cli/demo.js demo-form --headful",
     "demo:form:offline": "MODEL_PROVIDER=openai PLAYWRIGHT_KEEP_BROWSER_OPEN=false KEEP_BROWSER_OPEN=false npm run demo:auto -- --model-key ''",
     "demo:research": "npm run build && node ./dist/cli/demo.js demo-research --headless",
+    "test:demo-research-isolation": "npm run build && node ./scripts/offline-research-isolation-test.mjs",
     "demo:auto": "npm run build && node ./dist/cli/demo.js demo-form --headless --auto-gate",
     "demo:match": "npm run build && node ./dist/cli/demo.js match --headful",
     "alibaba:apply:raw": "npm run build && node ./dist/cli/demo.js alibaba-apply --headful",
