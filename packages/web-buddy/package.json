@@ -22,6 +22,7 @@
     "playwright-mcp": "dist/server.js",
     "web-agent": "dist/cli/demo.js",
     "job-agent": "dist/cli/job-agent.js",
+    "web-buddy-skills": "dist/cli/skill-candidates.js",
     "web-agent-web": "dist/web/server.js",
     "job-agent-web": "dist/web/job-agent-web.js"
   },
@@ -63,6 +64,8 @@
     "test:agent-loop": "node ./scripts/agent-loop-test.mjs",
     "test:agent-runtime": "node ./scripts/agent-runtime-test.mjs",
     "test:skill-system": "npm run build && node ./scripts/skill-system-test.mjs",
+    "test:skill-candidates": "npm run build && node ./scripts/skill-candidate-store-test.mjs && node ./scripts/skill-candidate-projector-test.mjs && node ./scripts/skill-candidate-pipeline-test.mjs && node ./scripts/skill-learning-observer-test.mjs && node ./scripts/skill-candidate-cli-test.mjs",
+    "skill-candidates": "npm run build && node ./dist/cli/skill-candidates.js",
     "test:memory-system": "npm run build && node ./scripts/memory-system-test.mjs",
     "test:permission-remember": "npm run build && node ./scripts/permission-remember-e2e-test.mjs",
     "test:resume-loop": "npm run build && node ./scripts/resume-loop-e2e-test.mjs",

@@ -83,6 +83,16 @@ await esbuild.build({
   banner: { js: '#!/usr/bin/env node' },
 })
 
+await esbuild.build({
+  entryPoints: ['src/cli/skill-candidates.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  outfile: 'dist/cli/skill-candidates.js',
+  banner: { js: '#!/usr/bin/env node' },
+})
+
 // Web UI server. index.html is inlined as a text module (single-file bundle).
 await esbuild.build({
   entryPoints: ['src/web/server.ts'],
