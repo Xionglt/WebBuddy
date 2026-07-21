@@ -52,6 +52,7 @@ import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
 import { PermissionEngine } from '../permission/permission-engine.js'
 import { loadPersistentPermissionRules } from '../permission/persistent-rules.js'
 import { FileToolResultStore, type ToolResultStore } from '../tools/tool-result-store.js'
+import { observeCompletedWebTaskResult } from '../skills/candidates/observer.js'
 
 export type {
   ActionBinding,
@@ -245,7 +246,7 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     snapshot: lifecycle(state, status === 'completed' ? undefined : summary),
     data: { missingCriteria: completion.missingCriteria },
   })
-  return {
+  const result: WebTaskResult = {
     schemaVersion: 'web-task-result/v1',
     runId,
     revision: taskRevision,
@@ -260,6 +261,8 @@ export async function runWebTask(input: WebTaskInput): Promise<WebTaskResult> {
     ...(outcome.checkpointRef ? { checkpointRef: outcome.checkpointRef } : {}),
     ...(snapshot.ownerScope ? { ownerScope: snapshot.ownerScope } : {}),
   }
+  await observeCompletedWebTaskResult(result).catch(() => {})
+  return result
 }
 
 function resolveExecutionContext(
