@@ -51,6 +51,7 @@ import {
 import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
 import { PermissionEngine } from '../permission/permission-engine.js'
 import { loadPersistentPermissionRules } from '../permission/persistent-rules.js'
+import { FileToolResultStore, type ToolResultStore } from '../tools/tool-result-store.js'
 
 export type {
   ActionBinding,
@@ -392,6 +393,10 @@ async function executeGenericWebTask(
       goal: request.input.goal.instruction,
       sanitize: host.persistenceSanitizer,
     })
+    const artifactStore = new FileToolResultStore({
+      rootDir: join(trace.agentTrace?.dir ?? trace.dir, 'artifacts', 'tool-results'),
+      sanitize: host.persistenceSanitizer,
+    })
     const executionContext = request.runtime?.executionContext
     const sessionId = host.sessionId
       ?? executionContext?.sessionRef?.id
@@ -524,16 +529,19 @@ async function executeGenericWebTask(
           blockedReason: summary,
           error: undefined,
         })
-        const traceSummary = trace.finish()
-        return {
+        return finishGenericRuntimeOutcome({
+          trace,
+          config,
+          request,
+          artifactStore,
+          sessionId,
           status: 'blocked',
           summary,
           evidence: [],
           artifacts: [],
-          metrics: metricsFor(trace, config, traceSummary.tracePath),
           actions: actionLedger.outcomes(monitoredActionKinds),
-          ...(sessionRef ? { sessionRef } : {}),
-        }
+          sessionRef,
+        })
       }
       const genericDefs = listGenericWebTaskToolDefs(host.readOnlyAuthority === true)
       const persistentPermissionRules = runtimeAssembly.memory.mode === 'legacy_local'
@@ -585,6 +593,7 @@ async function executeGenericWebTask(
         taskType: runtimeAssembly.taskType,
         toolOrchestration: runtimeAssembly.toolOrchestration,
         actionLedger,
+        toolResultStore: artifactStore,
         ...(runtimeAssembly.memory.mode === 'legacy_local' ? {
           persistentAnswerStore: { path: config.memory.answerStorePath },
           persistentPermissionRules: { path: config.memory.permissionRulesPath },
@@ -603,7 +612,6 @@ async function executeGenericWebTask(
           data: { step: event.step, level: event.level, message: event.message },
         }),
       })
-      const traceSummary = trace.finish()
       const evidence = (loop.evidence ?? []).map((item) => ({
         ...item,
         binding: {
@@ -618,7 +626,12 @@ async function executeGenericWebTask(
           ...(sessionRef ? { sessionRef } : {}),
         },
       }))
-      return {
+      return finishGenericRuntimeOutcome({
+        trace,
+        config,
+        request,
+        artifactStore,
+        sessionId,
         status: host.controller?.signal.aborted
           ? 'cancelled'
           : loop.paused || loop.blocked
@@ -630,10 +643,9 @@ async function executeGenericWebTask(
         evidence,
         artifacts,
         ...(loop.formState ? { formState: loop.formState } : {}),
-        metrics: metricsFor(trace, config, traceSummary.tracePath),
         actions: loop.actions ?? actionLedger.outcomes(monitoredActionKinds),
-        ...(sessionRef ? { sessionRef } : {}),
-      }
+        sessionRef,
+      })
     } catch (error) {
       const summary = error instanceof Error ? error.message : String(error)
       trace.record({ phase: 'runtime', action: summary, status: 'error' })
@@ -641,19 +653,117 @@ async function executeGenericWebTask(
         error: summary,
         blockedReason: undefined,
       }).catch(() => {})
-      const traceSummary = trace.finish()
-      return {
+      return finishGenericRuntimeOutcome({
+        trace,
+        config,
+        request,
+        artifactStore,
+        sessionId,
         status: 'failed',
         summary,
         evidence: [],
         artifacts: [],
-        metrics: metricsFor(trace, config, traceSummary.tracePath),
         actions: actionLedger.outcomes(monitoredActionKinds),
-        ...(sessionRef ? { sessionRef } : {}),
-      }
+        sessionRef,
+      })
     } finally {
       await sessionManager.close(sessionId).catch(() => {})
     }
+}
+
+async function finishGenericRuntimeOutcome(input: {
+  trace: TraceRecorder
+  config: AgentConfig
+  request: Parameters<WebTaskRuntimeDriver['execute']>[0]
+  artifactStore: ToolResultStore
+  sessionId: string
+  status: WebTaskRuntimeOutcome['status']
+  summary: string
+  evidence: WebTaskRuntimeOutcome['evidence']
+  artifacts: WebTaskRuntimeOutcome['artifacts']
+  formState?: WebTaskRuntimeOutcome['formState']
+  actions: NonNullable<WebTaskRuntimeOutcome['actions']>
+  sessionRef?: NonNullable<WebTaskRuntimeOutcome['sessionRef']>
+}): Promise<WebTaskRuntimeOutcome> {
+  const { trace, config, request, status, summary, evidence, formState, actions, sessionRef } = input
+  const artifacts = [...input.artifacts]
+  const payload = {
+    schemaVersion: 'generic-runtime-outcome/v1',
+    runId: request.input.runId,
+    revision: request.input.revision,
+    status,
+    summary,
+    actions,
+    ...(sessionRef ? { sessionRef } : {}),
+  }
+  try {
+    const stored = await input.artifactStore.write({
+      runId: request.input.runId,
+      sessionId: input.sessionId,
+      toolCallId: `runtime-outcome:${sessionRef?.attempt ?? 1}`,
+      toolName: 'generic_runtime',
+      kind: 'generic_json',
+      content: payload,
+      mediaType: 'application/json',
+      sensitivity: request.input.ownerScope ? 'personal' : 'internal',
+      retention: { scope: 'run', deleteWithSession: true },
+      summary,
+    })
+    const artifact = {
+      schemaVersion: 'artifact-ref/v1' as const,
+      id: stored.artifactId,
+      kind: 'runtime_outcome',
+      payloadSchemaVersion: 'generic-runtime-outcome/v1',
+      mediaType: stored.mediaType,
+      byteLength: stored.bytes,
+      sha256: stored.sha256,
+      createdAt: stored.createdAt,
+      immutable: true as const,
+      locator: `artifact:${stored.artifactId}`,
+      producer: { id: 'generic-runtime', version: '1' },
+      parentEvidenceIds: evidence.map((item) => item.id),
+      parentArtifactIds: artifacts.map((item) => item.id),
+      origin: 'artifact' as const,
+      trust: 'non_authoritative' as const,
+      sensitivity: stored.sensitivity,
+      retention: { scope: 'run' as const, deleteWithSession: true },
+      ...(request.input.ownerScope ? { ownerScope: structuredClone(request.input.ownerScope) } : {}),
+      binding: {
+        runId: request.input.runId,
+        revision: request.input.revision,
+        ...(sessionRef ? { sessionRef: structuredClone(sessionRef) } : {}),
+      },
+      requiresMainWorkflowVerification: true,
+      authoritativeCompletionEvidence: false,
+      redaction: {
+        status: stored.redaction?.status === 'redacted'
+          ? 'redacted' as const
+          : stored.redaction?.status === 'contains_sensitive'
+            ? 'rejected' as const
+            : 'not_required' as const,
+        policyId: 'runtime-persistence-boundary/v1',
+      },
+      scanner: { status: 'not_scanned' as const, scannerId: 'not-configured' },
+    }
+    validateArtifactRef(artifact, request.input.runId, request.input.revision)
+    artifacts.push(artifact)
+    trace.agentTrace?.recordEvent('runtime_outcome_artifact_created', { artifact })
+  } catch (error) {
+    trace.agentTrace?.recordEvent('runtime_outcome_artifact_failed', {
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+  const traceSummary = trace.finish()
+  return {
+    status,
+    summary,
+    evidence,
+    artifacts,
+    ...(formState ? { formState } : {}),
+    metrics: metricsFor(trace, config, traceSummary.tracePath),
+    actions,
+    ...(sessionRef ? { sessionRef } : {}),
+  }
 }
 
 function metricsFor(trace: TraceRecorder, config: AgentConfig, _tracePath: string) {

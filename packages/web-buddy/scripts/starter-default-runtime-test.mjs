@@ -114,9 +114,11 @@ try {
     ],
   }))
   assert.equal(comparison.status, 'completed', comparison.summary)
-  assert.equal(comparison.artifacts.length, 1)
-  assert.equal(comparison.artifacts[0].kind, 'comparison_report')
-  assert.equal(comparison.artifacts[0].payloadSchemaVersion, 'comparison-report/v1')
+  assert.equal(comparison.artifacts.length, 2)
+  const comparisonReport = comparison.artifacts.find((artifact) => artifact.kind === 'comparison_report')
+  assert(comparisonReport)
+  assert.equal(comparisonReport.payloadSchemaVersion, 'comparison-report/v1')
+  assert(comparison.artifacts.some((artifact) => artifact.kind === 'runtime_outcome'))
 
   const formEvents = []
   const formInput = createFormDraftStarter({

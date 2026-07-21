@@ -156,7 +156,24 @@ try {
   assert.equal(trace.body.attempt, 2)
   const artifacts = await requestJson(base, `/api/runs/${encodeURIComponent(runId)}/artifacts`)
   assert.equal(artifacts.status, 200)
-  assert.deepEqual(artifacts.body.items, [])
+  assert.equal(artifacts.body.items.length, 2)
+  assert.deepEqual(
+    artifacts.body.items.map((artifact) => artifact.binding.sessionRef.attempt).sort(),
+    [1, 2],
+    'Control Store did not retain one immutable runtime outcome per attempt',
+  )
+  for (const artifact of artifacts.body.items) {
+    assert.equal(artifact.kind, 'runtime_outcome')
+    assert.equal(artifact.payloadSchemaVersion, 'generic-runtime-outcome/v1')
+    assert.equal(artifact.locator, `artifact:${encodeURIComponent(artifact.id)}`)
+    assert.equal(artifact.locator.includes(traceRoot), false, 'public artifact locator exposed the trace root')
+    assert.equal(artifact.requiresMainWorkflowVerification, true)
+    assert.equal(artifact.authoritativeCompletionEvidence, false)
+    assert.deepEqual(artifact.ownerScope, ownerScope)
+    assert.equal(artifact.binding.runId, runId)
+    assert.equal(artifact.binding.revision, 0)
+    assert.equal(artifact.binding.sessionRef.id, firstSessionRef.id)
+  }
 
   await delay(50)
   const cancel = await requestJson(base, `/api/runs/${encodeURIComponent(runId)}/cancel`, {
@@ -179,6 +196,12 @@ try {
   assert.equal(afterRestart.body.state, 'cancelled')
   assert.equal(afterRestart.body.revision, 1)
   assert.equal(afterRestart.body.attempt, 2)
+  const artifactsAfterRestart = await requestJson(
+    address(control.server),
+    `/api/runs/${encodeURIComponent(runId)}/artifacts`,
+  )
+  assert.equal(artifactsAfterRestart.status, 200)
+  assert.deepEqual(artifactsAfterRestart.body.items, artifacts.body.items)
 
   console.log('control-generic-resume-e2e-test: PASS')
 } finally {
