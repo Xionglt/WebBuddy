@@ -17,6 +17,9 @@ import {
 const REQUIRED_TRACE_FILES = ['session.json', 'spans.jsonl', 'events.jsonl', 'DONE'] as const
 const EXCLUDED_REUSABLE_TOOLS = new Set(['agent_done', 'ask_user'])
 const REDACTION_MARKER = /\[(?:redacted|email:redacted|phone:redacted|path:redacted|REDACTED:[^\]]*)\]/i
+const MAX_EVIDENCE_FILE_BYTES = 8 * 1024 * 1024
+const MAX_TRACE_RECORDS = 4096
+const MAX_PROJECTED_ITEMS = 64
 
 export type SkillEvidenceProjectionResult =
   | { eligible: true; evidence: ProjectedSkillEvidenceV1 }
@@ -117,13 +120,17 @@ async function projectEligibleEvidence(input: {
       'Trace does not contain a reusable successful tool step.',
     )
   }
+  assertItemLimit(successfulSpans, '$.spans')
 
   const outcomeContent = asRecord(outcome.envelope.content)
-  const actions = arrayOfRecords(outcomeContent.actions, '$.outcome.actions').map((action, index) => ({
+  const actionItems = arrayOfRecords(outcomeContent.actions, '$.outcome.actions')
+  assertItemLimit(actionItems, '$.outcome.actions')
+  const actions = actionItems.map((action, index) => ({
     actionKind: requiredString(action.actionKind, `$.outcome.actions[${index}].actionKind`),
     outcome: requiredString(action.outcome, `$.outcome.actions[${index}].outcome`),
   }))
   const resolvedSkillItems = arrayOfRecords(resolved.skills, '$.resolvedSkills.skills')
+  assertItemLimit(resolvedSkillItems, '$.resolvedSkills.skills')
   const evidence: ProjectedSkillEvidenceV1 = {
     schemaVersion: 'projected-skill-evidence/v1',
     runId: input.request.runId,
@@ -234,6 +241,7 @@ async function loadUniqueOutcomeArtifact(
         'Outcome artifact must be a regular file.',
       )
     }
+    assertFileSize(candidateStats.size, '$.outcome')
     const canonicalCandidate = await realpath(candidatePath)
     assertWithin(canonicalCandidate, canonicalStoreRoot, 'UNSAFE_OUTCOME_ARTIFACT_PATH', '$.outcome')
     const raw = await readFile(canonicalCandidate, 'utf8')
@@ -633,6 +641,7 @@ async function safeTraceFile(traceRoot: string, relativePath: string): Promise<s
       'Trace evidence must be a regular file.',
     )
   }
+  assertFileSize(stats.size, `$.trace.${relativePath}`)
   const canonicalPath = await realpath(path)
   assertWithin(canonicalPath, traceRoot, 'UNSAFE_TRACE_FILE', `$.trace.${relativePath}`)
   return canonicalPath
@@ -674,6 +683,9 @@ function parseJsonl(raw: string, path: string): unknown[] {
         'Trace JSONL contains an invalid line.',
       )
     }
+    if (values.length > MAX_TRACE_RECORDS) {
+      throw evidenceTooLarge(path)
+    }
   }
   return values
 }
@@ -709,6 +721,22 @@ function bounded(value: string, path: string): string {
     throw projectionError('EVIDENCE_SCHEMA_INVALID', path, 'Projected string exceeds 120 characters.')
   }
   return value
+}
+
+function assertFileSize(size: number, path: string): void {
+  if (size > MAX_EVIDENCE_FILE_BYTES) throw evidenceTooLarge(path)
+}
+
+function assertItemLimit(values: unknown[], path: string): void {
+  if (values.length > MAX_PROJECTED_ITEMS) throw evidenceTooLarge(path)
+}
+
+function evidenceTooLarge(path: string): ProjectionError {
+  return projectionError(
+    'EVIDENCE_TOO_LARGE',
+    path,
+    'Evidence exceeds the Candidate Plane input limit.',
+  )
 }
 
 function hashNamedFiles(files: Array<[string, string]>): string {

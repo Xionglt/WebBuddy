@@ -64,6 +64,15 @@ export async function writeSkillCandidateFixture(root, options = {}) {
       input: { summary: 'PRIVATE_SUMMARY_MUST_NOT_PROJECT' },
     }),
   ]
+  for (let index = spans.length; index < (options.spanCount ?? spans.length); index += 1) {
+    spans.push(traceSpan({
+      traceSessionId,
+      spanId: `span-fixture-${index}`,
+      toolName: `fixture_tool_${index}`,
+      toolCategory: 'fixture',
+      input: { index },
+    }))
+  }
   const sourceArtifact = {
     schemaVersion: 'tool-result-artifact-ref/v1',
     artifactId: 'source-tool-result',
@@ -99,19 +108,23 @@ export async function writeSkillCandidateFixture(root, options = {}) {
       artifactPath: join(artifactsDir, 'resolved-skills.json'),
     }),
   ]
+  for (let index = events.length; index < (options.eventCount ?? events.length); index += 1) {
+    events.push(traceEvent(traceSessionId, 'fixture_event', { index }))
+  }
+  const resolvedSkillCount = options.resolvedSkillCount ?? 1
   const resolvedSkills = {
     schemaVersion: 'resolved-skill-context/v1',
     runId,
     sessionId: options.resolvedSessionId ?? runtimeSessionId,
     resolvedAt: '2026-07-21T08:00:10.000Z',
-    skills: [{
-      id: 'builtin.explore',
+    skills: Array.from({ length: resolvedSkillCount }, (_, index) => ({
+      id: index === 0 ? 'builtin.explore' : `builtin.fixture.${index}`,
       source: 'builtin',
-      reason: options.resolvedReason ?? 'taskType:explore',
+      reason: index === 0 ? options.resolvedReason ?? 'taskType:explore' : 'matched',
       priority: 100,
       loadMode: 'manifest_only',
       bodyHash: '2'.repeat(64),
-    }],
+    })),
     promptSections: [{
       id: 'NEXT_ACTION_RULES',
       title: 'Private rules',
@@ -133,7 +146,10 @@ export async function writeSkillCandidateFixture(root, options = {}) {
     revision,
     status: options.outcomeStatus ?? 'completed',
     summary: 'PRIVATE_OUTCOME_SUMMARY_MUST_NOT_PROJECT',
-    actions: [{ actionKind: 'navigate', outcome: 'performed' }],
+    actions: Array.from({ length: options.actionCount ?? 1 }, (_, index) => ({
+      actionKind: index === 0 ? 'navigate' : `fixture_action_${index}`,
+      outcome: 'performed',
+    })),
     ...(options.durableSession
       ? {
           sessionRef: {
@@ -169,6 +185,9 @@ export async function writeSkillCandidateFixture(root, options = {}) {
     schemaVersion: 'stored-tool-result/v1',
     ref: outcomeRef,
     content: outcomeContent,
+    ...(options.outcomePaddingBytes
+      ? { fixturePadding: 'x'.repeat(options.outcomePaddingBytes) }
+      : {}),
   }
   const requestSeed = {
     runId,
@@ -190,6 +209,13 @@ export async function writeSkillCandidateFixture(root, options = {}) {
 
   await writeJson(join(traceDir, 'session.json'), session)
   await writeJsonl(join(traceDir, 'spans.jsonl'), spans)
+  if (options.spansPaddingBytes) {
+    await writeFile(
+      join(traceDir, 'spans.jsonl'),
+      ` ${' '.repeat(options.spansPaddingBytes)}`,
+      { encoding: 'utf8', flag: 'a' },
+    )
+  }
   await writeJsonl(join(traceDir, 'events.jsonl'), events)
   await writeJson(join(artifactsDir, 'resolved-skills.json'), resolvedSkills)
   const outcomePath = join(outcomeDir, `${outcomeArtifactId}.json`)

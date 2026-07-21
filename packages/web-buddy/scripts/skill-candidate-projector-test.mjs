@@ -103,6 +103,28 @@ try {
     { duplicateOutcome: true },
     'OUTCOME_ARTIFACT_AMBIGUOUS',
   )
+  await assertFinding(
+    root,
+    'oversized-spans-file',
+    { spansPaddingBytes: 8 * 1024 * 1024 },
+    'EVIDENCE_TOO_LARGE',
+  )
+  await assertFinding(
+    root,
+    'oversized-outcome-file',
+    { outcomePaddingBytes: 8 * 1024 * 1024 },
+    'EVIDENCE_TOO_LARGE',
+  )
+  await assertFinding(root, 'too-many-spans', { spanCount: 4097 }, 'EVIDENCE_TOO_LARGE')
+  await assertFinding(root, 'too-many-events', { eventCount: 4097 }, 'EVIDENCE_TOO_LARGE')
+  await assertFinding(root, 'too-many-tool-steps', { spanCount: 66 }, 'EVIDENCE_TOO_LARGE')
+  await assertFinding(root, 'too-many-actions', { actionCount: 65 }, 'EVIDENCE_TOO_LARGE')
+  await assertFinding(
+    root,
+    'too-many-resolved-skills',
+    { resolvedSkillCount: 65 },
+    'EVIDENCE_TOO_LARGE',
+  )
 
   const symlinkFixture = await writeSkillCandidateFixture(root, { name: 'symlink-outcome' })
   const outsideDir = join(root, 'outside-outcome')
