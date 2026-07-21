@@ -43,6 +43,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Run Skill Candidate Plane tests
+        run: npm run test:skill-candidates:built
+
       - name: Run deterministic eval
         run: node ./scripts/eval-deterministic-test.mjs
 
