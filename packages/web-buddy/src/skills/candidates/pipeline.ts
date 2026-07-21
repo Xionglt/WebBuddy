@@ -49,6 +49,20 @@ export async function processSkillGenerationRequest(input: {
 
   const proposed = await input.synthesizer.synthesize(projected.evidence)
   const validation = validateProposedSkill(proposed)
+  if (
+    typeof proposed === 'object'
+    && proposed !== null
+    && 'scope' in proposed
+    && proposed.scope !== input.request.requestedScope
+  ) {
+    validation.blockers.push({
+      schemaVersion: 'skill-candidate-finding/v1',
+      severity: 'blocker',
+      code: 'REQUESTED_SCOPE_MISMATCH',
+      path: '$.scope',
+      message: 'Proposed Skill scope does not match the generation request.',
+    })
+  }
   if (validation.blockers.length > 0) {
     const findings = [...validation.blockers, ...validation.warnings]
     const receipt = receiptFor(input.request, 'rejected', findings, input.now)
@@ -60,6 +74,9 @@ export async function processSkillGenerationRequest(input: {
   const existingCandidate = await input.store.findCandidate(candidateId)
   if (existingCandidate) {
     if (existingCandidate.fingerprint !== fingerprint) throw new Error('CANDIDATE_ID_COLLISION')
+    if (existingCandidate.proposedSkill.scope !== proposed.scope) {
+      return persistScopeCollision(input.store, input.request, input.now)
+    }
     const receipt = receiptFor(
       input.request,
       'duplicate',
@@ -95,6 +112,9 @@ export async function processSkillGenerationRequest(input: {
     const written = await input.store.writeCandidate(candidate)
     if (!written.created) {
       const stored = await input.store.readCandidate(candidateId)
+      if (stored.proposedSkill.scope !== proposed.scope) {
+        return persistScopeCollision(input.store, input.request, input.now)
+      }
       const receipt = receiptFor(
         input.request,
         stored.provenance.requestId === input.request.requestId ? 'generated' : 'duplicate',
@@ -108,6 +128,9 @@ export async function processSkillGenerationRequest(input: {
     if (!isCandidateConflict(error)) throw error
     const stored = await input.store.readCandidate(candidateId)
     if (stored.fingerprint !== fingerprint) throw new Error('CANDIDATE_ID_COLLISION')
+    if (stored.proposedSkill.scope !== proposed.scope) {
+      return persistScopeCollision(input.store, input.request, input.now)
+    }
     const receipt = receiptFor(
       input.request,
       'duplicate',
@@ -127,6 +150,21 @@ export async function processSkillGenerationRequest(input: {
     createdAt,
   )
   return persistCandidateReceipt(input.store, receipt, candidate)
+}
+
+function persistScopeCollision(
+  store: FileSkillCandidateStore,
+  request: SkillGenerationRequestV1,
+  now: (() => Date) | undefined,
+): Promise<SkillGenerationResult> {
+  const finding: ValidationFindingV1 = {
+    schemaVersion: 'skill-candidate-finding/v1',
+    severity: 'blocker',
+    code: 'CANDIDATE_SCOPE_COLLISION',
+    path: '$.scope',
+    message: 'An existing candidate with the same fingerprint uses a different scope.',
+  }
+  return persistTerminalReceipt(store, receiptFor(request, 'rejected', [finding], now))
 }
 
 async function resultFromReceipt(

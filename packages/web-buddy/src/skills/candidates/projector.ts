@@ -38,7 +38,7 @@ export async function projectSkillEvidence(input: {
     if (error instanceof ProjectionError) {
       return ineligible(error.code, error.path, error.message)
     }
-    return ineligible('EVIDENCE_LOAD_FAILED', '$.traceDir', 'Evidence loading failed.')
+    throw error
   }
 }
 

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import {
   link,
   lstat,
@@ -18,6 +19,7 @@ import {
   type SkillGenerationReceiptV1,
   type SkillGenerationRequestV1,
 } from './contracts.js'
+import { skillCandidateFingerprint } from './validator.js'
 
 const SAFE_ID = /^[a-zA-Z0-9._-]{1,120}$/
 const SHA256 = /^[a-f0-9]{64}$/
@@ -54,8 +56,13 @@ export function defaultSkillCandidateRoot(
 export class FileSkillCandidateStore {
   private readonly rootDir: string
 
-  constructor(options: { rootDir: string; now?: () => Date }) {
+  constructor(options: {
+    rootDir: string
+    now?: () => Date
+    env?: Record<string, string | undefined>
+  }) {
     this.rootDir = resolve(options.rootDir)
+    assertCandidateRootSeparated(this.rootDir, options.env ?? process.env)
   }
 
   async writeRequest(traceDir: string, request: SkillGenerationRequestV1): Promise<string> {
@@ -72,7 +79,12 @@ export class FileSkillCandidateStore {
       }
       throw new Error('INVALID_REQUEST_ID: request id does not match bound evidence')
     }
-    const result = await writeImmutableJson(target, request, 'GENERATION_REQUEST_CONFLICT')
+    const result = await writeImmutableJson(
+      target,
+      request,
+      'GENERATION_REQUEST_CONFLICT',
+      equivalentGenerationRequest,
+    )
     return result.path
   }
 
@@ -82,15 +94,16 @@ export class FileSkillCandidateStore {
     if (basename(resolvedPath) !== `${request.requestId}.json`) {
       throw new Error('REQUEST_FILE_ID_MISMATCH')
     }
+    if (request.requestId !== generationRequestId(request)) {
+      throw new Error('INVALID_REQUEST_ID: request id does not match bound evidence')
+    }
     return request
   }
 
   async writeCandidate(candidate: SkillCandidateV1): Promise<{ path: string; created: boolean }> {
     assertSkillCandidate(candidate)
     assertCandidateId(candidate.candidateId)
-    if (candidate.candidateId !== candidateIdForFingerprint(candidate.fingerprint)) {
-      throw new Error('INVALID_CANDIDATE_ID: candidate id does not match fingerprint')
-    }
+    assertCandidateIntegrity(candidate)
     const dir = await this.storeDirectory('candidates')
     return writeImmutableJson(
       join(dir, `${candidate.candidateId}.json`),
@@ -107,6 +120,7 @@ export class FileSkillCandidateStore {
     if (!await regularFileExists(path)) return undefined
     const candidate = await readValidatedJson(path, assertSkillCandidate)
     if (candidate.candidateId !== candidateId) throw new Error('CANDIDATE_FILE_ID_MISMATCH')
+    assertCandidateIntegrity(candidate)
     return candidate
   }
 
@@ -116,6 +130,7 @@ export class FileSkillCandidateStore {
     const path = join(dir ?? join(this.rootDir, 'candidates'), `${candidateId}.json`)
     const candidate = await readValidatedJson(path, assertSkillCandidate)
     if (candidate.candidateId !== candidateId) throw new Error('CANDIDATE_FILE_ID_MISMATCH')
+    assertCandidateIntegrity(candidate)
     return candidate
   }
 
@@ -135,6 +150,7 @@ export class FileSkillCandidateStore {
       assertCandidateId(candidateId)
       const candidate = await readValidatedJson(join(dir, name), assertSkillCandidate)
       if (candidate.candidateId !== candidateId) throw new Error('CANDIDATE_FILE_ID_MISMATCH')
+      assertCandidateIntegrity(candidate)
       candidates.push(candidate)
     }
     return candidates
@@ -188,10 +204,65 @@ export class FileSkillCandidateStore {
   }
 }
 
+function assertCandidateIntegrity(candidate: SkillCandidateV1): void {
+  if (candidate.candidateId !== candidateIdForFingerprint(candidate.fingerprint)) {
+    throw new Error('INVALID_CANDIDATE_ID: candidate id does not match fingerprint')
+  }
+  if (candidate.fingerprint !== skillCandidateFingerprint(candidate.proposedSkill)) {
+    throw new Error('CANDIDATE_FINGERPRINT_MISMATCH')
+  }
+  const evidence = candidate.evidenceSummary
+  const provenance = candidate.provenance
+  if (
+    provenance.runId !== evidence.runId
+    || provenance.revision !== evidence.revision
+    || provenance.sessionId !== evidence.sessionId
+    || provenance.attempt !== evidence.attempt
+    || provenance.outcomeArtifactId !== evidence.source.outcomeArtifactId
+    || provenance.traceSha256 !== evidence.source.traceSha256
+  ) {
+    throw new Error('CANDIDATE_BINDING_MISMATCH')
+  }
+}
+
+function assertCandidateRootSeparated(
+  candidateRoot: string,
+  env: Record<string, string | undefined>,
+): void {
+  const physicalCandidateRoot = physicalPath(candidateRoot)
+  for (const name of ['WEB_BUDDY_PROJECT_SKILL_ROOTS', 'WEB_BUDDY_USER_SKILL_ROOTS']) {
+    for (const root of (env[name] ?? '').split(':').map((part) => part.trim()).filter(Boolean)) {
+      const skillRoot = physicalPath(root)
+      if (isWithin(physicalCandidateRoot, skillRoot) || isWithin(skillRoot, physicalCandidateRoot)) {
+        throw new Error(`CANDIDATE_STORE_OVERLAPS_SKILL_ROOT: ${name}`)
+      }
+    }
+  }
+}
+
+function physicalPath(path: string): string {
+  let current = resolve(path)
+  const suffix: string[] = []
+  while (true) {
+    try {
+      return resolve(realpathSync(current), ...suffix.reverse())
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') throw error
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      suffix.push(basename(current))
+      current = parent
+    }
+  }
+}
+
 async function writeImmutableJson(
   target: string,
   value: unknown,
   conflictCode: string,
+  equivalent: (existing: unknown, incoming: unknown) => boolean = (existing, incoming) => (
+    canonicalJson(existing) === canonicalJson(incoming)
+  ),
 ): Promise<{ path: string; created: boolean }> {
   const dir = dirname(target)
   await mkdir(dir, { recursive: true })
@@ -215,7 +286,7 @@ async function writeImmutableJson(
       } catch {
         throw new Error(`${conflictCode}: existing file is not valid JSON`)
       }
-      if (canonicalJson(parsed) !== canonicalJson(value)) {
+      if (!equivalent(parsed, value)) {
         throw new Error(`${conflictCode}: immutable file already exists with different content`)
       }
       return { path: target, created: false }
@@ -223,6 +294,24 @@ async function writeImmutableJson(
   } finally {
     await unlink(temp).catch(() => {})
   }
+}
+
+function equivalentGenerationRequest(existing: unknown, incoming: unknown): boolean {
+  try {
+    assertSkillGenerationRequest(existing)
+    assertSkillGenerationRequest(incoming)
+  } catch {
+    return false
+  }
+  if (
+    existing.requestId !== generationRequestId(existing)
+    || incoming.requestId !== generationRequestId(incoming)
+  ) {
+    return false
+  }
+  const { createdAt: _existingCreatedAt, ...existingBound } = existing
+  const { createdAt: _incomingCreatedAt, ...incomingBound } = incoming
+  return canonicalJson(existingBound) === canonicalJson(incomingBound)
 }
 
 async function readValidatedJson<T>(

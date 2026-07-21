@@ -6,6 +6,7 @@ import { join } from 'node:path'
 
 import { emptyRunMetrics } from '../dist/metrics/schema.js'
 import { runWebTask } from '../dist/sdk/web-task.js'
+import { observeCompletedWebTaskResult } from '../dist/skills/candidates/index.js'
 
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-skill-learning-observer-'))
 const previousFlag = process.env.WEB_BUDDY_SKILL_LEARNING_ENABLED
@@ -19,6 +20,17 @@ try {
   const disabled = await runCompletedTask('observer-disabled', disabledTrace)
   assert.equal(disabled.status, 'completed')
   assert.equal((await requestFiles(disabledTrace)).length, 0)
+  const configuredSkillRoot = join(root, 'configured-project-skills')
+  await assert.rejects(
+    observeCompletedWebTaskResult(disabled, {
+      env: {
+        WEB_BUDDY_SKILL_LEARNING_ENABLED: 'true',
+        WEB_BUDDY_SKILL_CANDIDATE_ROOT: join(configuredSkillRoot, 'candidates'),
+        WEB_BUDDY_PROJECT_SKILL_ROOTS: configuredSkillRoot,
+      },
+    }),
+    /CANDIDATE_STORE_OVERLAPS_SKILL_ROOT/,
+  )
 
   const enabledTrace = await traceDirectory('enabled')
   process.env.WEB_BUDDY_SKILL_LEARNING_ENABLED = 'true'
@@ -45,6 +57,18 @@ try {
   assert.equal('ownerScope' in request, false)
   assert.equal('traceDir' in request, false)
   assert.match(request.requestId, /^request_[a-f0-9]{24}$/)
+  const repeated = await Promise.all([
+    observeCompletedWebTaskResult(enabled, {
+      env: process.env,
+      now: () => new Date('2099-01-01T00:00:00.000Z'),
+    }),
+    observeCompletedWebTaskResult(enabled, {
+      env: process.env,
+      now: () => new Date('2099-01-01T00:00:01.000Z'),
+    }),
+  ])
+  assert(repeated.every((observation) => observation.status === 'persisted'))
+  assert.equal((await requestFiles(enabledTrace)).length, 1)
 
   const blockedTrace = await traceDirectory('blocked')
   const blocked = await runCompletedTask('observer-outer-blocked', blockedTrace, {
@@ -78,6 +102,7 @@ try {
   }
   const durable = await runCompletedTask('observer-durable', durableTrace, {
     sessionRef: durableSessionRef,
+    includePriorAttemptOutcome: true,
   })
   assert.equal(durable.status, 'completed')
   const durableRequestFile = (await requestFiles(durableTrace))[0]
@@ -90,6 +115,7 @@ try {
   assert.equal(durableRequest.sessionId, durableSessionRef.id)
   assert.equal(durableRequest.traceSessionId, `run_${durable.runId}`)
   assert.equal(durableRequest.attempt, 3)
+  assert.equal(durableRequest.outcomeArtifactId, `outcome-${durable.runId}-current`)
 
   console.log('skill-learning-observer-test: PASS')
 } finally {
@@ -109,7 +135,21 @@ async function runCompletedTask(runId, traceDir, options = {}) {
     revision,
     sessionRef,
     ownerScope: options.ownerScope,
+    artifactId: options.includePriorAttemptOutcome ? `outcome-${runId}-current` : undefined,
   })
+  const artifacts = options.includePriorAttemptOutcome
+    ? [
+        runtimeOutcomeArtifact({
+          runId,
+          revision,
+          sessionRef: { ...sessionRef, attempt: sessionRef.attempt - 1 },
+          ownerScope: options.ownerScope,
+          artifactId: `outcome-${runId}-prior`,
+          sha256: 'b'.repeat(64),
+        }),
+        artifact,
+      ]
+    : [artifact]
   return runWebTask({
     schemaVersion: 'web-task-input/v1',
     runId,
@@ -160,7 +200,7 @@ async function runCompletedTask(runId, traceDir, options = {}) {
             status: 'completed',
             summary: 'Observer fixture completed.',
             evidence: [],
-            artifacts: [artifact],
+            artifacts,
             actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
             metrics: {
               ...emptyRunMetrics({
@@ -180,18 +220,19 @@ async function runCompletedTask(runId, traceDir, options = {}) {
   })
 }
 
-function runtimeOutcomeArtifact({ runId, revision, sessionRef, ownerScope }) {
+function runtimeOutcomeArtifact({ runId, revision, sessionRef, ownerScope, artifactId, sha256 }) {
+  const id = artifactId ?? `outcome-${runId}`
   return {
     schemaVersion: 'artifact-ref/v1',
-    id: `outcome-${runId}`,
+    id,
     kind: 'runtime_outcome',
     payloadSchemaVersion: 'generic-runtime-outcome/v1',
     mediaType: 'application/json',
     byteLength: 128,
-    sha256: 'a'.repeat(64),
+    sha256: sha256 ?? 'a'.repeat(64),
     createdAt: '2026-07-21T09:30:00.000Z',
     immutable: true,
-    locator: `artifact:outcome-${runId}`,
+    locator: `artifact:${id}`,
     producer: { id: 'generic-runtime', version: '1' },
     parentEvidenceIds: [],
     parentArtifactIds: [],

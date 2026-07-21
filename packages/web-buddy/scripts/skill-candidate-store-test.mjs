@@ -11,6 +11,7 @@ import {
   candidateIdForFingerprint,
   defaultSkillCandidateRoot,
   generationRequestId,
+  skillCandidateFingerprint,
 } from '../dist/skills/candidates/index.js'
 
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-skill-candidate-store-'))
@@ -36,11 +37,48 @@ try {
     defaultSkillCandidateRoot({ WEB_BUDDY_SKILL_CANDIDATE_ROOT: candidateRoot }),
     resolve(candidateRoot),
   )
+  assert.throws(
+    () => new FileSkillCandidateStore({
+      rootDir: join(root, 'project-skills', 'candidate-plane'),
+      env: { WEB_BUDDY_PROJECT_SKILL_ROOTS: join(root, 'project-skills') },
+    }),
+    /CANDIDATE_STORE_OVERLAPS_SKILL_ROOT/,
+  )
+  assert.throws(
+    () => new FileSkillCandidateStore({
+      rootDir: join(root, 'candidate-parent'),
+      env: { WEB_BUDDY_USER_SKILL_ROOTS: join(root, 'candidate-parent', 'user-skills') },
+    }),
+    /CANDIDATE_STORE_OVERLAPS_SKILL_ROOT/,
+  )
+  assert.throws(
+    () => new FileSkillCandidateStore({
+      rootDir: join(root, 'same-root'),
+      env: { WEB_BUDDY_PROJECT_SKILL_ROOTS: join(root, 'same-root') },
+    }),
+    /CANDIDATE_STORE_OVERLAPS_SKILL_ROOT/,
+  )
+  const physicalSkillRoot = join(root, 'physical-project-skills')
+  const candidateRootLink = join(root, 'candidate-root-link')
+  await mkdir(physicalSkillRoot)
+  await symlink(physicalSkillRoot, candidateRootLink)
+  assert.throws(
+    () => new FileSkillCandidateStore({
+      rootDir: candidateRootLink,
+      env: { WEB_BUDDY_PROJECT_SKILL_ROOTS: physicalSkillRoot },
+    }),
+    /CANDIDATE_STORE_OVERLAPS_SKILL_ROOT/,
+  )
 
   const requestPath = await store.writeRequest(traceDir, request)
   assert.equal(requestPath, join(traceDir, 'skill-learning', 'requests', `${request.requestId}.json`))
   assert.deepEqual(await store.readRequest(requestPath), request)
   assert.equal(await store.writeRequest(traceDir, request), requestPath)
+  assert.equal(
+    await store.writeRequest(traceDir, { ...request, createdAt: '2026-07-21T08:00:01.000Z' }),
+    requestPath,
+  )
+  assert.deepEqual(await store.readRequest(requestPath), request)
   assert.deepEqual(await jsonFiles(join(traceDir, 'skill-learning', 'requests')), [`${request.requestId}.json`])
 
   await assert.rejects(
@@ -92,6 +130,13 @@ try {
     store.writeCandidate({ ...candidate, createdAt: '2026-07-21T08:01:00.000Z' }),
     /SKILL_CANDIDATE_CONFLICT/,
   )
+  await assert.rejects(
+    store.writeCandidate({
+      ...candidate,
+      provenance: { ...candidate.provenance, runId: 'different-run' },
+    }),
+    /CANDIDATE_BINDING_MISMATCH/,
+  )
   await assert.rejects(store.readCandidate('../escape'), /INVALID_CANDIDATE_ID/)
 
   const mismatchedCandidate = {
@@ -110,6 +155,27 @@ try {
     /CANDIDATE_FILE_ID_MISMATCH/,
   )
   await rm(mismatchedCandidatePath)
+
+  const tamperedFingerprint = {
+    ...candidate,
+    candidateId: candidateIdForFingerprint('b'.repeat(64)),
+    fingerprint: 'b'.repeat(64),
+  }
+  const tamperedFingerprintPath = join(
+    candidateRoot,
+    'candidates',
+    `${tamperedFingerprint.candidateId}.json`,
+  )
+  await writeFile(
+    tamperedFingerprintPath,
+    `${JSON.stringify(tamperedFingerprint, null, 2)}\n`,
+    'utf8',
+  )
+  await assert.rejects(
+    store.readCandidate(tamperedFingerprint.candidateId),
+    /CANDIDATE_FINGERPRINT_MISMATCH/,
+  )
+  await rm(tamperedFingerprintPath)
 
   const receipt = receiptFixture(request, candidate)
   const firstReceipt = await store.writeReceipt(receipt)
@@ -155,6 +221,14 @@ try {
   )
   await writeFile(mismatchedRequestPath, `${JSON.stringify(request, null, 2)}\n`, 'utf8')
   await assert.rejects(store.readRequest(mismatchedRequestPath), /REQUEST_FILE_ID_MISMATCH/)
+  const forgedRequestPath = join(
+    traceDir,
+    'skill-learning',
+    'requests',
+    `${forgedRequest.requestId}.json`,
+  )
+  await writeFile(forgedRequestPath, `${JSON.stringify(forgedRequest, null, 2)}\n`, 'utf8')
+  await assert.rejects(store.readRequest(forgedRequestPath), /INVALID_REQUEST_ID/)
 
   assert.throws(
     () => assertSkillGenerationRequest({ ...request, runId: '/tmp/escape' }),
@@ -233,7 +307,6 @@ function generationRequestFixture() {
 }
 
 function candidateFixture(request) {
-  const fingerprint = 'a'.repeat(64)
   const finding = {
     schemaVersion: 'skill-candidate-finding/v1',
     severity: 'warning',
@@ -263,24 +336,26 @@ function candidateFixture(request) {
       resolvedSkillsSha256: '4'.repeat(64),
     },
   }
+  const proposedSkill = {
+    schemaVersion: 'proposed-skill/v1',
+    id: 'learned.explore.fixture',
+    name: 'Learned Explore Fixture',
+    scope: 'project',
+    priority: 500,
+    triggers: { taskTypes: ['explore'] },
+    provides: { promptSections: ['NEXT_ACTION_RULES'] },
+    promptSections: [{
+      id: 'NEXT_ACTION_RULES',
+      summary: 'Call browser_open and verify that the step succeeded.',
+    }],
+    body: 'Generated from a deterministic fixture.',
+  }
+  const fingerprint = skillCandidateFingerprint(proposedSkill)
   return {
     schemaVersion: 'skill-candidate/v1',
     candidateId: candidateIdForFingerprint(fingerprint),
     createdAt: '2026-07-21T08:00:00.000Z',
-    proposedSkill: {
-      schemaVersion: 'proposed-skill/v1',
-      id: 'learned.explore.fixture',
-      name: 'Learned Explore Fixture',
-      scope: 'project',
-      priority: 500,
-      triggers: { taskTypes: ['explore'] },
-      provides: { promptSections: ['NEXT_ACTION_RULES'] },
-      promptSections: [{
-        id: 'NEXT_ACTION_RULES',
-        summary: 'Call browser_open and verify that the step succeeded.',
-      }],
-      body: 'Generated from a deterministic fixture.',
-    },
+    proposedSkill,
     provenance: {
       requestId: request.requestId,
       runId: request.runId,

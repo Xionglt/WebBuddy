@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -77,6 +77,46 @@ try {
   assert.equal((await store.listCandidates()).length, 1)
   assert.equal(synthesizeCalls, 2)
 
+  const scopeCollisionRoot = join(root, 'scope-collision-plane')
+  const scopeCollisionStore = new FileSkillCandidateStore({ rootDir: scopeCollisionRoot, now })
+  const userFixture = await writeSkillCandidateFixture(root, {
+    name: 'user-scope',
+    runId: 'skill-candidate-user-scope',
+  })
+  userFixture.request.requestedScope = 'user'
+  await writeFile(
+    userFixture.requestPath,
+    `${JSON.stringify(userFixture.request, null, 2)}\n`,
+    'utf8',
+  )
+  const userCandidate = await processSkillGenerationRequest({
+    traceDir: userFixture.traceDir,
+    request: userFixture.request,
+    store: scopeCollisionStore,
+    synthesizer: {
+      id: 'user-scope-generator',
+      version: '1',
+      async synthesize() {
+        return { ...proposedSkillFixture(), scope: 'user' }
+      },
+    },
+    now,
+  })
+  assert.equal(userCandidate.status, 'generated')
+  const projectCollisionFixture = await writeSkillCandidateFixture(root, {
+    name: 'project-scope-collision',
+    runId: 'skill-candidate-project-scope-collision',
+  })
+  const scopeCollision = await processSkillGenerationRequest({
+    traceDir: projectCollisionFixture.traceDir,
+    request: projectCollisionFixture.request,
+    store: scopeCollisionStore,
+    synthesizer: fake,
+    now,
+  })
+  assert.equal(scopeCollision.status, 'rejected')
+  assert(scopeCollision.findings.some((finding) => finding.code === 'CANDIDATE_SCOPE_COLLISION'))
+
   const normalizedLeft = proposedSkillFixture()
   const normalizedRight = {
     ...proposedSkillFixture(),
@@ -99,6 +139,7 @@ try {
 
   const invalidCases = [
     ['managed-scope', { scope: 'managed' }],
+    ['requested-scope-mismatch', { scope: 'user' }],
     ['autoload', { autoload: true }],
     ['safety-section', {
       provides: { promptSections: ['SAFETY_RULES'] },
@@ -180,6 +221,22 @@ try {
     /TRANSIENT_SYNTHESIS_FAILURE/,
   )
   assert.equal(await store.readReceipt(transientFixture.request.requestId), undefined)
+
+  const transientIoFixture = await writeSkillCandidateFixture(root, {
+    name: 'transient-io',
+    runId: 'skill-candidate-transient-io',
+  })
+  await assert.rejects(
+    processSkillGenerationRequest({
+      traceDir: join(root, 'x'.repeat(300)),
+      request: transientIoFixture.request,
+      store,
+      synthesizer: fake,
+      now,
+    }),
+    /ENAMETOOLONG|name too long/i,
+  )
+  assert.equal(await store.readReceipt(transientIoFixture.request.requestId), undefined)
 
   const concurrentRoot = join(root, 'concurrent-candidate-plane')
   const concurrentStore = new FileSkillCandidateStore({ rootDir: concurrentRoot, now })
