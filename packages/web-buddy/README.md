@@ -238,6 +238,36 @@ npm run test:session
 The research benchmark validates `metrics.json`, `page-state-latest.json`,
 `research-summary.json`, and `safety-report.json`.
 
+### Runtime Artifact Evaluation
+
+Maintainers can evaluate an existing trace against a versioned case without
+replaying the runtime:
+
+```bash
+npm run eval:runtime-artifacts -- \
+  --case ./evals/cases/demo-research-runtime.json \
+  --trace-dir ../../output/traces/<sessionId> \
+  --out ../../output/eval-reports/<sessionId>
+```
+
+The evaluator reads `run-manifest.json`, `metrics.json`,
+`safety-report.json`, and only the JSON artifacts named by the case. Missing,
+malformed, identity-mismatched, or path-escaping evidence fails closed. It
+writes `runtime-artifact-eval.json` and `runtime-artifact-eval.md`; a failed
+evaluation exits with status 1, while invalid CLI or case configuration exits
+with status 2.
+
+`demo-research-runtime.json` is the first real-runtime case. It verifies a
+completed offline research run, zero LLM and action-tool calls, page
+observation, no final-submit or high-risk action, and the expected structured
+research artifact. Run the evaluator regressions with:
+
+```bash
+npm run test:eval:runtime-artifacts
+npm run test:eval:runtime-artifact-report
+npm run test:eval:runtime-artifact-e2e
+```
+
 ## Runtime Memory And Resume
 
 Web Buddy keeps run recovery and user memory separate:

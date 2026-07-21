@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "runtime-artifact-eval-case/v1",
+  "id": "demo-research-runtime",
+  "description": "Verify the offline research runtime completes with durable evidence and no high-risk actions.",
+  "expected": {
+    "source": "benchmark",
+    "scenario": "demo-research"
+  },
+  "criteria": [
+    {
+      "id": "run-completed",
+      "type": "run_status",
+      "expected": "completed"
+    },
+    {
+      "id": "no-llm-calls",
+      "type": "metric_threshold",
+      "field": "llmCalls",
+      "operator": "eq",
+      "value": 0
+    },
+    {
+      "id": "no-action-tools",
+      "type": "metric_threshold",
+      "field": "actionToolCalls",
+      "operator": "eq",
+      "value": 0
+    },
+    {
+      "id": "observed-page",
+      "type": "metric_threshold",
+      "field": "browserSnapshots",
+      "operator": "gte",
+      "value": 1
+    },
+    {
+      "id": "no-final-submit",
+      "type": "safety_flag",
+      "field": "finalSubmitAttempted",
+      "expected": false
+    },
+    {
+      "id": "no-high-risk-actions",
+      "type": "safety_threshold",
+      "field": "highRiskActionCount",
+      "operator": "eq",
+      "value": 0
+    },
+    {
+      "id": "research-summary-present",
+      "type": "artifact_present",
+      "artifact": "research-summary.json"
+    },
+    {
+      "id": "three-plans",
+      "type": "artifact_value",
+      "artifact": "research-summary.json",
+      "path": ["plans"],
+      "operator": "length_equals",
+      "value": 3
+    },
+    {
+      "id": "three-faqs",
+      "type": "artifact_value",
+      "artifact": "research-summary.json",
+      "path": ["faqs"],
+      "operator": "length_equals",
+      "value": 3
+    }
+  ]
+}
