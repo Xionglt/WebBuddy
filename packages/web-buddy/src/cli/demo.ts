@@ -178,8 +178,10 @@ function printHeader(title: string, config: AgentConfig, mode: AgentMode, extra?
   const rows: Record<string, string> = {
     mode: mode,
     browser: `${config.browser.headless ? 'headless' : 'headful (visible)'}${config.browser.visualHighlight ? ' + highlights' : ''}`,
-    resume: config.resumePath,
-    model: config.model.apiKey ? `${config.model.name} @ ${config.model.baseUrl}` : '(none — heuristic fallback only)',
+    resume: mode === 'demo-research' ? 'not used' : config.resumePath,
+    model: mode === 'demo-research'
+      ? 'disabled (offline fixture)'
+      : config.model.apiKey ? `${config.model.name} @ ${config.model.baseUrl}` : '(none — heuristic fallback only)',
     'human gate': config.human.mode,
     permission: config.human.permissionMode,
   }

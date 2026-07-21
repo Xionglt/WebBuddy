@@ -439,8 +439,18 @@ export async function runJobApplicationAgent(options: RunOptions = {}): Promise<
 }
 
 async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<AgentRunResult> {
-  const config = options.config ?? loadConfig()
   const mode: AgentMode = options.mode ?? 'fill'
+  const loadedConfig = options.config ?? loadConfig()
+  const config = mode === 'demo-research'
+    ? {
+        ...loadedConfig,
+        model: {
+          ...loadedConfig.model,
+          apiKey: null,
+          authToken: null,
+        },
+      }
+    : loadedConfig
   const taskType = resolveRecruitingTaskType(mode, options.taskType)
   const emit = options.onEvent ?? ((_e: AgentEvent) => {})
   const gate: HumanGate = options.gate ?? (config.human.mode === 'auto' ? new AutoHumanGate(undefined, { allowLocalFinalSubmit: mode === 'auto-apply' }) : new CliHumanGate())
