@@ -42,7 +42,7 @@ export function shouldMicroCompact(
   tokenBudget: TokenBudgetSnapshot,
   options: MicroCompactionOptions = {},
 ): { compact: boolean; reason?: string } {
-  const total = tokenBudget.estimatedTotalTokens ?? 0
+  const messageTokens = (tokenBudget.estimatedInputTokens ?? 0) + (tokenBudget.estimatedToolResultTokens ?? 0)
   const tool = tokenBudget.estimatedToolResultTokens ?? 0
   const threshold = tokenBudget.compactThresholdTokens
   const toolPressureRatio = normalizeRatio(options.toolResultPressureRatio, DEFAULT_TOOL_RESULT_PRESSURE_RATIO)
@@ -51,10 +51,10 @@ export function shouldMicroCompact(
   if (messages.some((message) => message.role === 'tool' && message.content.length > minToolResultChars(options))) {
     return { compact: true, reason: 'A large tool result exceeded the micro-compaction threshold.' }
   }
-  if (total > 0 && tool / total >= toolPressureRatio) {
-    return { compact: true, reason: `Tool results account for ${Math.round((tool / total) * 100)}% of context.` }
+  if (messageTokens > 0 && tool / messageTokens >= toolPressureRatio) {
+    return { compact: true, reason: `Tool results account for ${Math.round((tool / messageTokens) * 100)}% of message context.` }
   }
-  if (threshold > 0 && total >= threshold * totalPressureRatio) {
+  if (threshold > 0 && messageTokens >= threshold * totalPressureRatio) {
     return { compact: true, reason: `Estimated context reached ${Math.round(totalPressureRatio * 100)}% of compact threshold.` }
   }
   return { compact: false }

@@ -24,7 +24,9 @@ assert.deepEqual(inputBudget.snapshot(), {
   compactThresholdTokens: Math.ceil(DEFAULT_MAX_INPUT_TOKENS * 0.8),
   estimatedInputTokens: 3,
   estimatedToolResultTokens: 0,
+  estimatedToolSchemaTokens: 0,
   estimatedTotalTokens: 3,
+  selectedToolCount: 0,
   compactRecommended: false,
   usingDefaultMaxInputTokens: true,
   warnings: [
@@ -65,6 +67,45 @@ const chatEstimate = estimateChatMessages(messages)
 assert(chatEstimate.inputTokens > 0, 'system/user/assistant messages should count as input tokens')
 assert(chatEstimate.toolResultTokens > 0, 'tool messages should count as tool result tokens')
 assert.equal(chatEstimate.totalTokens, chatEstimate.inputTokens + chatEstimate.toolResultTokens)
+
+const tools = [
+  {
+    type: 'function',
+    function: {
+      name: 'browser_snapshot',
+      description: 'Capture the current browser page and return stable element references.',
+      parameters: {
+        type: 'object',
+        properties: {
+          maxElements: { type: 'number', description: 'Maximum interactive elements to return.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: 'Click an element by stable reference.',
+      parameters: {
+        type: 'object',
+        properties: { ref: { type: 'string' } },
+        required: ['ref'],
+      },
+    },
+  },
+]
+const requestEstimate = estimateTokenBudget(messages, {
+  maxInputTokens: 100_000,
+  compactThresholdRatio: 1,
+}, tools)
+assert.equal(requestEstimate.selectedToolCount, tools.length, 'request budget should count selected tools')
+assert((requestEstimate.estimatedToolSchemaTokens ?? 0) > 0, 'request budget should include serialized tool schemas')
+assert.equal(
+  requestEstimate.estimatedTotalTokens,
+  chatEstimate.totalTokens + requestEstimate.estimatedToolSchemaTokens,
+  'complete request tokens should include messages, tool results, and tool schemas',
+)
 
 const recordedMessages = new TokenBudget()
 recordedMessages.recordChatMessages(messages)
@@ -129,7 +170,9 @@ assert.deepEqual(createTokenBudgetSnapshot(), {
   compactThresholdTokens: Math.ceil(DEFAULT_MAX_INPUT_TOKENS * 0.8),
   estimatedInputTokens: 0,
   estimatedToolResultTokens: 0,
+  estimatedToolSchemaTokens: 0,
   estimatedTotalTokens: 0,
+  selectedToolCount: 0,
   compactRecommended: false,
   usingDefaultMaxInputTokens: true,
   warnings: [
