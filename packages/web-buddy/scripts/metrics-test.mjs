@@ -131,6 +131,40 @@ try {
         },
       }),
       JSON.stringify({
+        event: 'token_budget_updated',
+        data: {
+          kind: 'json',
+          value: {
+            schemaVersion: 'token-budget-event/v1',
+            requestBudget: {
+              unit: 'estimated_tokens',
+              estimatedRequest: 1200,
+              estimatedMessages: 700,
+              estimatedToolResults: 200,
+              estimatedToolSchemas: 300,
+              selectedTools: 8,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        event: 'token_budget_updated',
+        data: {
+          kind: 'json',
+          value: {
+            schemaVersion: 'token-budget-event/v1',
+            requestBudget: {
+              unit: 'estimated_tokens',
+              estimatedRequest: 1800,
+              estimatedMessages: 1000,
+              estimatedToolResults: 300,
+              estimatedToolSchemas: 500,
+              selectedTools: 6,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
         event: 'context_selection',
         data: {
           kind: 'json',
@@ -305,6 +339,12 @@ try {
     assert.deepEqual(result.metrics.toolResultArtifactKindCounts, { page_snapshot: 1 })
     assert.deepEqual(result.metrics.toolResultArtifactHashCounts, { ['a'.repeat(64)]: 1 })
     assert.equal(result.metrics.contextCompactions, 1)
+    assert.equal(result.metrics.estimatedRequestTokens, 3000)
+    assert.equal(result.metrics.estimatedRequestTokensPeak, 1800)
+    assert.equal(result.metrics.estimatedMessageTokens, 1700)
+    assert.equal(result.metrics.estimatedToolResultTokens, 500)
+    assert.equal(result.metrics.estimatedToolSchemaTokens, 800)
+    assert.equal(result.metrics.selectedToolCountPeak, 8)
     assert.equal(result.metrics.observationToolCalls, 1)
     assert.equal(result.metrics.actionToolCalls, 2)
     assert.equal(result.metrics.humanToolCalls, 0)
@@ -431,6 +471,12 @@ try {
     assert.deepEqual(metrics.toolResultArtifactKindCounts, {})
     assert.deepEqual(metrics.toolResultArtifactHashCounts, {})
     assert.equal(metrics.contextCompactions, 0)
+    assert.equal(metrics.estimatedRequestTokens, 0)
+    assert.equal(metrics.estimatedRequestTokensPeak, 0)
+    assert.equal(metrics.estimatedMessageTokens, 0)
+    assert.equal(metrics.estimatedToolResultTokens, 0)
+    assert.equal(metrics.estimatedToolSchemaTokens, 0)
+    assert.equal(metrics.selectedToolCountPeak, 0)
     assert.equal(metrics.contextBuilds, 0)
     assert.equal(metrics.contextChars, 0)
     assert.equal(metrics.contextTruncations, 0)

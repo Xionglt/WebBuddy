@@ -189,6 +189,7 @@ function applyEventsJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): voi
     applyMemoryEvent(metrics, event)
     applyToolResultEvent(metrics, event)
     applyContextCompactionEvent(metrics, event)
+    applyTokenBudgetEvent(metrics, event)
   }
 }
 
@@ -329,6 +330,35 @@ function applyToolResultEvent(metrics: RunMetrics, event: AgentTraceEventJson): 
 
 function applyContextCompactionEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
   if (event.event === 'context_compacted') metrics.contextCompactions += 1
+}
+
+function applyTokenBudgetEvent(metrics: RunMetrics, event: AgentTraceEventJson): void {
+  if (event.event !== 'token_budget_updated') return
+  const data = tracePayloadValue(event.data)
+  if (!isRecord(data) || data.schemaVersion !== 'token-budget-event/v1' || !isRecord(data.requestBudget)) return
+
+  const requestBudget = data.requestBudget
+  if (requestBudget.unit !== 'estimated_tokens') return
+  const estimatedRequest = nonNegativeNumber(requestBudget.estimatedRequest)
+  const estimatedMessages = nonNegativeNumber(requestBudget.estimatedMessages)
+  const estimatedToolResults = nonNegativeNumber(requestBudget.estimatedToolResults)
+  const estimatedToolSchemas = nonNegativeNumber(requestBudget.estimatedToolSchemas)
+  const selectedTools = nonNegativeNumber(requestBudget.selectedTools)
+  if (
+    estimatedRequest === undefined ||
+    estimatedMessages === undefined ||
+    estimatedToolResults === undefined ||
+    estimatedToolSchemas === undefined ||
+    selectedTools === undefined ||
+    estimatedRequest !== estimatedMessages + estimatedToolResults + estimatedToolSchemas
+  ) return
+
+  metrics.estimatedRequestTokens += estimatedRequest
+  metrics.estimatedRequestTokensPeak = Math.max(metrics.estimatedRequestTokensPeak, estimatedRequest)
+  metrics.estimatedMessageTokens += estimatedMessages
+  metrics.estimatedToolResultTokens += estimatedToolResults
+  metrics.estimatedToolSchemaTokens += estimatedToolSchemas
+  metrics.selectedToolCountPeak = Math.max(metrics.selectedToolCountPeak, selectedTools)
 }
 
 function applyLegacyTraceJsonl(metrics: RunMetrics, inputs: ResolvedTraceInputs): void {
@@ -482,6 +512,11 @@ function dataRecord(value: unknown): Record<string, unknown> | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  const number = numberValue(value)
+  return number !== undefined && number >= 0 ? number : undefined
 }
 
 function stringValue(value: unknown): string | undefined {

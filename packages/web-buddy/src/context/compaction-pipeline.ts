@@ -23,10 +23,11 @@ import {
   type TokenBudgetOptions,
   type TokenBudgetSnapshot,
 } from '../kernel/token-budget.js'
-import type { ChatMessage } from '../sdk/llm.js'
+import type { ChatMessage, ToolSchema } from '../sdk/llm.js'
 
 export interface ContextCompactionPipelineInput extends Omit<ContextCompactionInput, 'messages' | 'semanticSummary' | 'compactMode'> {
   messages: ChatMessage[]
+  tools?: ToolSchema[]
   systemContent: string
   tokenBudgetOptions?: TokenBudgetOptions
   /** Legacy fixed-count override. The default path retains a token-budgeted raw tail. */
@@ -83,7 +84,7 @@ export const DEFAULT_RECENT_RAW_TOKEN_RATIO = 0.2
 export async function compactContextIfNeeded(
   input: ContextCompactionPipelineInput,
 ): Promise<ContextCompactionPipelineResult> {
-  const tokenBudget = estimateTokenBudget(input.messages, input.tokenBudgetOptions)
+  const tokenBudget = estimateTokenBudget(input.messages, input.tokenBudgetOptions, input.tools)
   let workingMessages = input.messages
   let microCompaction: MicroCompactionResult | undefined
   let postMicroTokenBudget: TokenBudgetSnapshot | undefined
@@ -92,7 +93,7 @@ export async function compactContextIfNeeded(
     microCompaction = microCompactMessages(workingMessages, input.microCompaction)
     if (microCompaction.applied) {
       workingMessages = microCompaction.messages
-      postMicroTokenBudget = estimateTokenBudget(workingMessages, input.tokenBudgetOptions)
+      postMicroTokenBudget = estimateTokenBudget(workingMessages, input.tokenBudgetOptions, input.tools)
     }
   }
 
@@ -164,7 +165,7 @@ export async function compactContextIfNeeded(
     finalCompaction.compactedMessage,
     ...recent.messages,
   ]
-  const postCompactionTokenBudget = estimateTokenBudget(compactedMessages, input.tokenBudgetOptions)
+  const postCompactionTokenBudget = estimateTokenBudget(compactedMessages, input.tokenBudgetOptions, input.tools)
   return {
     messages: compactedMessages,
     changed: true,

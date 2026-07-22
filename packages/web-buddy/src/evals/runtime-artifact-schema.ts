@@ -27,6 +27,12 @@ export type RuntimeArtifactMetricField =
   | 'toolResultArtifacts'
   | 'toolResultArtifactBytes'
   | 'contextCompactions'
+  | 'estimatedRequestTokens'
+  | 'estimatedRequestTokensPeak'
+  | 'estimatedMessageTokens'
+  | 'estimatedToolResultTokens'
+  | 'estimatedToolSchemaTokens'
+  | 'selectedToolCountPeak'
   | 'contextBuilds'
   | 'contextChars'
   | 'contextTruncations'
@@ -187,6 +193,12 @@ export const RUNTIME_ARTIFACT_METRIC_FIELDS = new Set<RuntimeArtifactMetricField
   'toolResultArtifacts',
   'toolResultArtifactBytes',
   'contextCompactions',
+  'estimatedRequestTokens',
+  'estimatedRequestTokensPeak',
+  'estimatedMessageTokens',
+  'estimatedToolResultTokens',
+  'estimatedToolSchemaTokens',
+  'selectedToolCountPeak',
   'contextBuilds',
   'contextChars',
   'contextTruncations',
@@ -201,6 +213,15 @@ export const RUNTIME_ARTIFACT_METRIC_FIELDS = new Set<RuntimeArtifactMetricField
   'streamJsonBytes',
   'runLogBytes',
   'promptBytes',
+])
+
+export const RUNTIME_ARTIFACT_OPTIONAL_METRIC_FIELDS = new Set<RuntimeArtifactMetricField>([
+  'estimatedRequestTokens',
+  'estimatedRequestTokensPeak',
+  'estimatedMessageTokens',
+  'estimatedToolResultTokens',
+  'estimatedToolSchemaTokens',
+  'selectedToolCountPeak',
 ])
 
 export const RUNTIME_ARTIFACT_SAFETY_FLAG_FIELDS = new Set<RuntimeArtifactSafetyFlagField>([

@@ -62,6 +62,12 @@ export interface RunMetrics {
   toolResultArtifactKindCounts: Record<string, number>
   toolResultArtifactHashCounts: Record<string, number>
   contextCompactions: number
+  estimatedRequestTokens: number
+  estimatedRequestTokensPeak: number
+  estimatedMessageTokens: number
+  estimatedToolResultTokens: number
+  estimatedToolSchemaTokens: number
+  selectedToolCountPeak: number
   contextBuilds: number
   contextChars: number
   contextTruncations: number
@@ -129,6 +135,12 @@ export function emptyRunMetrics(input: {
     toolResultArtifactKindCounts: {},
     toolResultArtifactHashCounts: {},
     contextCompactions: 0,
+    estimatedRequestTokens: 0,
+    estimatedRequestTokensPeak: 0,
+    estimatedMessageTokens: 0,
+    estimatedToolResultTokens: 0,
+    estimatedToolSchemaTokens: 0,
+    selectedToolCountPeak: 0,
     contextBuilds: 0,
     contextChars: 0,
     contextTruncations: 0,

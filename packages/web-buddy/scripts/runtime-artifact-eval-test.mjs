@@ -21,6 +21,35 @@ try {
   assert.equal(passing.runId, 'runtime-eval-run')
   assert.equal(passing.sessionId, 'run_runtime-eval-run')
 
+  const requestBudgetDir = await writeEvidence(join(root, 'request-budget'), {
+    requestMetrics: {
+      estimatedRequestTokens: 3000,
+      estimatedRequestTokensPeak: 1800,
+      estimatedMessageTokens: 1700,
+      estimatedToolResultTokens: 500,
+      estimatedToolSchemaTokens: 800,
+      selectedToolCountPeak: 8,
+    },
+  })
+  const requestBudgetCase = researchCase()
+  requestBudgetCase.criteria = [{
+    id: 'request-budget-peak',
+    type: 'metric_threshold',
+    field: 'estimatedRequestTokensPeak',
+    operator: 'gte',
+    value: 1800,
+  }]
+  const requestBudget = runRuntimeArtifactEval({ traceDir: requestBudgetDir, evalCase: requestBudgetCase })
+  assert.equal(requestBudget.passed, true)
+  assert.equal(findCheck(requestBudget, 'request-budget-peak').actual, 1800)
+
+  const legacyMetricsDir = await writeEvidence(join(root, 'legacy-request-metrics'), {
+    omitRequestMetrics: true,
+  })
+  const legacyMetrics = runRuntimeArtifactEval({ traceDir: legacyMetricsDir, evalCase: researchCase() })
+  assert.equal(legacyMetrics.passed, true, 'historical run-metrics/v1 files may omit request token fields')
+  assert.equal(legacyMetrics.loadErrors.length, 0)
+
   const missingSafetyDir = await writeEvidence(join(root, 'missing-safety'), { safety: false })
   const missingSafety = runRuntimeArtifactEval({ traceDir: missingSafetyDir, evalCase: researchCase() })
   assert.equal(missingSafety.passed, false)
@@ -209,6 +238,15 @@ async function writeEvidence(dir, options = {}) {
     llmCalls: 0,
     actionToolCalls: 0,
     browserSnapshots: 1,
+    ...(options.requestMetrics ?? {}),
+  }
+  if (options.omitRequestMetrics) {
+    delete metrics.estimatedRequestTokens
+    delete metrics.estimatedRequestTokensPeak
+    delete metrics.estimatedMessageTokens
+    delete metrics.estimatedToolResultTokens
+    delete metrics.estimatedToolSchemaTokens
+    delete metrics.selectedToolCountPeak
   }
   const safety = {
     schemaVersion: 'safety-report/v1',

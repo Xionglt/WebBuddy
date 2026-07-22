@@ -1,4 +1,4 @@
-import type { ChatMessage } from '../sdk/llm.js'
+import type { ChatMessage, ToolSchema } from '../sdk/llm.js'
 
 export interface TokenBudgetSnapshot {
   version: 1
@@ -8,7 +8,9 @@ export interface TokenBudgetSnapshot {
   compactThresholdTokens: number
   estimatedInputTokens?: number
   estimatedToolResultTokens?: number
+  estimatedToolSchemaTokens?: number
   estimatedTotalTokens?: number
+  selectedToolCount?: number
   compactRecommended: boolean
   usingDefaultMaxInputTokens?: boolean
   warnings?: string[]
@@ -25,6 +27,11 @@ export interface TokenBudgetEstimate {
   inputTokens: number
   toolResultTokens: number
   totalTokens: number
+}
+
+export interface ToolSchemaTokenEstimate {
+  toolSchemaTokens: number
+  selectedToolCount: number
 }
 
 const DEFAULT_COMPACT_THRESHOLD_RATIO = 0.8
@@ -81,8 +88,12 @@ export function createTokenBudgetSnapshot(options: TokenBudgetOptions = {}): Tok
   return new TokenBudget(options).snapshot()
 }
 
-export function estimateTokenBudget(messages: ChatMessage[], options: TokenBudgetOptions = {}): TokenBudgetSnapshot {
-  return createSnapshot(estimateChatMessages(messages), options)
+export function estimateTokenBudget(
+  messages: ChatMessage[],
+  options: TokenBudgetOptions = {},
+  tools: ToolSchema[] = [],
+): TokenBudgetSnapshot {
+  return createSnapshot(estimateChatMessages(messages), options, estimateToolSchemas(tools))
 }
 
 export function estimateChatMessages(messages: ChatMessage[]): TokenBudgetEstimate {
@@ -106,6 +117,13 @@ export function estimateToolObservationTokens(observation: unknown): number {
   return estimateTokens(stringifyForTokenEstimate(observation))
 }
 
+export function estimateToolSchemas(tools: ToolSchema[]): ToolSchemaTokenEstimate {
+  return {
+    toolSchemaTokens: tools.length === 0 ? 0 : estimateTokens(stringifyForTokenEstimate(tools)),
+    selectedToolCount: tools.length,
+  }
+}
+
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
 }
@@ -126,7 +144,11 @@ function estimateChatMessageTokens(message: ChatMessage): number {
   return tokens
 }
 
-function createSnapshot(estimate: TokenBudgetEstimate, options: TokenBudgetOptions): TokenBudgetSnapshot {
+function createSnapshot(
+  estimate: TokenBudgetEstimate,
+  options: TokenBudgetOptions,
+  tools: ToolSchemaTokenEstimate = { toolSchemaTokens: 0, selectedToolCount: 0 },
+): TokenBudgetSnapshot {
   const compactThresholdRatio = normalizeCompactThresholdRatio(options.compactThresholdRatio)
   const resolved = resolveMaxInputTokens(options)
   const max = resolved.maxInputTokens
@@ -139,8 +161,10 @@ function createSnapshot(estimate: TokenBudgetEstimate, options: TokenBudgetOptio
     compactThresholdTokens,
     estimatedInputTokens: estimate.inputTokens,
     estimatedToolResultTokens: estimate.toolResultTokens,
-    estimatedTotalTokens: estimate.totalTokens,
-    compactRecommended: estimate.totalTokens >= compactThresholdTokens,
+    estimatedToolSchemaTokens: tools.toolSchemaTokens,
+    estimatedTotalTokens: estimate.totalTokens + tools.toolSchemaTokens,
+    selectedToolCount: tools.selectedToolCount,
+    compactRecommended: estimate.totalTokens + tools.toolSchemaTokens >= compactThresholdTokens,
     ...(resolved.usingDefaultMaxInputTokens ? { usingDefaultMaxInputTokens: true } : {}),
     ...(resolved.warnings.length ? { warnings: resolved.warnings } : {}),
   }

@@ -5,6 +5,7 @@ import type { RunManifest } from '../metrics/trace-inputs.js'
 import type { SafetyReport } from '../policy/safety-report.js'
 import {
   RUNTIME_ARTIFACT_METRIC_FIELDS,
+  RUNTIME_ARTIFACT_OPTIONAL_METRIC_FIELDS,
   RUNTIME_ARTIFACT_RUN_SOURCES,
   RUNTIME_ARTIFACT_SAFETY_FLAG_FIELDS,
   RUNTIME_ARTIFACT_SAFETY_METRIC_FIELDS,
@@ -173,11 +174,14 @@ function loadRunMetrics(path: string, traceDir: string, errors: string[]): RunMe
     errors.push(`Unsupported metrics schema: ${String(value.schemaVersion)}`)
     return undefined
   }
-  const numericFieldsValid = [...RUNTIME_ARTIFACT_METRIC_FIELDS]
+  const requiredNumericFieldsValid = [...RUNTIME_ARTIFACT_METRIC_FIELDS]
+    .filter((field) => !RUNTIME_ARTIFACT_OPTIONAL_METRIC_FIELDS.has(field))
     .every((field) => typeof value[field] === 'number' && Number.isFinite(value[field]))
+  const optionalNumericFieldsValid = [...RUNTIME_ARTIFACT_OPTIONAL_METRIC_FIELDS]
+    .every((field) => value[field] === undefined || (typeof value[field] === 'number' && Number.isFinite(value[field])))
   if (!isNonEmptyString(value.generatedAt) || !isNonEmptyString(value.source) ||
       !['completed', 'blocked', 'incomplete', 'failed', 'unknown'].includes(String(value.status)) ||
-      !isNonEmptyString(value.failureCategory) || !numericFieldsValid ||
+      !isNonEmptyString(value.failureCategory) || !requiredNumericFieldsValid || !optionalNumericFieldsValid ||
       !isRecord(value.policy) || !isRecord(value.permission) || !Array.isArray(value.warnings)) {
     errors.push('Metrics is missing required fields or contains invalid field values.')
     return undefined

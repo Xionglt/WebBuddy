@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { compactContextIfNeeded } from '../dist/context/compaction-pipeline.js'
+import { shouldMicroCompact } from '../dist/context/micro-compaction.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../dist/context/run-summary.js'
+import { estimateTokenBudget } from '../dist/kernel/token-budget.js'
 
 class SemanticLlm {
   constructor() {
@@ -151,6 +153,71 @@ assert.equal(microOnly.messages.length, messages.length, 'micro compact should p
 assert(microOnly.messages[3].content.includes('[micro_compacted_tool_result'), 'old tool result should be replaced with a micro compact marker')
 assert.equal(semanticLlm.calls.length, 1, 'micro-only path should not call semantic LLM')
 assertToolBoundariesIntact(microOnly.messages)
+
+const schemaPressureMessages = [
+  { role: 'system', content: 'system' },
+  { role: 'user', content: 'Inspect the current page.' },
+]
+const schemaPressure = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_schema_pressure',
+  step: 9,
+  goal: 'Compact when the complete request reaches the model limit.',
+  messages: schemaPressureMessages,
+  tools: [
+    {
+      type: 'function',
+      function: {
+        name: 'large_schema_tool',
+        description: 'D'.repeat(1_600),
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+  ],
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 300,
+    compactThresholdRatio: 1,
+  },
+  semanticCompaction: { enabled: false },
+})
+
+assert.equal(schemaPressure.fullCompactionApplied, true, 'tool schema pressure should participate in full compaction')
+assert.equal(schemaPressure.tokenBudget.selectedToolCount, 1)
+assert((schemaPressure.tokenBudget.estimatedToolSchemaTokens ?? 0) > 300)
+assert(
+  (schemaPressure.tokenBudget.estimatedTotalTokens ?? 0) > (schemaPressure.tokenBudget.estimatedInputTokens ?? 0),
+  'complete request budget should exceed message-only input when tools are selected',
+)
+
+const toolPressureMessages = [
+  { role: 'system', content: 'system' },
+  {
+    role: 'assistant',
+    content: '',
+    tool_calls: [{ id: 'pressure_tool', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+  },
+  { role: 'tool', tool_call_id: 'pressure_tool', name: 'lookup', content: 'R'.repeat(2_000) },
+]
+const toolPressureBudget = estimateTokenBudget(
+  toolPressureMessages,
+  { maxInputTokens: 120_000 },
+  [{
+    type: 'function',
+    function: {
+      name: 'large_catalog_tool',
+      description: 'S'.repeat(12_000),
+      parameters: { type: 'object', properties: {} },
+    },
+  }],
+)
+assert.equal(
+  shouldMicroCompact(toolPressureMessages, toolPressureBudget).compact,
+  true,
+  'fixed tool schemas should not dilute tool-result pressure inside compressible messages',
+)
 
 const dynamicSemanticLlm = new SemanticLlm()
 const dynamicMessages = [
