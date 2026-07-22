@@ -1361,20 +1361,6 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     const requestBudget = compaction.postCompactionTokenBudget
       ?? compaction.postMicroTokenBudget
       ?? compaction.tokenBudget
-    ctx.trace.agentTrace?.recordEvent('token_budget_updated', {
-      schemaVersion: 'token-budget-event/v1',
-      turnId,
-      step,
-      requestBudget: {
-        unit: 'estimated_tokens',
-        estimatedRequest: requestBudget.estimatedTotalTokens ?? 0,
-        estimatedMessages: requestBudget.estimatedInputTokens ?? 0,
-        estimatedToolResults: requestBudget.estimatedToolResultTokens ?? 0,
-        estimatedToolSchemas: requestBudget.estimatedToolSchemaTokens ?? 0,
-        selectedTools: requestBudget.selectedToolCount ?? 0,
-      },
-    })
-
     if (!compaction.fullCompactionApplied) {
       if (compaction.changed) {
         messages = compaction.messages
@@ -1398,10 +1384,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           },
         })
       }
-      return
+      return requestBudget
     }
 
-    if (!compaction.compaction || !compaction.postCompactionTokenBudget) return
+    if (!compaction.compaction || !compaction.postCompactionTokenBudget) return requestBudget
 
     await sessionTranscript({
       type: 'context_compaction',
@@ -1449,6 +1435,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     })
 
     messages = compaction.messages
+    return requestBudget
   }
 
   while (step < maxSteps) {
@@ -1460,9 +1447,22 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     const abortedBeforeModel = await checkAbort(turnId)
     if (abortedBeforeModel) return abortedBeforeModel
     await injectAsyncTaskNotifications(turnId)
-    await maybeCompactMessages(turnId)
+    const requestBudget = await maybeCompactMessages(turnId)
     const abortedAfterCompaction = await checkAbort(turnId)
     if (abortedAfterCompaction) return abortedAfterCompaction
+    ctx.trace.agentTrace?.recordEvent('token_budget_updated', {
+      schemaVersion: 'token-budget-event/v1',
+      turnId,
+      step,
+      requestBudget: {
+        unit: 'estimated_tokens',
+        estimatedRequest: requestBudget.estimatedTotalTokens ?? 0,
+        estimatedMessages: requestBudget.estimatedInputTokens ?? 0,
+        estimatedToolResults: requestBudget.estimatedToolResultTokens ?? 0,
+        estimatedToolSchemas: requestBudget.estimatedToolSchemaTokens ?? 0,
+        selectedTools: requestBudget.selectedToolCount ?? 0,
+      },
+    })
     let completion
     try {
       completion = await llm.chatWithTools(messages, { tools, temperature: 0.2 })

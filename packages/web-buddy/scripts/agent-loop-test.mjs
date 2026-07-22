@@ -10,6 +10,7 @@ import assert from 'node:assert'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { ContextCompactor } from '../dist/context/compaction.js'
 import { COMPACTED_RUN_CONTEXT_PREFIX } from '../dist/context/run-summary.js'
 import { estimateTokenBudget } from '../dist/kernel/token-budget.js'
 import { observationManager } from '../dist/observation/observation-manager.js'
@@ -739,6 +740,67 @@ async function runCompactionScenario() {
   }
 }
 
+async function runAbortAfterCompactionScenario() {
+  const root = mkdtempSync(join(tmpdir(), 'mfa-agent-loop-abort-after-compaction-'))
+  const trace = new TraceRecorder(root, {
+    runId: 'agent-loop-abort-after-compaction-run',
+    source: 'local-runtime',
+    scenario: 'agent-loop-abort-after-compaction-test',
+    profile: 'test',
+    goal: 'Do not record a request budget when abort wins before the model call.',
+  })
+  const controller = new AbortController()
+  const llm = new AbortAfterCompactionLlm()
+  const registry = new ToolRegistry([{
+    name: 'make_large_context',
+    description: 'Create enough observation text to trigger compaction.',
+    category: 'observation',
+    parameters: { type: 'object', properties: {} },
+    inherentRisk: 'L1',
+    async run() {
+      return { observation: `large observation\n${'A'.repeat(24_000)}`, pageChanged: false }
+    },
+  }])
+  const compactor = new ContextCompactor()
+
+  try {
+    const sessionId = 'abort-after-compaction-loop'
+    seedFreshObservation(sessionId)
+    const result = await runAgentLoop({
+      goal: 'Do not record a request budget when abort wins before the model call.',
+      resume: testProfile(),
+      llm,
+      registry,
+      ctx: { sessionId, highlight: false, trace },
+      gate: new RecordingGate([]),
+      maxSteps: 3,
+      abortSignal: controller.signal,
+      contextBudget: { maxInputTokens: 3000, compactThresholdRatio: 1 },
+      contextCompactor: {
+        compact(input) {
+          controller.abort('stop before the compacted request is sent')
+          return compactor.compact(input)
+        },
+      },
+    })
+    const traceEvents = readFileSync(join(trace.agentTrace.dir, 'events.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+    const requestTurns = traceEvents
+      .filter((event) => event.event === 'token_budget_updated')
+      .map((event) => event.data?.value?.turnId)
+
+    assert.equal(result.blocked, true)
+    assert.equal(llm.calls, 1, 'abort should prevent the compacted request from reaching the model')
+    assert.deepEqual(requestTurns, ['turn_001'], 'Agent Trace should only count requests that reach the model boundary')
+  } finally {
+    await sessionManager.closeAll().catch(() => {})
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 async function createRecorder(store, sessionId, runId, goal = 'Exercise permission integration.') {
   const session = await store.create({
     sessionId,
@@ -807,6 +869,23 @@ class OneToolThenDoneLlm {
       return { content: 'Requesting one tool.', toolCalls: [this.call] }
     }
     return { content: 'Permission scenario complete.', toolCalls: [] }
+  }
+}
+
+class AbortAfterCompactionLlm {
+  constructor() {
+    this.hasKey = true
+    this.label = 'abort-after-compaction-llm'
+    this.calls = 0
+  }
+
+  async chatWithTools() {
+    this.calls += 1
+    assert.equal(this.calls, 1, 'model should not receive a request after abort')
+    return {
+      content: 'Creating a large observation before compaction.',
+      toolCalls: [{ id: 'abort-before-request', name: 'make_large_context', arguments: {} }],
+    }
   }
 }
 
@@ -955,6 +1034,7 @@ function testProfile() {
 
 await runPermissionScenarios()
 await runCompactionScenario()
+await runAbortAfterCompactionScenario()
 
 console.log('\nagent-loop-test: PASS')
 
