@@ -1,4 +1,4 @@
-import type { ContextItem, OwnerScope } from '../task/contracts.js'
+import type { ContentTrust, ContextItem, OwnerScope } from '../task/contracts.js'
 import type {
   MemoryLifecycleRecord,
   MemoryLifecycleService,
@@ -40,7 +40,7 @@ function memoryRecordContextItem(
     kind: 'lifecycle_memory',
     content: record.content!,
     origin: 'memory',
-    trust: record.trust === 'trusted_runtime' ? 'user_authorized' : record.trust,
+    trust: memoryContextTrust(record.trust),
     instructionAuthority: 'data_only',
     sensitivity: record.sensitivity,
     provenance: {
@@ -82,6 +82,12 @@ function memoryRecordContextItem(
       conflictIds: record.conflicts.map((item) => item.entryId),
     },
   }
+}
+
+function memoryContextTrust(trust: ContentTrust): ContentTrust {
+  return trust === 'user_authorized' || trust === 'trusted_runtime'
+    ? 'untrusted_external'
+    : trust
 }
 
 function targetScope(ownerScope: OwnerScope): MemoryTargetScope | undefined {

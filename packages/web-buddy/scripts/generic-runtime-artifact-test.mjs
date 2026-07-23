@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { createWebTaskRuntimeDriver } from '../dist/sdk/web-task.js'
 import { loadConfig } from '../dist/sdk/config.js'
 import { snapshotWebTaskInput } from '../dist/task/contracts.js'
+import { retrieveLifecycleMemoryContext } from '../dist/memory/context-provider.js'
 
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-generic-runtime-artifact-'))
 
@@ -50,7 +51,25 @@ try {
     emit() {},
   }
 
-  const blocked = await createWebTaskRuntimeDriver({ config }).execute(request)
+  const blocked = await createWebTaskRuntimeDriver({
+    config,
+    memoryContextProvider: ({ input, sessionId, runId, revision }) => retrieveLifecycleMemoryContext({
+      service: {
+        async retrieve() {
+          return {
+            schemaVersion: 'memory-lifecycle-retrieval-result/v2',
+            mode: 'keyword',
+            records: [{ record: lifecycleMemoryRecord(), score: 1, reason: 'keyword' }],
+          }
+        },
+      },
+      ownerScope: input.ownerScope,
+      query: input.goal.instruction,
+      sessionId,
+      runId,
+      revision,
+    }),
+  }).execute(request)
   assert.equal(blocked.status, 'blocked')
   assert.equal(blocked.artifacts.length, 1)
   await assertRuntimeArtifact(blocked.artifacts[0], {
@@ -223,5 +242,33 @@ function noSubmitCriterion() {
     description: 'The generic runtime must not submit.',
     actionKinds: ['submit'],
     outcome: 'not_performed',
+  }
+}
+
+function lifecycleMemoryRecord() {
+  return {
+    schemaVersion: 'memory-lifecycle-record/v2',
+    entryId: 'runtime-artifact-memory',
+    contentVersionId: 'runtime-artifact-memory:v1',
+    revision: 1,
+    state: 'active',
+    content: { preference: 'Keep runtime artifacts auditable.' },
+    contentHash: 'b'.repeat(64),
+    scope: { kind: 'user', tenantId: 'artifact-test-tenant', userId: 'artifact-test-user' },
+    trust: 'user_authorized',
+    sensitivity: 'internal',
+    provenance: {
+      contentId: 'runtime-artifact-memory',
+      capturedAt: '2026-07-21T00:00:00.000Z',
+      parentContentIds: [],
+      runId: 'memory-run',
+    },
+    derivedFrom: [],
+    transformChain: [],
+    confidence: 1,
+    createdAt: '2026-07-21T00:00:00.000Z',
+    updatedAt: '2026-07-21T00:00:00.000Z',
+    supersedes: [],
+    conflicts: [],
   }
 }

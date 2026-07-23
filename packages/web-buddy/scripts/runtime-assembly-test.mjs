@@ -9,6 +9,7 @@ import { assembleCompletionArtifacts } from '../dist/runtime/local/result-assemb
 import { FileToolResultStore } from '../dist/tools/tool-result-store.js'
 import { retrieveLifecycleMemoryContext } from '../dist/memory/context-provider.js'
 import { evaluateCompletionContract } from '../dist/task/completion-contract.js'
+import { validateContextItem } from '../dist/task/contracts.js'
 
 const config = {
   agent: {
@@ -144,6 +145,13 @@ try {
   })
   assert.equal(unsupportedArtifacts.length, 0)
 
+  const memoryTrustCases = [
+    ['user-authorized-memory', 'user_authorized', 'untrusted_external'],
+    ['trusted-runtime-memory', 'trusted_runtime', 'untrusted_external'],
+    ['untrusted-memory', 'untrusted_external', 'untrusted_external'],
+    ['derived-memory', 'derived_untrusted', 'derived_untrusted'],
+    ['non-authoritative-memory', 'non_authoritative', 'non_authoritative'],
+  ]
   const memoryItems = await retrieveLifecycleMemoryContext({
     service: {
       async retrieve() {
@@ -151,7 +159,11 @@ try {
           schemaVersion: 'memory-lifecycle-retrieval-result/v2',
           mode: 'keyword',
           records: [
-            { record: memoryRecord('safe-memory', 'internal'), score: 1, reason: 'keyword' },
+            ...memoryTrustCases.map(([entryId, trust], index) => ({
+              record: memoryRecord(entryId, 'internal', trust),
+              score: 1 - index * 0.1,
+              reason: 'keyword',
+            })),
             { record: memoryRecord('secret-memory', 'secret'), score: 0.9, reason: 'keyword' },
           ],
         }
@@ -163,9 +175,32 @@ try {
     revision: 0,
     sessionId: 'runtime-assembly-session',
   })
-  assert.equal(memoryItems.length, 1)
-  assert.equal(memoryItems[0].id, 'lifecycle-memory.safe-memory.r1')
-  assert.equal(memoryItems[0].instructionAuthority, 'data_only')
+  assert.equal(memoryItems.length, memoryTrustCases.length)
+  for (const [entryId, , expectedTrust] of memoryTrustCases) {
+    const item = memoryItems.find((candidate) => candidate.id === `lifecycle-memory.${entryId}.r1`)
+    assert(item)
+    assert.equal(item.origin, 'memory')
+    assert.equal(item.trust, expectedTrust)
+    assert.equal(item.instructionAuthority, 'data_only')
+    assert.equal(item.sensitivity, 'internal')
+    assert.deepEqual(item.provenance, {
+      capturedAt: '2026-07-21T00:00:00.000Z',
+      parentContentIds: [],
+      runId: 'runtime-assembly-run',
+      sessionId: 'runtime-assembly-session',
+      sha256: 'b'.repeat(64),
+    })
+    assert.deepEqual(item.memory, {
+      schemaVersion: 'memory-binding/v1',
+      memoryId: entryId,
+      revision: 1,
+      scope: 'user',
+      status: 'active',
+      supersedesIds: [],
+      conflictIds: [],
+    })
+    assert.doesNotThrow(() => validateContextItem(item))
+  }
 } finally {
   await rm(root, { recursive: true, force: true })
 }
@@ -199,12 +234,12 @@ function contextItem(id, kind, content) {
   }
 }
 
-function memoryRecord(entryId, sensitivity) {
+function memoryRecord(entryId, sensitivity, trust = 'user_authorized') {
   return {
     schemaVersion: 'memory-lifecycle-record/v2', entryId, contentVersionId: `${entryId}:v1`, revision: 1,
     state: 'active', content: { preference: entryId }, contentHash: 'b'.repeat(64),
     scope: { kind: 'user', tenantId: 'tenant-a', userId: 'user-a' },
-    trust: 'user_authorized', sensitivity,
+    trust, sensitivity,
     provenance: { contentId: entryId, capturedAt: '2026-07-21T00:00:00.000Z', parentContentIds: [], runId: 'memory-run' },
     derivedFrom: [], transformChain: [], confidence: 1,
     createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
