@@ -43,6 +43,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Run Memory Eval foundation
+        run: npm run test:memory-eval:built
+
       - name: Run Skill Candidate Plane tests
         run: npm run test:skill-candidates:built
 
