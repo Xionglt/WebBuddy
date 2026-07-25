@@ -1,34 +1,59 @@
 import type { ContentTrust, ContextItem, OwnerScope } from '../task/contracts.js'
 import type {
   MemoryLifecycleRecord,
+  MemoryRetrievalResult,
   MemoryLifecycleService,
 } from './memory-lifecycle.js'
 import type { MemoryTargetScope } from './memory-write-policy.js'
 
-export async function retrieveLifecycleMemoryContext(input: {
+export interface LifecycleMemoryContextInput {
   service: MemoryLifecycleService
-  ownerScope: OwnerScope
+  ownerScope?: OwnerScope
   query: string
   runId: string
   revision: number
   sessionId: string
   maxResults?: number
-}): Promise<ContextItem[]> {
+}
+
+export type LifecycleMemoryContextBatch =
+  | {
+      status: 'retrieved'
+      retrieval: MemoryRetrievalResult
+      contextItems: ContextItem[]
+    }
+  | {
+      status: 'skipped'
+      reason: 'missing_scope' | 'empty_query'
+      contextItems: []
+    }
+
+export async function retrieveLifecycleMemoryContextBatch(
+  input: LifecycleMemoryContextInput,
+): Promise<LifecycleMemoryContextBatch> {
   const scope = targetScope(input.ownerScope)
-  if (!scope || !input.query.trim()) return []
-  const result = await input.service.retrieve({
+  if (!scope) return { status: 'skipped', reason: 'missing_scope', contextItems: [] }
+  if (!input.query.trim()) return { status: 'skipped', reason: 'empty_query', contextItems: [] }
+  const retrieval = await input.service.retrieve({
     schemaVersion: 'memory-lifecycle-retrieve/v2',
     scope,
     query: input.query,
     maxResults: input.maxResults ?? 8,
   })
-  return result.records
+  const contextItems = retrieval.records
     .map((item) => item.record)
     .filter((record) => record.state === 'active'
       && record.content !== null
       && record.sensitivity !== 'auth'
       && record.sensitivity !== 'secret')
     .map((record) => memoryRecordContextItem(record, input))
+  return { status: 'retrieved', retrieval, contextItems }
+}
+
+export async function retrieveLifecycleMemoryContext(
+  input: LifecycleMemoryContextInput,
+): Promise<ContextItem[]> {
+  return (await retrieveLifecycleMemoryContextBatch(input)).contextItems
 }
 function memoryRecordContextItem(
   record: Readonly<MemoryLifecycleRecord>,
@@ -90,7 +115,8 @@ function memoryContextTrust(trust: ContentTrust): ContentTrust {
     : trust
 }
 
-function targetScope(ownerScope: OwnerScope): MemoryTargetScope | undefined {
+function targetScope(ownerScope: OwnerScope | undefined): MemoryTargetScope | undefined {
+  if (!ownerScope) return undefined
   if (ownerScope.userId) {
     return {
       kind: 'user',
