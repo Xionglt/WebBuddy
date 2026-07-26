@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "capability-disclosure-suite/v1",
+  "cases": [
+    {
+      "id": "explore-handoff",
+      "sources": ["scripts/agent-loop-test.mjs#raw-read-only-resume-contract"],
+      "taskType": "explore",
+      "safetyMode": "raw",
+      "asyncTasks": false,
+      "requiredTools": ["agent_done"]
+    },
+    {
+      "id": "apply-entry-login",
+      "sources": ["scripts/agent-runtime-workflow-test.mjs#ContinueAfterLoginLlm"],
+      "taskType": "apply_entry",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_audit", "agent_done"]
+    },
+    {
+      "id": "apply-entry-dialog",
+      "sources": ["scripts/agent-runtime-workflow-test.mjs#ActionableDialogDoneLlm"],
+      "taskType": "apply_entry",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_click_text", "agent_done"]
+    },
+    {
+      "id": "fill-text",
+      "sources": ["scripts/agent-runtime-workflow-test.mjs#PrematureFillDoneLlm"],
+      "taskType": "fill_form",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_audit", "browser_set_field", "agent_done"]
+    },
+    {
+      "id": "fill-select",
+      "sources": ["scripts/agent-runtime-workflow-test.mjs#RequiredSelectPlaceholderLlm"],
+      "taskType": "fill_form",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_audit", "browser_set_field", "agent_done"]
+    },
+    {
+      "id": "fill-resume",
+      "sources": ["scripts/resume-loop-e2e-test.mjs#HandoffResumeLlm"],
+      "taskType": "fill_form",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_snapshot", "browser_upload_file", "browser_click_text", "agent_done"]
+    },
+    {
+      "id": "async-workflow-evaluation",
+      "sources": ["scripts/async-task-agent-loop-test.mjs#spawn-1"],
+      "taskType": "explore",
+      "safetyMode": "raw",
+      "asyncTasks": true,
+      "requiredTools": ["browser_wait", "agent_task_spawn", "agent_task_result", "agent_done"]
+    }
+  ]
+}
