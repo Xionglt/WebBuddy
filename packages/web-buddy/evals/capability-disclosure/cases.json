@@ -3,7 +3,11 @@
   "cases": [
     {
       "id": "explore-handoff",
-      "sources": ["scripts/agent-loop-test.mjs#raw-read-only-resume-contract"],
+      "sources": [{
+        "path": "scripts/agent-loop-test.mjs",
+        "start": "const rawReadOnlyResumeGate = new RecordingCompletionGate('allow')",
+        "end": "const policyDeny = await runLoopScenario({"
+      }],
       "taskType": "explore",
       "safetyMode": "raw",
       "asyncTasks": false,
@@ -11,7 +15,11 @@
     },
     {
       "id": "apply-entry-login",
-      "sources": ["scripts/agent-runtime-workflow-test.mjs#ContinueAfterLoginLlm"],
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class ContinueAfterLoginLlm {",
+        "end": "class ActionableDialogDoneLlm {"
+      }],
       "taskType": "apply_entry",
       "safetyMode": "guarded",
       "asyncTasks": false,
@@ -19,7 +27,11 @@
     },
     {
       "id": "apply-entry-dialog",
-      "sources": ["scripts/agent-runtime-workflow-test.mjs#ActionableDialogDoneLlm"],
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class ActionableDialogDoneLlm {",
+        "end": "class PrematureFillDoneLlm {"
+      }],
       "taskType": "apply_entry",
       "safetyMode": "guarded",
       "asyncTasks": false,
@@ -27,7 +39,11 @@
     },
     {
       "id": "fill-text",
-      "sources": ["scripts/agent-runtime-workflow-test.mjs#PrematureFillDoneLlm"],
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class PrematureFillDoneLlm {",
+        "end": "class RequiredSelectPlaceholderLlm {"
+      }],
       "taskType": "fill_form",
       "safetyMode": "guarded",
       "asyncTasks": false,
@@ -35,7 +51,11 @@
     },
     {
       "id": "fill-select",
-      "sources": ["scripts/agent-runtime-workflow-test.mjs#RequiredSelectPlaceholderLlm"],
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class RequiredSelectPlaceholderLlm {",
+        "end": "class LoginClearingGate {"
+      }],
       "taskType": "fill_form",
       "safetyMode": "guarded",
       "asyncTasks": false,
@@ -43,7 +63,11 @@
     },
     {
       "id": "fill-resume",
-      "sources": ["scripts/resume-loop-e2e-test.mjs#HandoffResumeLlm"],
+      "sources": [{
+        "path": "scripts/resume-loop-e2e-test.mjs",
+        "start": "class HandoffResumeLlm {",
+        "end": "class AutoGate {"
+      }],
       "taskType": "fill_form",
       "safetyMode": "guarded",
       "asyncTasks": false,
@@ -51,7 +75,11 @@
     },
     {
       "id": "async-workflow-evaluation",
-      "sources": ["scripts/async-task-agent-loop-test.mjs#spawn-1"],
+      "sources": [{
+        "path": "scripts/async-task-agent-loop-test.mjs",
+        "start": "function scriptedAsyncLlm() {",
+        "end": "function call(id, name, args) {"
+      }],
       "taskType": "explore",
       "safetyMode": "raw",
       "asyncTasks": true,

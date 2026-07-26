@@ -80,11 +80,17 @@ export type CapabilitySafetyMode = typeof SAFETY_MODES[number]
 
 export interface CapabilityDisclosureCase {
   id: string
-  sources: string[]
+  sources: CapabilityDisclosureSource[]
   taskType: CapabilityTaskType
   safetyMode: CapabilitySafetyMode
   asyncTasks: boolean
   requiredTools: string[]
+}
+
+export interface CapabilityDisclosureSource {
+  path: string
+  start: string
+  end: string
 }
 
 export interface CapabilityDisclosureSuite {
@@ -137,10 +143,16 @@ export function assertCapabilityDisclosureSuite(value: unknown): asserts value i
     const id = requiredString(evalCase.id, `cases[${index}].id`)
     if (ids.has(id)) throw new Error(`Duplicate capability disclosure case id: ${id}`)
     ids.add(id)
-    const sources = stringArray(evalCase.sources, `${id}.sources`)
-    for (const source of sources) {
-      if (!/^scripts\/[a-z0-9][a-z0-9-]*\.mjs#[A-Za-z0-9_-]+$/i.test(source)) {
-        throw new Error(`${id}: invalid source reference ${source}`)
+    if (!Array.isArray(evalCase.sources) || evalCase.sources.length === 0) {
+      throw new Error(`${id}.sources must be a non-empty array.`)
+    }
+    for (const [sourceIndex, candidateSource] of evalCase.sources.entries()) {
+      const source = closedObject(candidateSource, new Set(['path', 'start', 'end']), `${id}.sources[${sourceIndex}]`)
+      const path = requiredString(source.path, `${id}.sources[${sourceIndex}].path`)
+      requiredString(source.start, `${id}.sources[${sourceIndex}].start`)
+      requiredString(source.end, `${id}.sources[${sourceIndex}].end`)
+      if (!/^scripts\/[a-z0-9][a-z0-9-]*\.mjs$/i.test(path)) {
+        throw new Error(`${id}: invalid source reference ${path}`)
       }
     }
     if (!TASK_TYPES.includes(evalCase.taskType as CapabilityTaskType)) {

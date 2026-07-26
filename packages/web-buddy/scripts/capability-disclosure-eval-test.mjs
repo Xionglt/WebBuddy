@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import ts from 'typescript'
 
 import {
   assertCapabilityDisclosureSuite,
@@ -66,7 +67,7 @@ assert.throws(
 assert.throws(
   () => assertCapabilityDisclosureSuite(replaceCase(suite, 0, {
     ...suite.cases[0],
-    source: suite.cases[0].sources[0],
+    source: suite.cases[0].sources[0].path,
   })),
   /unknown field.*source/i,
 )
@@ -80,9 +81,30 @@ assert.throws(
 assert.throws(
   () => assertCapabilityDisclosureSuite(replaceCase(suite, 0, {
     ...suite.cases[0],
-    sources: ['../outside.mjs#fixture'],
+    sources: [{ path: '../outside.mjs', start: 'fixture', end: 'next' }],
   })),
   /source reference/i,
+)
+await assert.rejects(
+  () => assertSourceEvidence(replaceCase(suite, 0, {
+    ...suite.cases[0],
+    requiredTools: [],
+  })),
+  /requiredTools must equal the complete source-bound tool call set/i,
+)
+await assert.rejects(
+  () => assertSourceEvidence(replaceCase(suite, 0, {
+    ...suite.cases[0],
+    requiredTools: [...suite.cases[0].requiredTools, 'browser_open'],
+  })),
+  /requiredTools must equal the complete source-bound tool call set/i,
+)
+await assert.rejects(
+  () => assertSourceEvidence(replaceCase(suite, 0, {
+    ...suite.cases[0],
+    sources: [{ ...suite.cases[0].sources[0], start: 'runLoopScenario({' }],
+  })),
+  /source start must be unique/i,
 )
 
 console.log('capability-disclosure-eval-test: PASS')
@@ -97,17 +119,57 @@ function replaceCase(value, index, replacement) {
 async function assertSourceEvidence(value) {
   for (const evalCase of value.cases) {
     const excerpts = await Promise.all(evalCase.sources.map(async (source) => {
-      const [relativePath, anchor] = source.split('#')
-      const content = await readFile(new URL(`../${relativePath}`, import.meta.url), 'utf8')
-      const anchorIndex = content.indexOf(anchor)
-      assert.notEqual(anchorIndex, -1, `${evalCase.id}: missing source anchor ${source}`)
-      return content.slice(Math.max(0, anchorIndex - 4_000), anchorIndex + 8_000)
+      const content = await readFile(new URL(`../${source.path}`, import.meta.url), 'utf8')
+      assert.equal(countOccurrences(content, source.start), 1, `${evalCase.id}: source start must be unique`)
+      assert.equal(countOccurrences(content, source.end), 1, `${evalCase.id}: source end must be unique`)
+      const startIndex = content.indexOf(source.start)
+      const endIndex = content.indexOf(source.end, startIndex + source.start.length)
+      assert(endIndex > startIndex, `${evalCase.id}: source end must follow source start`)
+      return content.slice(startIndex, endIndex)
     }))
-    for (const tool of evalCase.requiredTools) {
-      const callPattern = new RegExp(
-        `(?:name\\s*:\\s*['\"]${tool}['\"]|call\\(\\s*['\"][^'\"]+['\"]\\s*,\\s*['\"]${tool}['\"])`,
-      )
-      assert(excerpts.some((excerpt) => callPattern.test(excerpt)), `${evalCase.id}: ${tool} is not called near its source anchor`)
+    const observed = [...new Set(excerpts.flatMap(observedToolCalls))].sort()
+    const required = [...evalCase.requiredTools].sort()
+    assert.deepEqual(observed, required, `${evalCase.id}: requiredTools must equal the complete source-bound tool call set`)
+  }
+}
+
+function observedToolCalls(excerpt) {
+  const sourceFile = ts.createSourceFile('fixture.mjs', excerpt, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  const tools = []
+  visit(sourceFile)
+  return tools
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'call') {
+      const toolName = node.arguments[1]
+      if (toolName && ts.isStringLiteral(toolName)) tools.push(toolName.text)
+    }
+    if (ts.isPropertyAssignment(node) && propertyName(node.name) === 'toolCalls' && ts.isArrayLiteralExpression(node.initializer)) {
+      for (const element of node.initializer.elements) {
+        if (!ts.isObjectLiteralExpression(element)) continue
+        collectObjectToolName(element)
+      }
+    }
+    if (ts.isPropertyAssignment(node) && propertyName(node.name) === 'call' && ts.isObjectLiteralExpression(node.initializer)) {
+      collectObjectToolName(node.initializer)
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  function collectObjectToolName(object) {
+    const nameProperty = object.properties.find(
+      (property) => ts.isPropertyAssignment(property) && propertyName(property.name) === 'name',
+    )
+    if (nameProperty && ts.isPropertyAssignment(nameProperty) && ts.isStringLiteral(nameProperty.initializer)) {
+      tools.push(nameProperty.initializer.text)
     }
   }
+}
+
+function propertyName(name) {
+  return ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : undefined
+}
+
+function countOccurrences(content, needle) {
+  return content.split(needle).length - 1
 }
