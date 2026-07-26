@@ -264,6 +264,146 @@ assert(dynamicSemanticPrompt.includes('old-user-1'), 'semantic compaction should
 assert(!dynamicSemanticPrompt.includes('recent-assistant'), 'semantic compaction should not duplicate the retained recent raw region')
 assertToolBoundariesIntact(dynamicTail.messages)
 
+const observedCacheSnapshot = {
+  capability: {
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-5',
+    requestMode: 'anthropic_explicit',
+    requestEnabled: true,
+    usageSupported: true,
+    ttl: '5m',
+    ttlMs: 5 * 60_000,
+    ttlSource: 'provider_default',
+  },
+  namespace: 'agent_loop',
+  cacheActivityAt: '2026-07-09T10:00:00.000Z',
+  lastUsage: {
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-5',
+    namespace: 'agent_loop',
+    inputTokens: 4_000,
+    outputTokens: 100,
+    totalTokens: 4_100,
+    cacheReadInputTokens: 2_400,
+    cacheCreationInputTokens: 0,
+    uncachedInputTokens: 1_600,
+    cacheHitRatio: 0.6,
+    cacheWriteInferred: false,
+    requestStartedAt: '2026-07-09T09:59:59.000Z',
+    completedAt: '2026-07-09T10:00:00.000Z',
+    durationMs: 1_000,
+  },
+  totals: {
+    requests: 3,
+    inputTokens: 10_000,
+    cacheReadInputTokens: 4_000,
+    cacheCreationInputTokens: 2_000,
+    uncachedInputTokens: 6_000,
+    cacheHitRatio: 0.4,
+  },
+}
+
+const hotCache = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_004',
+  step: 10,
+  goal: 'Preserve a hot cached prefix.',
+  messages,
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 120_000,
+    compactThresholdRatio: 0.8,
+  },
+  keepRecentMessages: 4,
+  semanticLlm,
+  promptCache: {
+    snapshot: observedCacheSnapshot,
+    now: new Date('2026-07-09T10:01:00.000Z'),
+  },
+})
+
+assert.equal(hotCache.fullCompactionApplied, false)
+assert.equal(hotCache.microCompactionDeferred, true, 'hot cache should defer destructive micro-compaction')
+assert.equal(hotCache.promptCacheDecision?.cacheState, 'hot')
+assert.equal(hotCache.promptCacheDecision?.cumulativeCacheHitRatio, 0.4)
+assert.equal(hotCache.messages[3].content, largeSnapshot, 'deferred micro-compaction must leave the cached prefix byte-stable')
+
+const fullUnderHotCache = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_004_full',
+  step: 10,
+  goal: 'Full compaction must win over cache reuse.',
+  messages,
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 300,
+    compactThresholdRatio: 1,
+  },
+  keepRecentMessages: 4,
+  semanticLlm,
+  promptCache: {
+    snapshot: observedCacheSnapshot,
+    now: new Date('2026-07-09T10:01:00.000Z'),
+  },
+})
+
+assert.equal(fullUnderHotCache.fullCompactionApplied, true)
+assert.equal(fullUnderHotCache.microCompactionDeferred, undefined, 'full context pressure must override a hot cache')
+
+const expiredCache = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_005',
+  step: 11,
+  goal: 'Compact after cache expiry.',
+  messages,
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 120_000,
+    compactThresholdRatio: 0.8,
+  },
+  keepRecentMessages: 4,
+  semanticLlm,
+  promptCache: {
+    snapshot: observedCacheSnapshot,
+    now: new Date('2026-07-09T10:06:00.000Z'),
+  },
+})
+
+assert.equal(expiredCache.promptCacheDecision?.cacheState, 'expired')
+assert.equal(expiredCache.microCompaction?.applied, true, 'expired cache should no longer block micro-compaction')
+
+const pressureOverride = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_006',
+  step: 12,
+  goal: 'Force compaction under configured pressure.',
+  messages,
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 120_000,
+    compactThresholdRatio: 0.8,
+  },
+  keepRecentMessages: 4,
+  semanticLlm,
+  promptCache: {
+    snapshot: observedCacheSnapshot,
+    now: new Date('2026-07-09T10:01:00.000Z'),
+    hardPressureRatio: 0.01,
+  },
+})
+
+assert.equal(pressureOverride.promptCacheDecision?.cacheState, 'hot')
+assert.equal(pressureOverride.microCompactionDeferred, undefined)
+assert.equal(pressureOverride.microCompaction?.applied, true, 'pressure ceiling must override a hot cache')
+
 console.log('compaction-pipeline-test: PASS')
 
 function assertToolBoundariesIntact(messages) {

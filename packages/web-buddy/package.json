@@ -81,6 +81,7 @@
     "test:token-budget": "node ./scripts/token-budget-test.mjs",
     "test:context-compaction": "node ./scripts/context-compaction-test.mjs",
     "test:compaction-pipeline": "npm run build && node ./scripts/compaction-pipeline-test.mjs",
+    "test:prompt-cache": "npm run build && node ./scripts/prompt-cache-test.mjs && node ./scripts/compaction-pipeline-test.mjs",
     "test:kernel": "npm run build && node ./scripts/agent-kernel-test.mjs",
     "test:trace-inputs": "npm run build && node ./scripts/trace-inputs-test.mjs",
     "test:metrics": "npm run build && node ./scripts/metrics-test.mjs",

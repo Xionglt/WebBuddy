@@ -35,6 +35,20 @@ function loadDotEnv(filePath: string): Record<string, string> {
 }
 
 export type LlmProvider = 'openai' | 'anthropic'
+export type PromptCacheTtl = '5m' | '30m' | '1h' | '24h'
+
+export interface PromptCacheConfig {
+  /**
+   * Undefined enables request-side caching only for the official provider
+   * hosts. Set true to opt an explicitly compatible proxy in, or false to
+   * disable cache-aware scheduling.
+   */
+  enabled?: boolean
+  /** Provider/model cache lifetime used by the compaction scheduler. */
+  ttl?: PromptCacheTtl
+  /** Start treating the cache as expiring this many milliseconds before TTL. */
+  safetyMarginMs?: number
+}
 
 export interface ModelConfig {
   /** API key (OpenAI `Authorization: Bearer`) or null. */
@@ -56,6 +70,8 @@ export interface ModelConfig {
   anthropicVersion?: string
   /** Provider-specific OpenAI-compatible request fields, e.g. Qwen enable_thinking. */
   extraBody?: Record<string, unknown>
+  /** Prompt-cache request and lifecycle controls. */
+  promptCache?: PromptCacheConfig
 }
 
 export interface BrowserRuntimeConfig {
@@ -178,6 +194,10 @@ function boolEnv(env: Record<string, string | undefined>, key: string, fallback:
   return raw === 'true' || raw === '1' || raw === 'yes'
 }
 
+function optionalBoolEnv(env: Record<string, string | undefined>, key: string): boolean | undefined {
+  return env[key] === undefined ? undefined : boolEnv(env, key, false)
+}
+
 function numEnv(env: Record<string, string | undefined>, key: string, fallback: number): number {
   const raw = env[key]
   const n = raw === undefined ? NaN : Number(raw)
@@ -202,6 +222,13 @@ function parseJsonObjectEnv(env: Record<string, string | undefined>, key: string
   } catch {
     return {}
   }
+}
+
+function promptCacheTtlEnv(env: Record<string, string | undefined>): PromptCacheTtl | undefined {
+  const raw = env.MODEL_PROMPT_CACHE_TTL?.trim()
+  if (!raw) return undefined
+  if (raw === '5m' || raw === '30m' || raw === '1h' || raw === '24h') return raw
+  throw new Error(`Invalid MODEL_PROMPT_CACHE_TTL="${raw}". Expected one of: 5m, 30m, 1h, 24h.`)
 }
 
 function permissionModeEnv(env: Record<string, string | undefined>): PermissionMode {
@@ -268,6 +295,16 @@ export function loadConfig(overrides: AgentConfigOverrides = {}): AgentConfig {
   const anthropicToken = firstNonEmpty(env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_API_KEY)
   const useAnthropic =
     ovrProvider ? ovrProvider === 'anthropic' : Boolean(overrides.model?.authToken ?? anthropicToken)
+  const promptCacheEnabled = optionalBoolEnv(env, 'MODEL_PROMPT_CACHE_ENABLED')
+  const promptCacheTtl = promptCacheTtlEnv(env)
+  const promptCache: PromptCacheConfig = {
+    ...(promptCacheEnabled !== undefined ? { enabled: promptCacheEnabled } : {}),
+    ...(promptCacheTtl ? { ttl: promptCacheTtl } : {}),
+    ...(env.MODEL_PROMPT_CACHE_SAFETY_MARGIN_MS !== undefined
+      ? { safetyMarginMs: numEnv(env, 'MODEL_PROMPT_CACHE_SAFETY_MARGIN_MS', 0) }
+      : {}),
+    ...(overrides.model?.promptCache ?? {}),
+  }
 
   let model: ModelConfig
   if (useAnthropic) {
@@ -282,6 +319,7 @@ export function loadConfig(overrides: AgentConfigOverrides = {}): AgentConfig {
       baseUrl: overrides.model?.baseUrl ?? base,
       name: overrides.model?.name ?? firstNonEmpty(env.ANTHROPIC_MODEL) ?? 'glm-4.7',
       anthropicVersion: firstNonEmpty(env.ANTHROPIC_VERSION) ?? '2023-06-01',
+      ...(Object.keys(promptCache).length ? { promptCache } : {}),
     }
   } else {
     const apiKey =
@@ -305,6 +343,7 @@ export function loadConfig(overrides: AgentConfigOverrides = {}): AgentConfig {
       baseUrl,
       name: modelName,
       ...(Object.keys(extraBody).length ? { extraBody } : {}),
+      ...(Object.keys(promptCache).length ? { promptCache } : {}),
     }
   }
 

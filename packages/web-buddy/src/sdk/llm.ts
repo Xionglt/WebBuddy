@@ -1,5 +1,19 @@
 import type { ModelConfig } from './config.js'
 import { getActiveTrace } from '../agent-trace/index.js'
+import {
+  accumulatePromptCacheSnapshot,
+  anthropicCacheControl,
+  applyOpenAiPromptCacheFields,
+  emptyPromptCacheSnapshot,
+  normalizeAnthropicPromptCacheUsage,
+  normalizeOpenAiPromptCacheUsage,
+  resolvePromptCacheCapability,
+  type AnthropicUsagePayload,
+  type OpenAiUsagePayload,
+  type PromptCacheCapability,
+  type PromptCacheSnapshot,
+  type PromptCacheUsage,
+} from './prompt-cache.js'
 
 /**
  * Thin OpenAI-compatible chat client. Works with any endpoint that implements
@@ -53,11 +67,18 @@ export interface ChatOptions {
   toolChoice?: 'auto' | 'none'
   /** Cap the number of output tokens. */
   maxTokens?: number
+  /** Disable request-side prompt caching for one-off calls such as semantic compaction. */
+  promptCache?: boolean
+  /** Independent cache metrics bucket. */
+  promptCacheNamespace?: string
+  /** Stable, privacy-safe routing key for providers that support it. */
+  promptCacheKey?: string
 }
 
 export interface ChatCompletion {
   content: string
   toolCalls: ToolCall[]
+  usage?: PromptCacheUsage
 }
 
 export class LlmError extends Error {
@@ -71,7 +92,12 @@ export class LlmError extends Error {
 }
 
 export class LlmGateway {
-  constructor(private readonly model: ModelConfig) {}
+  private readonly promptCacheCapability: PromptCacheCapability
+  private readonly promptCacheSnapshots = new Map<string, PromptCacheSnapshot>()
+
+  constructor(private readonly model: ModelConfig) {
+    this.promptCacheCapability = resolvePromptCacheCapability(model)
+  }
 
   get hasKey(): boolean {
     return Boolean(this.model.apiKey?.trim() || this.model.authToken?.trim())
@@ -81,10 +107,16 @@ export class LlmGateway {
     return `${this.model.name} @ ${this.model.baseUrl} (${this.model.provider})`
   }
 
+  getPromptCacheSnapshot(namespace = 'default'): PromptCacheSnapshot {
+    return this.promptCacheSnapshots.get(namespace)
+      ?? emptyPromptCacheSnapshot(this.promptCacheCapability, namespace)
+  }
+
   /** Shared request — routes to the OpenAI or Anthropic wire format. */
   private async request(messages: ChatMessage[], options: ChatOptions): Promise<{
     content: string | null
     toolCalls: ToolCall[]
+    usage: PromptCacheUsage
   }> {
     const trace = getActiveTrace()
     const span = trace?.startSpan({
@@ -105,11 +137,21 @@ export class LlmGateway {
       const result = this.model.provider === 'anthropic'
         ? await this.requestAnthropic(messages, options)
         : await this.requestOpenai(messages, options)
+      const namespace = options.promptCacheNamespace ?? 'default'
+      this.promptCacheSnapshots.set(
+        namespace,
+        accumulatePromptCacheSnapshot(
+          this.promptCacheSnapshots.get(namespace),
+          effectivePromptCacheCapability(this.promptCacheCapability, options),
+          result.usage,
+        ),
+      )
       span?.end({
         status: 'success',
         output: {
           content: options.redactTrace ? '[redacted sensitive model output]' : result.content,
           toolCalls: options.redactTrace ? redactToolCalls(result.toolCalls) : result.toolCalls,
+          usage: result.usage,
         },
       })
       return result
@@ -127,6 +169,7 @@ export class LlmGateway {
   private async requestOpenai(messages: ChatMessage[], options: ChatOptions): Promise<{
     content: string | null
     toolCalls: ToolCall[]
+    usage: PromptCacheUsage
   }> {
     const url = `${this.model.baseUrl.replace(/\/$/, '')}/chat/completions`
     const controller = new AbortController()
@@ -144,6 +187,12 @@ export class LlmGateway {
       body.tool_choice = options.toolChoice ?? 'auto'
     }
     if (options.maxTokens) body.max_tokens = options.maxTokens
+    const capability = effectivePromptCacheCapability(this.promptCacheCapability, options)
+    applyOpenAiPromptCacheFields(body, {
+      capability,
+      ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
+    })
+    const requestStartedAt = new Date()
 
     try {
       const res = await fetch(url, {
@@ -168,6 +217,7 @@ export class LlmGateway {
             tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
           }
         }>
+        usage?: OpenAiUsagePayload
       }
       const msg = json.choices?.[0]?.message
       const content = msg?.content ?? null
@@ -181,7 +231,17 @@ export class LlmGateway {
         }
         toolCalls.push({ id: tc.id, name: tc.function.name, arguments: args })
       }
-      return { content, toolCalls }
+      return {
+        content,
+        toolCalls,
+        usage: normalizeOpenAiPromptCacheUsage({
+          usage: json.usage,
+          capability,
+          namespace: options.promptCacheNamespace ?? 'default',
+          requestStartedAt,
+          completedAt: new Date(),
+        }),
+      }
     } catch (error) {
       if (error instanceof LlmError) throw error
       throw new LlmError(`Request failed: ${(error as Error).message}`, 'HTTP')
@@ -198,6 +258,7 @@ export class LlmGateway {
   private async requestAnthropic(messages: ChatMessage[], options: ChatOptions): Promise<{
     content: string | null
     toolCalls: ToolCall[]
+    usage: PromptCacheUsage
   }> {
     const url = `${this.model.baseUrl.replace(/\/$/, '')}/v1/messages`
     const controller = new AbortController()
@@ -208,6 +269,8 @@ export class LlmGateway {
       .map((m) => m.content)
       .filter(Boolean)
       .join('\n\n')
+    const capability = effectivePromptCacheCapability(this.promptCacheCapability, options)
+    const cacheControl = anthropicCacheControl(capability)
 
     // Convert to Anthropic messages. Tool results (role:'tool') must be wrapped
     // in a user message as {type:'tool_result'}. Consecutive tool results are
@@ -251,15 +314,25 @@ export class LlmGateway {
       messages: converted,
       temperature: options.temperature ?? 0.2,
     }
-    if (system) body.system = system
+    if (system) {
+      body.system = cacheControl
+        ? [{ type: 'text', text: system, cache_control: cacheControl }]
+        : system
+    }
     if (options.tools?.length) {
       body.tools = options.tools.map((t) => ({
         name: t.function.name,
         description: t.function.description,
         input_schema: t.function.parameters,
       }))
+      if (cacheControl) {
+        const tools = body.tools as Array<Record<string, unknown>>
+        tools[tools.length - 1] = { ...tools[tools.length - 1], cache_control: cacheControl }
+      }
       body.tool_choice = options.toolChoice === 'none' ? { type: 'none' } : { type: 'auto' }
     }
+    if (cacheControl) markLastAnthropicMessageCacheable(converted, cacheControl)
+    const requestStartedAt = new Date()
 
     try {
       const res = await fetch(url, {
@@ -281,6 +354,7 @@ export class LlmGateway {
       const json = (await res.json()) as {
         content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>
         stop_reason?: string
+        usage?: AnthropicUsagePayload
       }
       let text = ''
       const toolCalls: ToolCall[] = []
@@ -294,7 +368,17 @@ export class LlmGateway {
           })
         }
       }
-      return { content: text || null, toolCalls }
+      return {
+        content: text || null,
+        toolCalls,
+        usage: normalizeAnthropicPromptCacheUsage({
+          usage: json.usage,
+          capability,
+          namespace: options.promptCacheNamespace ?? 'default',
+          requestStartedAt,
+          completedAt: new Date(),
+        }),
+      }
     } catch (error) {
       if (error instanceof LlmError) throw error
       throw new LlmError(`Request failed: ${(error as Error).message}`, 'HTTP')
@@ -312,8 +396,8 @@ export class LlmGateway {
 
   /** Chat with tools. Returns content + any tool calls the model requested. */
   async chatWithTools(messages: ChatMessage[], options: ChatOptions = {}): Promise<ChatCompletion> {
-    const { content, toolCalls } = await this.request(messages, options)
-    return { content: content ?? '', toolCalls }
+    const { content, toolCalls, usage } = await this.request(messages, options)
+    return { content: content ?? '', toolCalls, usage }
   }
 
   /**
@@ -376,12 +460,49 @@ function traceChatOptions(options: ChatOptions): Record<string, unknown> {
     timeoutMs: options.timeoutMs,
     toolChoice: options.toolChoice,
     maxTokens: options.maxTokens,
+    promptCache: options.promptCache,
+    promptCacheNamespace: options.promptCacheNamespace,
+    promptCacheKeyConfigured: Boolean(options.promptCacheKey),
     redactTrace: options.redactTrace,
     tools: options.tools?.map((tool) => ({
       name: tool.function.name,
       description: tool.function.description,
       parameters: tool.function.parameters,
     })),
+  }
+}
+
+function effectivePromptCacheCapability(
+  capability: PromptCacheCapability,
+  options: ChatOptions,
+): PromptCacheCapability {
+  if (options.promptCache !== false) return capability
+  return {
+    ...capability,
+    requestMode: 'disabled',
+    requestEnabled: false,
+    ttlSource: 'unknown',
+  }
+}
+
+function markLastAnthropicMessageCacheable(
+  messages: Array<Record<string, unknown>>,
+  cacheControl: Record<string, unknown>,
+): void {
+  const message = messages[messages.length - 1]
+  if (!message) return
+  const content = message.content
+  if (typeof content === 'string') {
+    message.content = [{ type: 'text', text: content, cache_control: cacheControl }]
+    return
+  }
+  if (!Array.isArray(content) || content.length === 0) return
+  const lastIndex = content.length - 1
+  const last = content[lastIndex]
+  if (!last || typeof last !== 'object' || Array.isArray(last)) return
+  content[lastIndex] = {
+    ...(last as Record<string, unknown>),
+    cache_control: cacheControl,
   }
 }
 

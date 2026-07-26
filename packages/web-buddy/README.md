@@ -548,6 +548,11 @@ Check model connectivity and function calling:
 npm run test:model
 ```
 
+Prompt-cache usage is observed from provider response fields and is used to
+delay destructive micro-compaction only while a known cache lifetime is hot.
+See [Prompt cache observability and cache-aware compaction](docs/prompt-cache.md)
+for provider behavior, configuration, trace queries, and tests.
+
 Do not commit `.env`, cookies, storage state, uploaded personal data, or
 verification codes.
 

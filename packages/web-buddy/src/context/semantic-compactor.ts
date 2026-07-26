@@ -54,6 +54,8 @@ export class SemanticCompactor {
       maxTokens: 1600,
       timeoutMs: this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       redactTrace: true,
+      promptCache: false,
+      promptCacheNamespace: 'semantic_compaction',
     })
 
     return normalizeSemanticSummary(parseJsonObject(content), {

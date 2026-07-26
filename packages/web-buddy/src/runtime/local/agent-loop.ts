@@ -21,6 +21,7 @@ import {
   type SemanticCompactionPipelineOptions,
 } from '../../context/compaction-pipeline.js'
 import type { MicroCompactionOptions } from '../../context/micro-compaction.js'
+import type { PromptCacheCompactionOptions } from '../../context/prompt-cache-policy.js'
 import {
   compactRunMemory,
   createRunMemory,
@@ -85,6 +86,7 @@ import {
 import { abortReason } from '../../kernel/run-controller.js'
 import type { GateDecision, GateKind, HumanGate } from '../../sdk/human.js'
 import type { LlmGateway, ChatMessage } from '../../sdk/llm.js'
+import { promptCacheKeyForScope } from '../../sdk/prompt-cache.js'
 import type { RiskLevel } from '../../sdk/trace.js'
 import type { LocalToolRunResult } from '../../tools/local-adapter.js'
 import { ToolExecutionService } from '../../tools/tool-execution-service.js'
@@ -220,6 +222,8 @@ export interface AgentLoopInput {
   contextBudget?: ContextBudgetOptions
   /** Optional micro-compaction controls for old tool results and snapshots. */
   microCompaction?: MicroCompactionOptions
+  /** Cache-lifecycle-aware deferral controls for destructive micro-compaction. */
+  promptCacheCompaction?: PromptCacheCompactionOptions
   /** Optional semantic compaction controls. Enabled by default when the LLM supports chat(). */
   semanticCompaction?: SemanticCompactionPipelineOptions
   /** Optional user-scoped answer memory persisted across runs. */
@@ -412,6 +416,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     criterion.kind === 'action_boundary' ? criterion.actionKinds : []
   )) ?? []
   const session = input.session
+  const promptCacheNamespace = 'agent_loop'
+  const promptCacheKey = promptCacheKeyForScope(
+    session?.session.sessionId ?? ctx.sessionId,
+  )
   const completionActions = (): ActionOutcome[] => actionLedger.outcomes(monitoredActionKinds)
   const completionContractFields = () => {
     const runId = session?.session.runId ?? ctx.trace.runId
@@ -1321,6 +1329,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
   const maybeCompactMessages = async (turnId: string) => {
     const agentTaskFacts = asyncTaskRuntime ? await asyncTaskRuntime.compactFacts() : undefined
+    const promptCacheSnapshot = promptCacheSnapshotForLlm(input.llm, promptCacheNamespace)
     const compaction = await compactContextIfNeeded({
       goal,
       runId: session?.session.runId ?? ctx.trace.runId,
@@ -1346,8 +1355,22 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       semanticLlm: input.llm,
       semanticCompaction: input.semanticCompaction,
       microCompaction: input.microCompaction,
+      ...(promptCacheSnapshot ? {
+        promptCache: {
+          snapshot: promptCacheSnapshot,
+          ...(input.promptCacheCompaction ?? {}),
+        },
+      } : {}),
       agentTaskFacts,
     })
+    if (compaction.promptCacheDecision) {
+      ctx.trace.agentTrace?.recordEvent('prompt_cache_compaction_decision', {
+        turnId,
+        step,
+        ...compaction.promptCacheDecision,
+        microCompactionDeferred: compaction.microCompactionDeferred ?? false,
+      })
+    }
     await sessionEvent({
       type: 'token_budget_updated',
       turnId,
@@ -1356,6 +1379,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         tokenBudget: compaction.tokenBudget,
         ...(compaction.postMicroTokenBudget ? { postMicroTokenBudget: compaction.postMicroTokenBudget } : {}),
         ...(compaction.microCompaction?.applied ? { microCompaction: compaction.microCompaction.stats } : {}),
+        ...(compaction.promptCacheDecision ? {
+          promptCacheDecision: compaction.promptCacheDecision,
+          microCompactionDeferred: compaction.microCompactionDeferred ?? false,
+        } : {}),
       },
     })
     const requestBudget = compaction.postCompactionTokenBudget
@@ -1465,7 +1492,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     })
     let completion
     try {
-      completion = await llm.chatWithTools(messages, { tools, temperature: 0.2 })
+      completion = await llm.chatWithTools(messages, {
+        tools,
+        temperature: 0.2,
+        promptCache: true,
+        promptCacheNamespace,
+        promptCacheKey,
+      })
     } catch (error) {
       const message = `LLM error: ${(error as Error).message}`
       emit('error', `LLM call failed: ${(error as Error).message}`, step)
@@ -1495,6 +1528,16 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         toolCalls: completion.toolCalls.map((call) => ({ id: call.id, name: call.name })),
       }),
     })
+    const promptCacheSnapshot = promptCacheSnapshotForLlm(llm, promptCacheNamespace)
+    if (completion.usage && promptCacheSnapshot) {
+      ctx.trace.agentTrace?.recordEvent('prompt_cache_usage', {
+        turnId,
+        step,
+        usage: completion.usage,
+        totals: promptCacheSnapshot.totals,
+        capability: promptCacheSnapshot.capability,
+      })
+    }
     await sessionEvent({
       type: 'model_message',
       turnId,
@@ -1502,6 +1545,10 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       data: {
         toolCallCount: completion.toolCalls.length,
         toolCalls: completion.toolCalls.map((call) => ({ id: call.id, name: call.name })),
+        ...(completion.usage && promptCacheSnapshot ? {
+          promptCacheUsage: completion.usage,
+          promptCacheTotals: promptCacheSnapshot.totals,
+        } : {}),
       },
     })
     if (updateRunMemoryFromModel({
@@ -3917,6 +3964,18 @@ function rememberUniqueBlocker(blockers: string[], blocker: string, maxBlockers 
 
 function toolMessage(toolCallId: string, content: string): ChatMessage {
   return { role: 'tool', tool_call_id: toolCallId, content }
+}
+
+function promptCacheSnapshotForLlm(
+  llm: LlmGateway,
+  namespace: string,
+): ReturnType<LlmGateway['getPromptCacheSnapshot']> | undefined {
+  const candidate = llm as LlmGateway & {
+    getPromptCacheSnapshot?: LlmGateway['getPromptCacheSnapshot']
+  }
+  return typeof candidate.getPromptCacheSnapshot === 'function'
+    ? candidate.getPromptCacheSnapshot(namespace)
+    : undefined
 }
 
 const TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES = 12 * 1024

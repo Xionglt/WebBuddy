@@ -24,6 +24,11 @@ import {
   type TokenBudgetSnapshot,
 } from '../kernel/token-budget.js'
 import type { ChatMessage, ToolSchema } from '../sdk/llm.js'
+import {
+  evaluatePromptCacheCompaction,
+  type PromptCacheCompactionDecision,
+  type PromptCacheCompactionInput,
+} from './prompt-cache-policy.js'
 
 export interface ContextCompactionPipelineInput extends Omit<ContextCompactionInput, 'messages' | 'semanticSummary' | 'compactMode'> {
   messages: ChatMessage[]
@@ -38,6 +43,8 @@ export interface ContextCompactionPipelineInput extends Omit<ContextCompactionIn
   semanticLlm?: SemanticCompactionLlm
   semanticCompaction?: SemanticCompactionPipelineOptions
   microCompaction?: MicroCompactionOptions
+  /** Provider-observed cache state used to avoid rewriting a still-hot prefix. */
+  promptCache?: PromptCacheCompactionInput
 }
 
 export interface SemanticCompactionPipelineOptions {
@@ -58,6 +65,8 @@ export interface ContextCompactionPipelineResult {
   recentRawRetention?: RecentRawRetentionStats
   reason?: string
   semanticError?: string
+  promptCacheDecision?: PromptCacheCompactionDecision
+  microCompactionDeferred?: boolean
 }
 
 export interface RecentRawRetentionStats {
@@ -89,7 +98,13 @@ export async function compactContextIfNeeded(
   let microCompaction: MicroCompactionResult | undefined
   let postMicroTokenBudget: TokenBudgetSnapshot | undefined
   const microDecision = shouldMicroCompact(workingMessages, tokenBudget, input.microCompaction)
-  if (microDecision.compact) {
+  const promptCacheDecision = input.promptCache
+    ? evaluatePromptCacheCompaction({ promptCache: input.promptCache, tokenBudget })
+    : undefined
+  const microCompactionDeferred = Boolean(
+    microDecision.compact && promptCacheDecision?.deferDestructiveMicroCompaction,
+  )
+  if (microDecision.compact && !microCompactionDeferred) {
     microCompaction = microCompactMessages(workingMessages, input.microCompaction)
     if (microCompaction.applied) {
       workingMessages = microCompaction.messages
@@ -106,7 +121,13 @@ export async function compactContextIfNeeded(
       ...(microCompaction ? { microCompaction } : {}),
       tokenBudget,
       ...(postMicroTokenBudget ? { postMicroTokenBudget } : {}),
-      ...(microCompaction?.reason ?? microDecision.reason ? { reason: microCompaction?.reason ?? microDecision.reason } : {}),
+      ...(promptCacheDecision ? { promptCacheDecision } : {}),
+      ...(microCompactionDeferred ? { microCompactionDeferred: true } : {}),
+      ...(microCompactionDeferred
+        ? { reason: promptCacheDecision?.reason }
+        : microCompaction?.reason ?? microDecision.reason
+          ? { reason: microCompaction?.reason ?? microDecision.reason }
+          : {}),
     }
   }
 
@@ -174,6 +195,8 @@ export async function compactContextIfNeeded(
     compaction: finalCompaction,
     tokenBudget,
     ...(postMicroTokenBudget ? { postMicroTokenBudget } : {}),
+    ...(promptCacheDecision ? { promptCacheDecision } : {}),
+    ...(microCompactionDeferred ? { microCompactionDeferred: true } : {}),
     postCompactionTokenBudget,
     recentRawRetention: recent.stats,
     reason,
