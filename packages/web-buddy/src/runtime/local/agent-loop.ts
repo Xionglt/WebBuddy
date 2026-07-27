@@ -1495,6 +1495,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       completion = await llm.chatWithTools(messages, {
         tools,
         temperature: 0.2,
+        stream: true,
         promptCache: true,
         promptCacheNamespace,
         promptCacheKey,

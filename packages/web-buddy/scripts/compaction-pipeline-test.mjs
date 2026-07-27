@@ -128,6 +128,11 @@ assert(
   full.messages.some((message) => message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)),
   'compacted messages should include COMPACTED_RUN_CONTEXT',
 )
+assert.equal(
+  full.messages.find((message) => message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX))?.cacheBoundary,
+  'compaction_checkpoint',
+  'full compaction should mark its durable summary as the fourth prompt-cache boundary',
+)
 assertToolBoundariesIntact(full.messages)
 
 const microOnly = await compactContextIfNeeded({
@@ -377,6 +382,55 @@ const expiredCache = await compactContextIfNeeded({
 
 assert.equal(expiredCache.promptCacheDecision?.cacheState, 'expired')
 assert.equal(expiredCache.microCompaction?.applied, true, 'expired cache should no longer block micro-compaction')
+
+const lowHitUsage = (completedAt) => ({
+  provider: 'anthropic',
+  model: 'claude-sonnet-4-5',
+  namespace: 'agent_loop',
+  inputTokens: 4_000,
+  outputTokens: 100,
+  totalTokens: 4_100,
+  cacheReadInputTokens: 200,
+  cacheCreationInputTokens: 0,
+  uncachedInputTokens: 3_800,
+  cacheHitRatio: 0.05,
+  cacheWriteInferred: false,
+  requestStartedAt: new Date(new Date(completedAt).getTime() - 1_000).toISOString(),
+  completedAt,
+  durationMs: 1_000,
+})
+const coldCache = await compactContextIfNeeded({
+  sessionId: 'pipeline-session',
+  runId: 'pipeline-run',
+  turnId: 'turn_005_cold',
+  step: 11,
+  goal: 'Compact after repeated cache misses.',
+  messages,
+  latestContext,
+  systemContent: 'system after compact',
+  tokenBudgetOptions: {
+    maxInputTokens: 120_000,
+    compactThresholdRatio: 0.8,
+  },
+  keepRecentMessages: 4,
+  semanticLlm,
+  promptCache: {
+    snapshot: {
+      ...observedCacheSnapshot,
+      cacheActivityAt: '2026-07-09T10:01:00.000Z',
+      lastUsage: lowHitUsage('2026-07-09T10:01:00.000Z'),
+      recentUsages: [
+        lowHitUsage('2026-07-09T10:00:30.000Z'),
+        lowHitUsage('2026-07-09T10:01:00.000Z'),
+      ],
+    },
+    now: new Date('2026-07-09T10:01:30.000Z'),
+  },
+})
+
+assert.equal(coldCache.promptCacheDecision?.cacheState, 'cold')
+assert.equal(coldCache.promptCacheDecision?.lowCacheHitStreak, 2)
+assert.equal(coldCache.microCompaction?.applied, true, 'two consecutive low-hit requests should stop protecting the stale prefix')
 
 const pressureOverride = await compactContextIfNeeded({
   sessionId: 'pipeline-session',
