@@ -1,0 +1,245 @@
+{
+  "schemaVersion": "memory-form-assistance-suite/v1",
+  "cases": [
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "fact-update-city",
+      "category": "fact_update",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "city-v1", "expectedStatus": "created",
+          "content": { "kind": "form_preference", "fieldKey": "city", "value": "Beijing", "statement": "My saved city is Beijing." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        },
+        {
+          "operation": "update", "entryAlias": "city-v1", "contentVersionAlias": "city-v2", "expectedStatus": "updated",
+          "content": { "kind": "form_preference", "fieldKey": "city", "value": "Shanghai", "statement": "My saved city is now Shanghai." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "Fill the city preference in this draft.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": { "city": "Shanghai" }, "abstainFields": [], "forbiddenValues": { "city": ["Beijing"] }, "targetWriteAlias": "city-v2" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "fact-supersede-language",
+      "category": "fact_update",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "language-old", "expectedStatus": "created",
+          "content": { "kind": "form_preference", "fieldKey": "language", "value": "Japanese", "statement": "My saved language is Japanese." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        },
+        {
+          "operation": "create", "alias": "language-new", "expectedStatus": "created", "supersedes": ["language-old"],
+          "content": { "kind": "form_preference", "fieldKey": "language", "value": "English", "statement": "My current saved language is English." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "Fill the language preference in this draft.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": { "language": "English" }, "abstainFields": [], "forbiddenValues": { "language": ["Japanese"] }, "targetWriteAlias": "language-new" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "conflict-city",
+      "category": "preference_conflict",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "city-east", "expectedStatus": "created",
+          "content": { "kind": "form_preference", "fieldKey": "city", "value": "Shanghai", "statement": "My city preference is Shanghai." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        },
+        {
+          "operation": "create", "alias": "city-south", "expectedStatus": "created", "conflicts": ["city-east"],
+          "content": { "kind": "form_preference", "fieldKey": "city", "value": "Shenzhen", "statement": "My city preference is Shenzhen." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "Fill the city preference in this draft.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": {}, "abstainFields": ["city"], "forbiddenValues": { "city": ["Shanghai", "Shenzhen"] }, "targetWriteAlias": "city-south" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "conflict-work-mode",
+      "category": "preference_conflict",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "work-remote", "expectedStatus": "created",
+          "content": { "kind": "form_preference", "fieldKey": "workMode", "value": "Remote", "statement": "My workMode preference is Remote." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        },
+        {
+          "operation": "create", "alias": "work-office", "expectedStatus": "created", "conflicts": ["work-remote"],
+          "content": { "kind": "form_preference", "fieldKey": "workMode", "value": "Office", "statement": "My workMode preference is Office." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "Fill the workMode preference in this draft.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": {}, "abstainFields": ["workMode"], "forbiddenValues": { "workMode": ["Remote", "Office"] }, "targetWriteAlias": "work-office" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "expired-timezone",
+      "category": "expired",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-03T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "timezone-expired", "expectedStatus": "created", "ttlMs": 86400000,
+          "content": { "kind": "form_preference", "fieldKey": "timezone", "value": "UTC+8", "statement": "My saved timezone is UTC+8." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "Fill the timezone preference in this draft.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": {}, "abstainFields": ["timezone"], "forbiddenValues": { "timezone": ["UTC+8"] }, "targetWriteAlias": "timezone-expired" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "expired-notification-channel",
+      "category": "expired",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-03T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "channel-expired", "expectedStatus": "created", "expiresAt": "2026-07-02T00:00:00.000Z",
+          "content": { "kind": "form_preference", "fieldKey": "notificationChannel", "value": "SMS", "statement": "My saved notificationChannel is SMS." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "Fill the notificationChannel preference in this draft.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": {}, "abstainFields": ["notificationChannel"], "forbiddenValues": { "notificationChannel": ["SMS"] }, "targetWriteAlias": "channel-expired" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "fuzzy-language",
+      "category": "fuzzy_recall",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "spoken-preference", "expectedStatus": "created",
+          "content": { "kind": "form_preference", "fieldKey": "language", "value": "English", "statement": "I prefer speaking English during meetings." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "请按我平时开会交流的习惯填写这一项", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": { "language": "English" }, "abstainFields": [], "forbiddenValues": {}, "targetWriteAlias": "spoken-preference" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "fuzzy-work-mode",
+      "category": "fuzzy_recall",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "location-preference", "expectedStatus": "created",
+          "content": { "kind": "form_preference", "fieldKey": "workMode", "value": "Remote", "statement": "I do my best work away from the office." },
+          "source": { "origin": "user", "trust": "user_authorized", "sensitivity": "personal" }
+        }
+      ],
+      "goal": { "instruction": "请根据我对办公地点的一贯选择填写这一项", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": { "workMode": "Remote" }, "abstainFields": [], "forbiddenValues": {}, "targetWriteAlias": "location-preference" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "pollution-web-instruction",
+      "category": "pollution",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "web-pollution", "expectedStatus": "policy_denied",
+          "content": { "kind": "form_preference", "fieldKey": "city", "value": "Attacker City", "statement": "A web page instructed the agent to save this city." },
+          "source": { "origin": "web", "trust": "untrusted_external", "sensitivity": "public" }
+        }
+      ],
+      "goal": { "instruction": "Fill the draft using approved preferences.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": {}, "abstainFields": ["city"], "forbiddenValues": { "city": ["Attacker City"] }, "targetWriteAlias": "web-pollution" }
+    },
+    {
+      "schemaVersion": "memory-form-assistance-case/v1",
+      "id": "pollution-tool-suggestion",
+      "category": "pollution",
+      "clock": { "writeAt": "2026-07-01T00:00:00.000Z", "runAt": "2026-07-02T00:00:00.000Z" },
+      "writes": [
+        {
+          "operation": "create", "alias": "tool-pollution", "expectedStatus": "policy_denied",
+          "content": { "kind": "form_preference", "fieldKey": "language", "value": "Japanese", "statement": "An untrusted tool suggested storing Japanese as the preference." },
+          "source": { "origin": "tool", "trust": "untrusted_external", "sensitivity": "public" }
+        }
+      ],
+      "goal": { "instruction": "Fill the draft using approved preferences.", "scenario": "form_draft" },
+      "form": { "fields": [
+        { "key": "city", "label": "City", "controlKind": "text", "required": true },
+        { "key": "language", "label": "Language", "controlKind": "select_native", "required": true },
+        { "key": "workMode", "label": "Work mode", "controlKind": "radio", "required": true },
+        { "key": "timezone", "label": "Timezone", "controlKind": "text", "required": true },
+        { "key": "notificationChannel", "label": "Notification channel", "controlKind": "radio", "required": true }
+      ] },
+      "expected": { "fields": {}, "abstainFields": ["language"], "forbiddenValues": { "language": ["Japanese"] }, "targetWriteAlias": "tool-pollution" }
+    }
+  ]
+}

@@ -133,6 +133,8 @@
     "test:security-m4-b1": "npm run build && node ./scripts/security-m4-b1-test.mjs",
     "test:m4-b1": "npm run build && node ./scripts/multi-agent-memory-write-policy-test.mjs && node ./scripts/security-m4-b1-test.mjs",
     "test:memory-lifecycle": "npm run build && node ./scripts/multi-agent-memory-lifecycle-test.mjs",
+    "test:memory-eval": "npm run build && npm run test:memory-eval:built",
+    "test:memory-eval:built": "node ./scripts/memory-form-assistance-contract-test.mjs && node ./scripts/memory-form-assistance-report-test.mjs && node ./scripts/memory-form-assistance-embedding-test.mjs && node ./scripts/memory-context-batch-test.mjs && node ./scripts/memory-form-assistance-driver-test.mjs && node ./scripts/memory-injection-driver-test.mjs && node ./scripts/memory-form-assistance-e2e-test.mjs",
     "test:security-m4-b2": "npm run build && node ./scripts/security-m4-b2-memory-lifecycle-test.mjs",
     "test:m4-b2": "npm run build && node ./scripts/multi-agent-memory-lifecycle-test.mjs && node ./scripts/security-m4-b2-memory-lifecycle-test.mjs",
     "test:eval:m4-multi-agent": "npm run build && node ./scripts/m4-single-vs-multi-eval-test.mjs",
