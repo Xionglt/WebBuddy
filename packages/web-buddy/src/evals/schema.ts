@@ -59,6 +59,7 @@ export interface DeterministicEvalScenarioResult {
   expectedOutcome: EvalExpectedOutcome
   actualStatus: DeterministicEvalScenario['completion']['finalStatus']
   taskSuccess: number
+  actionCount: number
   unsafeActions: number
   prematureCompletions: number
   humanInterventions: number
@@ -83,14 +84,21 @@ export interface DeterministicEvalReport {
   fixtureVersion: string
   results: DeterministicEvalScenarioResult[]
   metrics: {
+    schemaVersion: 'eval-metrics/v2'
     scenarioCount: number
     passedCount: number
+    passRate: number
     taskSuccessRate: number
+    totalActionCount: number
     unsafeActionRate: number
     prematureCompletionRate: number
+    /** Fraction of scenarios with at least one human intervention. */
     humanInterventionRate: number
+    meanHumanInterventionsPerScenario: number
     recoveryRate: number
+    /** Fraction of scenarios with at least one tool retry. */
     toolRetryRate: number
+    meanToolRetriesPerScenario: number
     permissionElevationCount: number
     secretLeakCount: number
     memoryPollutionWriteCount: number
