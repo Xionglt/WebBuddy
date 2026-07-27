@@ -16,6 +16,11 @@ import {
   sanitizeRestoredMessagesForResume,
 } from '../dist/session/index.js'
 import { snapshotWebTaskInput } from '../dist/task/contracts.js'
+import {
+  answerPendingContinuation,
+  createPendingContinuation,
+  createResumeCapsule,
+} from '../dist/control/index.js'
 
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-generic-resume-runtime-'))
 const traceRoot = join(root, 'trace')
@@ -139,6 +144,82 @@ try {
     beforeTranscript,
     'recovery must reuse rather than recreate or truncate the durable transcript',
   )
+
+  const pendingContinuation = createPendingContinuation({
+    runId,
+    runRevision: 5,
+    attempt: 2,
+    sessionId,
+    goal: snapshot.goal.instruction,
+    goalRevision: snapshot.revision,
+    contract: snapshot.contract,
+    field: 'company_name',
+    question: 'Which company name should be used?',
+    now: '2026-07-26T00:00:00.000Z',
+  })
+  const continuationCapsule = createResumeCapsule(
+    answerPendingContinuation(pendingContinuation, {
+      answer: 'Example Labs',
+      intentPatch: 'Continue the original task after re-observing.',
+      answeredAt: '2026-07-26T00:00:01.000Z',
+    }),
+    { runRevision: 6, attempt: 3 },
+    '2026-07-26T00:00:02.000Z',
+  )
+  await recorder.transcript({
+    type: 'user_continuation',
+    continuationId: continuationCapsule.continuationId,
+    questionId: continuationCapsule.answeredQuestion.questionId,
+    field: continuationCapsule.answeredQuestion.field,
+    answer: continuationCapsule.answeredQuestion.answer,
+    intentPatch: continuationCapsule.intentPatch,
+    capsule: continuationCapsule,
+  })
+  const restoredContinuation = await restoreSessionState({ session })
+  assert.match(
+    restoredContinuation.restoredMessages.at(-1)?.content,
+    /current page observation is authoritative/i,
+  )
+  const continuationSessionRef = { ...sessionRef, attempt: 3 }
+  const continuationDriver = createWebTaskRuntimeDriver({
+    config,
+    durableSession: true,
+    sessionId,
+    restoredSession: restoredContinuation,
+    continuationAuthority: true,
+  })
+  const continuationOutcome = await continuationDriver.execute(runtimeRequest(
+    continuationSessionRef,
+    {
+      runRevision: 6,
+      attempt: 3,
+      recoveryMode: 'continuation_reobserve/v1',
+    },
+  ))
+  assert.equal(continuationOutcome.status, 'blocked')
+  assert.deepEqual(continuationOutcome.sessionRef, continuationSessionRef)
+  assert(
+    listGenericWebTaskToolDefs(false).some((tool) => tool.name === 'browser_click'),
+    'authorized continuation recovery must retain normal tools behind the existing policy gates',
+  )
+
+  const unauthorizedContinuationDriver = createWebTaskRuntimeDriver({
+    config,
+    durableSession: true,
+    sessionId,
+    restoredSession: restoredContinuation,
+    continuationAuthority: false,
+  })
+  const unauthorizedContinuation = await unauthorizedContinuationDriver.execute(runtimeRequest(
+    continuationSessionRef,
+    {
+      runRevision: 6,
+      attempt: 3,
+      recoveryMode: 'continuation_reobserve/v1',
+    },
+  ))
+  assert.equal(unauthorizedContinuation.status, 'failed')
+  assert.match(unauthorizedContinuation.summary, /durable restored session.*continuation authority/)
 
   const recoveryDefs = listGenericWebTaskToolDefs(true)
   assert(recoveryDefs.some((tool) => tool.name === 'browser_snapshot'))

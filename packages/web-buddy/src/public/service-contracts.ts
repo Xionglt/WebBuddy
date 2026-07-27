@@ -77,6 +77,7 @@ export type AuditAction =
   | 'run.create'
   | 'run.pause'
   | 'run.resume'
+  | 'run.continue'
   | 'run.cancel'
   | 'approval.resolve'
   | 'artifact.read'
@@ -340,6 +341,7 @@ const AUDIT_ACTIONS = new Set<string>([
   'run.create',
   'run.pause',
   'run.resume',
+  'run.continue',
   'run.cancel',
   'approval.resolve',
   'artifact.read',

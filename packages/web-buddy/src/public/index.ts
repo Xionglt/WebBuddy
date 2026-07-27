@@ -58,14 +58,17 @@ export type {
 } from './skill.js'
 
 export {
+  AUTOPILOT_STARTER_SCHEMA_VERSION,
   COMPARISON_STARTER_SCHEMA_VERSION,
   FORM_DRAFT_STARTER_SCHEMA_VERSION,
   RESEARCH_STARTER_SCHEMA_VERSION,
+  createAutopilotStarter,
   createComparisonStarter,
   createFormDraftStarter,
   createResearchStarter,
 } from './starters.js'
 export type {
+  AutopilotStarter,
   ComparisonOption,
   ComparisonStarter,
   FormDraftField,
@@ -86,9 +89,11 @@ export {
 } from './clients.js'
 export type {
   ApprovalClient,
+  ContinueRunRequest,
   PublicArtifactList,
   PublicApproval,
   PublicApprovalList,
+  PublicContinuation,
   PublicRun,
   PublicRunEvents,
   PublicRunList,

@@ -116,6 +116,7 @@ const TRANSCRIPT_ENTRY_TYPES = new Set([
   'workflow_evidence',
   'user_confirmation',
   'user_answer',
+  'user_continuation',
   'workflow_evaluation',
   'completion_gate',
   'context_compaction',

@@ -91,6 +91,7 @@ export interface WebTaskExecutionHost {
   durableSession?: boolean
   restoredSession?: RestoredSessionState
   readOnlyAuthority?: boolean
+  continuationAuthority?: boolean
   onSessionReady?: (session: AgentSession) => void | Promise<void>
   persistenceSanitizer?: (value: unknown) => unknown
   memoryContextProvider?: (input: WebTaskMemoryContextRequest) => Promise<ContextItem[]>
@@ -409,19 +410,29 @@ async function executeGenericWebTask(
     let session: SessionRecorder | undefined
     let sessionRef = executionContext?.sessionRef ?? request.input.sessionRef
     let restoredMessages: ReturnType<typeof sanitizeRestoredMessagesForResume> | undefined
-    const actionLedger = new ActionLedger()
+    const actionLedger = host.restoredSession?.actionLedgerEntries?.length
+      ? ActionLedger.restore(host.restoredSession.actionLedgerEntries)
+      : new ActionLedger()
     const monitoredActionKinds = request.input.contract.criteria.flatMap((criterion) => (
       criterion.kind === 'action_boundary' ? criterion.actionKinds : []
     ))
     try {
       const recoveryRequested = executionContext?.recoveryMode !== undefined
+      const authorizedRecovery =
+        executionContext?.recoveryMode === 'read_only_reobserve/v1'
+          ? host.readOnlyAuthority === true
+          : executionContext?.recoveryMode === 'continuation_reobserve/v1'
+            ? host.continuationAuthority === true
+            : false
       if (recoveryRequested
-        && (executionContext.recoveryMode !== 'read_only_reobserve/v1'
-          || runtimeAssembly.durableSession !== true
+        && (runtimeAssembly.durableSession !== true
           || !host.restoredSession
-          || host.readOnlyAuthority !== true)) {
+          || !authorizedRecovery)) {
+        const authority = executionContext?.recoveryMode === 'read_only_reobserve/v1'
+          ? 'read-only authority'
+          : 'continuation authority'
         throw new Error(
-          'Generic recovery requires a durable restored session and explicit read-only authority.',
+          `Generic recovery requires a durable restored session and explicit ${authority}.`,
         )
       }
       if (host.restoredSession && !recoveryRequested) {
@@ -433,11 +444,10 @@ async function executeGenericWebTask(
           sanitize: host.persistenceSanitizer,
         })
         if (host.restoredSession) {
-          if (executionContext?.recoveryMode !== 'read_only_reobserve/v1'
-            || host.readOnlyAuthority !== true) {
-            throw new Error('Generic session recovery requires explicit read-only authority.')
+          if (!authorizedRecovery) {
+            throw new Error('Generic session recovery requires explicit recovery authority.')
           }
-          const expectedRef = executionContext.sessionRef
+          const expectedRef = executionContext?.sessionRef
           if (!expectedRef
             || expectedRef.provider !== 'file-session-store'
             || expectedRef.id !== sessionId
@@ -510,15 +520,18 @@ async function executeGenericWebTask(
           itemCount: memoryItems.length,
         })
       }
-      if (request.input.startUrl) {
-        const actionId = `runtime-bootstrap:navigate:${request.input.runId}`
+      const recoveryStartUrl = executionContext?.recoveryMode === 'continuation_reobserve/v1'
+        ? host.restoredSession?.latestResumeCapsule?.previousUrl ?? request.input.startUrl
+        : request.input.startUrl
+      if (recoveryStartUrl) {
+        const actionId = `runtime-bootstrap:navigate:${request.input.runId}:attempt-${executionContext?.attempt ?? 1}`
         await recordBootstrapAction(actionLedger.propose({
           actionId,
           actionKind: 'navigate',
           toolName: 'browser_open',
         }))
         await recordBootstrapAction(actionLedger.authorize(actionId, 'User supplied startUrl.'))
-        const opened = await browserOpen({ url: request.input.startUrl, sessionId, waitUntil: 'domcontentloaded' })
+        const opened = await browserOpen({ url: recoveryStartUrl, sessionId, waitUntil: 'domcontentloaded' })
         if (!opened.ok) {
           await recordBootstrapAction(actionLedger.fail(actionId, opened.error.message))
           throw new Error(opened.error.message)

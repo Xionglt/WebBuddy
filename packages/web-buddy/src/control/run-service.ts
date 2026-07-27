@@ -1,4 +1,11 @@
 import { randomUUID } from 'node:crypto'
+import {
+  answerPendingContinuation,
+  createResumeCapsule,
+  retargetResumeCapsule,
+  validatePendingContinuation,
+  type PendingContinuationV1,
+} from '../continuation/contracts.js'
 import type {
   ApprovalBinding,
   ArtifactRef,
@@ -82,6 +89,11 @@ export interface LateResultInput {
 export interface LateResultDecision {
   accepted: boolean
   record: RunRecord
+}
+
+export interface ContinuationAnswerResult {
+  record: RunRecord
+  changed: boolean
 }
 
 export interface ControlEpochExpectation {
@@ -168,6 +180,8 @@ export class RunService {
     if (record.sessionRef === undefined) delete record.sessionRef
     if (record.checkpointRef === undefined) delete record.checkpointRef
     if (record.lastSafeBoundary === undefined) delete record.lastSafeBoundary
+    if (record.pendingContinuation === undefined) delete record.pendingContinuation
+    if (record.lastResumeCapsule === undefined) delete record.lastResumeCapsule
     const event = createRunEvent(record, {
       eventType: input.eventType ?? 'state_transitioned',
       eventSequence: current.nextEventSequence,
@@ -342,6 +356,255 @@ export class RunService {
     }, scope)
   }
 
+  async requestContinuation(
+    runId: string,
+    continuation: PendingContinuationV1,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+  ): Promise<RunRecord> {
+    const current = await this.require(runId, scope)
+    validatePendingContinuation(continuation, {
+      runId: current.runId,
+      runRevision: current.runRevision,
+      attempt: current.attempt,
+    })
+    if (current.pendingContinuation?.continuationId === continuation.continuationId) return current
+    if (current.pendingContinuation) {
+      throw new RunServiceError(
+        'INVALID_CONTROL',
+        `Run already waits on continuation ${current.pendingContinuation.continuationId}.`,
+      )
+    }
+    if (!current.sessionRef
+      || current.sessionRef.provider !== 'file-session-store'
+      || current.sessionRef.id !== continuation.binding.sessionId
+      || current.sessionRef.runId !== current.runId
+      || current.sessionRef.attempt !== current.attempt) {
+      throw new RunServiceError(
+        'INVALID_CONTROL',
+        'Continuation requires the exact durable file session for the current run attempt.',
+      )
+    }
+    if (current.state !== 'running') {
+      throw new RunServiceError('ILLEGAL_TRANSITION', 'A continuation can only be requested by a running attempt.')
+    }
+    return this.transition(runId, {
+      to: 'blocked_on_human',
+      reason: continuation.question.prompt,
+      idempotencyKey,
+      expectedRecordRevision: current.recordRevision,
+      expectedRunRevision: current.runRevision,
+      expectedAttempt: current.attempt,
+      eventType: 'continuation_requested',
+      data: {
+        continuationId: continuation.continuationId,
+        questionId: continuation.question.questionId,
+        field: continuation.question.field,
+      },
+      update: () => ({ pendingContinuation: structuredClone(continuation) }),
+    }, scope)
+  }
+
+  async answerContinuation(
+    runId: string,
+    input: {
+      continuationId: string
+      answer: string
+      intentPatch?: string
+      idempotencyKey: string
+      expectedRecordRevision?: number
+      expectedRunRevision: number
+      expectedAttempt: number
+    },
+    scope?: ScopedStoreQuery,
+  ): Promise<ContinuationAnswerResult> {
+    const current = await this.require(runId, scope)
+    assertControlExpectation(current, {
+      expectedRecordRevision: input.expectedRecordRevision,
+      expectedRunRevision: input.expectedRunRevision,
+      expectedAttempt: input.expectedAttempt,
+    })
+    const pending = current.pendingContinuation
+    if (!pending || pending.continuationId !== input.continuationId) {
+      throw new RunServiceError('INVALID_CONTROL', 'Continuation is missing or no longer current.')
+    }
+    if (current.state !== 'blocked_on_human') {
+      throw new RunServiceError('ILLEGAL_TRANSITION', 'Continuation answer requires blocked_on_human state.')
+    }
+    if (pending.status === 'answered') {
+      const sameAnswer = pending.answer?.answer === input.answer.trim()
+        && (pending.answer?.intentPatch ?? undefined) === normalizedOptional(input.intentPatch)
+      if (!sameAnswer) {
+        throw new RunServiceError('INVALID_CONTROL', 'Continuation was already answered with different content.')
+      }
+      return { record: current, changed: false }
+    }
+
+    const answered = answerPendingContinuation(pending, {
+      answer: input.answer,
+      ...(normalizedOptional(input.intentPatch)
+        ? { intentPatch: normalizedOptional(input.intentPatch) }
+        : {}),
+    })
+    const now = new Date().toISOString()
+    const record: RunRecord = {
+      ...current,
+      pendingContinuation: answered,
+      recordRevision: current.recordRevision + 1,
+      nextEventSequence: current.nextEventSequence + 1,
+      updatedAt: now,
+    }
+    const event = createRunEvent(record, {
+      eventType: 'continuation_answered',
+      eventSequence: current.nextEventSequence,
+      recordRevisionBefore: current.recordRevision,
+      idempotencyKey: input.idempotencyKey,
+      occurredAt: now,
+      data: {
+        continuationId: answered.continuationId,
+        questionId: answered.question.questionId,
+        hasIntentPatch: Boolean(answered.answer?.intentPatch),
+      },
+    })
+    const committed = await this.store.transact(runId, {
+      expectedRecordRevision: current.recordRevision,
+      record,
+      event,
+      idempotencyKey: input.idempotencyKey,
+    })
+    return { record: committed.record, changed: !committed.replayed }
+  }
+
+  async continueAnsweredContinuationLive(
+    runId: string,
+    continuationId: string,
+    scope?: ScopedStoreQuery,
+  ): Promise<RunRecord> {
+    const current = await this.require(runId, scope)
+    const continuation = requireAnsweredContinuation(current, continuationId)
+    const capsule = createResumeCapsule(continuation, {
+      runRevision: current.runRevision,
+      attempt: current.attempt,
+      sessionId: continuation.binding.sessionId,
+    })
+    const resuming = await this.transition(runId, {
+      to: 'resuming',
+      idempotencyKey: `continuation-live-resuming:${current.runRevision}:${current.attempt}:${continuationId}`,
+      expectedRecordRevision: current.recordRevision,
+      expectedRunRevision: current.runRevision,
+      expectedAttempt: current.attempt,
+      eventType: 'continuation_resumed',
+      data: { continuationId, mode: 'live' },
+      update: () => ({
+        pendingContinuation: undefined,
+        lastResumeCapsule: capsule,
+        reason: undefined,
+      }),
+    }, scope)
+    return this.transition(runId, {
+      to: 'running',
+      idempotencyKey: `continuation-live-running:${current.runRevision}:${current.attempt}:${continuationId}`,
+      expectedRecordRevision: resuming.recordRevision,
+      expectedRunRevision: current.runRevision,
+      expectedAttempt: current.attempt,
+      data: { continuationId, mode: 'live' },
+    }, scope)
+  }
+
+  async resumeAnsweredContinuation(
+    runId: string,
+    continuationId: string,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+  ): Promise<RunRecord> {
+    const current = await this.require(runId, scope)
+    const continuation = requireAnsweredContinuation(current, continuationId)
+    const nextRunRevision = current.runRevision + 1
+    const nextAttempt = current.attempt + 1
+    const capsule = createResumeCapsule(continuation, {
+      runRevision: nextRunRevision,
+      attempt: nextAttempt,
+      sessionId: continuation.binding.sessionId,
+    })
+    return this.transition(runId, {
+      to: 'resuming',
+      idempotencyKey,
+      expectedRecordRevision: current.recordRevision,
+      expectedRunRevision: current.runRevision,
+      expectedAttempt: current.attempt,
+      eventType: 'continuation_resumed',
+      data: {
+        continuationId,
+        mode: 'cold',
+        priorAttempt: current.attempt,
+      },
+      update: () => ({
+        runRevision: nextRunRevision,
+        attempt: nextAttempt,
+        pendingApprovalIds: [],
+        pendingContinuation: undefined,
+        lastResumeCapsule: capsule,
+        sessionRef: current.sessionRef
+          ? { ...current.sessionRef, attempt: nextAttempt }
+          : undefined,
+        checkpointRef: undefined,
+        lastSafeBoundary: undefined,
+        reason: undefined,
+      }),
+    }, scope)
+  }
+
+  async resumeFromContinuationCheckpoint(
+    runId: string,
+    idempotencyKey: string,
+    scope?: ScopedStoreQuery,
+    expectation: ControlEpochExpectation = {},
+  ): Promise<RunRecord> {
+    const current = await this.require(runId, scope)
+    assertControlExpectation(current, expectation)
+    const capsule = current.lastResumeCapsule
+    if (!capsule
+      || capsule.target.runId !== current.runId
+      || capsule.target.runRevision !== current.runRevision
+      || capsule.target.attempt !== current.attempt
+      || capsule.target.sessionId !== current.sessionRef?.id) {
+      throw new RunServiceError(
+        'INVALID_CONTROL',
+        'Run does not have an exact durable continuation checkpoint for the current epoch.',
+      )
+    }
+    const nextRunRevision = current.runRevision + 1
+    const nextAttempt = current.attempt + 1
+    const retargeted = retargetResumeCapsule(capsule, {
+      runRevision: nextRunRevision,
+      attempt: nextAttempt,
+      sessionId: current.sessionRef.id,
+    })
+    return this.transition(runId, {
+      to: 'resuming',
+      idempotencyKey,
+      ...expectation,
+      eventType: 'continuation_resumed',
+      data: {
+        continuationId: capsule.continuationId,
+        mode: 'cold',
+        source: 'continuation_checkpoint',
+        priorAttempt: current.attempt,
+      },
+      update: () => ({
+        runRevision: nextRunRevision,
+        attempt: nextAttempt,
+        pendingApprovalIds: [],
+        pendingContinuation: undefined,
+        lastResumeCapsule: retargeted,
+        sessionRef: { ...current.sessionRef!, attempt: nextAttempt },
+        checkpointRef: undefined,
+        lastSafeBoundary: undefined,
+        reason: undefined,
+      }),
+    }, scope)
+  }
+
   async requestCancel(
     runId: string,
     idempotencyKey: string,
@@ -367,7 +630,7 @@ export class RunService {
           ? 'Cancelled before execution.'
           : 'Cancelled while no live execution owned the run.',
         data: { control: 'cancel', quiescent: true },
-        update: () => ({ pendingApprovalIds: [] }),
+        update: () => ({ pendingApprovalIds: [], pendingContinuation: undefined }),
       }, scope)
     }
     return this.transition(runId, {
@@ -378,7 +641,7 @@ export class RunService {
       expectedAttempt: options.expectedAttempt,
       eventType: 'control_requested',
       data: { control: 'cancel' },
-      update: () => ({ pendingApprovalIds: [] }),
+      update: () => ({ pendingApprovalIds: [], pendingContinuation: undefined }),
     }, scope)
   }
 
@@ -472,6 +735,28 @@ export class RunService {
     if (!record) throw new RunServiceError('RUN_NOT_FOUND', `Unknown run: ${runId}.`)
     return record
   }
+}
+
+function requireAnsweredContinuation(
+  record: RunRecord,
+  continuationId: string,
+): PendingContinuationV1 {
+  const continuation = record.pendingContinuation
+  if (!continuation || continuation.continuationId !== continuationId) {
+    throw new RunServiceError('INVALID_CONTROL', 'Continuation is missing or no longer current.')
+  }
+  if (record.state !== 'blocked_on_human') {
+    throw new RunServiceError('ILLEGAL_TRANSITION', 'Continuation resume requires blocked_on_human state.')
+  }
+  if (continuation.status !== 'answered' || !continuation.answer) {
+    throw new RunServiceError('INVALID_CONTROL', 'Continuation must be answered before resume.')
+  }
+  return structuredClone(continuation)
+}
+
+function normalizedOptional(value?: string): string | undefined {
+  const normalized = value?.trim()
+  return normalized ? normalized : undefined
 }
 
 export class ApprovalService {

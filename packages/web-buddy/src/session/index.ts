@@ -20,6 +20,7 @@ export type {
   TranscriptEntry,
   TranscriptEntryBase,
   UserConfirmationEntry,
+  UserContinuationEntry,
   UserMessageEntry,
   WorkflowEvaluationEntry,
   WorkflowEvidenceEntry,

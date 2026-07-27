@@ -1,4 +1,11 @@
 import type { ChatMessage } from '../sdk/llm.js'
+import {
+  renderResumeCapsule,
+  validateResumeCapsule,
+  type ResumeCapsuleV1,
+} from '../continuation/contracts.js'
+import type { KernelEvent } from '../kernel/kernel-events.js'
+import type { ActionLedgerEntry } from '../task/action-ledger.js'
 import type { CompletionGateDecision } from '../workflow/completion-gate.js'
 import type {
   WorkflowBlocker,
@@ -27,6 +34,8 @@ export interface RestoredSessionState {
   missingCriteria: WorkflowCriterionMissing[]
   blockers: WorkflowBlocker[]
   asyncTaskPromptAttachments: TaskNotificationPromptAttachmentV1[]
+  latestResumeCapsule?: ResumeCapsuleV1
+  actionLedgerEntries: ActionLedgerEntry[]
 }
 
 export type RestoreSessionStateInput =
@@ -45,6 +54,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
   const session = await resolveSession(input)
   const migratedTranscript = migrateTranscriptEntriesWithWarnings(await readJsonLines<unknown>(session.transcriptPath))
   const transcript = migratedTranscript.value
+  const events = await readJsonLines<KernelEvent>(session.eventsPath)
 
   let latestWorkflowState: WorkflowState | undefined
   let latestWorkflowEvaluation: WorkflowEngineEvaluation | undefined
@@ -52,6 +62,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
   let latestFinalResult: FinalResultEntry | undefined
   const workflowEvidence: WorkflowEvidence[] = []
   const asyncTaskPromptAttachments: TaskNotificationPromptAttachmentV1[] = []
+  let latestResumeCapsule: ResumeCapsuleV1 | undefined
   let restoredMessages: ChatMessage[] = []
 
   for (const entry of transcript) {
@@ -65,6 +76,12 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
 
     if (entry.type === 'async_task_notification_attachment') {
       asyncTaskPromptAttachments.push(structuredClone(entry.attachment))
+      continue
+    }
+
+    if (entry.type === 'user_continuation') {
+      validateResumeCapsule(entry.capsule, session.runId)
+      latestResumeCapsule = structuredClone(entry.capsule)
       continue
     }
 
@@ -114,6 +131,8 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
       arrayProperty<WorkflowBlocker>(latestCompletionGate, 'blockers') ??
       [],
     asyncTaskPromptAttachments,
+    ...(latestResumeCapsule ? { latestResumeCapsule } : {}),
+    actionLedgerEntries: actionLedgerEntriesFrom(events),
   }
 }
 
@@ -155,6 +174,12 @@ function chatMessageFromTranscriptEntry(entry: TranscriptEntry): ChatMessage | u
   if (entry.type === 'user_message') {
     return { role: 'user', content: entry.content }
   }
+  if (entry.type === 'user_continuation') {
+    return {
+      role: 'user',
+      content: renderResumeCapsule(entry.capsule),
+    }
+  }
   if (entry.type === 'assistant_message') {
     return assistantMessageFromUnknown(entry.content)
   }
@@ -185,6 +210,55 @@ function chatMessageFromTranscriptEntry(entry: TranscriptEntry): ChatMessage | u
   return undefined
 }
 
+function actionLedgerEntriesFrom(events: readonly KernelEvent[]): ActionLedgerEntry[] {
+  const entries: ActionLedgerEntry[] = []
+  for (const event of events) {
+    if (event.type !== 'action_ledger_updated') continue
+    const entry = event.data?.entry
+    if (!isActionLedgerEntry(entry)) {
+      throw new Error('Durable session contains an invalid action ledger event.')
+    }
+    entries.push(structuredClone(entry))
+  }
+  return entries
+}
+
+function isActionLedgerEntry(value: unknown): value is ActionLedgerEntry {
+  if (!isRecord(value) || value.schemaVersion !== 'action-ledger-entry/v1') return false
+  return Number.isSafeInteger(value.sequence)
+    && Number(value.sequence) > 0
+    && typeof value.actionId === 'string'
+    && value.actionId.length > 0
+    && typeof value.actionKind === 'string'
+    && ACTION_LEDGER_KINDS.has(value.actionKind)
+    && typeof value.toolName === 'string'
+    && value.toolName.length > 0
+    && typeof value.status === 'string'
+    && ACTION_LEDGER_STATUSES.has(value.status)
+    && typeof value.recordedAt === 'string'
+    && Number.isFinite(Date.parse(value.recordedAt))
+}
+
+const ACTION_LEDGER_KINDS = new Set([
+  'navigate',
+  'type_or_paste',
+  'upload',
+  'send',
+  'publish',
+  'submit',
+  'payment',
+  'memory_write',
+  'permission_write',
+])
+const ACTION_LEDGER_STATUSES = new Set([
+  'proposed',
+  'authorized',
+  'denied',
+  'performed',
+  'failed',
+  'skipped',
+])
+
 function compactedRestoreMessages(entry: Extract<TranscriptEntry, { type: 'context_compaction' }>): ChatMessage[] {
   return [
     {
@@ -193,6 +267,7 @@ function compactedRestoreMessages(entry: Extract<TranscriptEntry, { type: 'conte
     },
     {
       role: 'user',
+      cacheBoundary: 'compaction_checkpoint',
       content: stringifyJson({
         schemaVersion: 'restored-compacted-run-context/v1',
         summaryId: entry.summaryId,

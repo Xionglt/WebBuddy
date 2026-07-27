@@ -38,6 +38,13 @@ try {
     contract,
   }), { idempotencyKey: 'create-durable-gate-c4' })
   await runs.start(runId, 'start-durable-gate-c4')
+  await runs.attachSession(runId, {
+    schemaVersion: 'session-ref/v1',
+    provider: 'file-session-store',
+    id: 'session-durable-gate-c4',
+    runId,
+    attempt: 1,
+  }, 'attach-session-durable-gate-c4')
 
   const abortController = new AbortController()
   const gate = new DurableHumanGate({
@@ -47,6 +54,7 @@ try {
     runRevision: 0,
     attempt: 1,
     taskContract: contract,
+    goal: 'Prepare a draft.',
     sessionId: 'session-durable-gate-c4',
     abortSignal: abortController.signal,
   })
@@ -157,6 +165,48 @@ try {
   assert.equal(resumed?.runRevision, 0, 'live approval continuation stays in the same fenced attempt')
 
   assert.equal(await gate.resolveLive(approvalId, 'approved'), false, 'approval cannot resume the live turn twice')
+
+  const informationPromise = gate.requestInfo({
+    field: 'contact_email',
+    question: 'Which contact email should be used in the draft?',
+    options: ['work@example.com', 'personal@example.com'],
+    currentUrl: 'https://fixture.example/review',
+  })
+  await until(async () => Boolean((await runs.get(runId))?.pendingContinuation))
+  const waitingForInformation = await runs.get(runId)
+  assert.equal(waitingForInformation?.state, 'blocked_on_human')
+  assert.equal(waitingForInformation?.pendingContinuation?.status, 'pending')
+  assert.equal(waitingForInformation?.pendingContinuation?.question.field, 'contact_email')
+  assert.equal(waitingForInformation?.pendingContinuation?.environment?.url, 'https://fixture.example/review')
+
+  const continuationId = waitingForInformation?.pendingContinuation?.continuationId
+  assert(continuationId)
+  const answered = await runs.answerContinuation(runId, {
+    continuationId,
+    answer: 'work@example.com',
+    intentPatch: 'Use this address only in the draft; do not submit.',
+    idempotencyKey: 'answer-durable-gate-c4',
+    expectedRecordRevision: waitingForInformation.recordRevision,
+    expectedRunRevision: 0,
+    expectedAttempt: 1,
+  })
+  assert.equal(answered.changed, true)
+  assert.equal(answered.record.pendingContinuation?.status, 'answered')
+  assert.equal(await gate.resolveInformationLive(continuationId), true)
+  assert.deepEqual(await informationPromise, {
+    answer: 'work@example.com',
+    intentPatch: 'Use this address only in the draft; do not submit.',
+  })
+  const continued = await runs.get(runId)
+  assert.equal(continued?.state, 'running')
+  assert.equal(continued?.runRevision, 0, 'live information continuation stays in the same fenced attempt')
+  assert.equal(continued?.pendingContinuation, undefined)
+  assert.equal(continued?.lastResumeCapsule?.continuationId, continuationId)
+  assert.equal(continued?.lastResumeCapsule?.reobserveRequired, true)
+  assert.equal(continued?.lastResumeCapsule?.staleBrowserRefsInvalid, true)
+  assert.equal(continued?.lastResumeCapsule?.priorApprovalsInvalid, true)
+  assert.equal(await gate.resolveInformationLive(continuationId), false)
+
   console.log('control durable human gate tests passed')
 } finally {
   await rm(rootDir, { recursive: true, force: true })

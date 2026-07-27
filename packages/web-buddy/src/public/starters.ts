@@ -11,9 +11,17 @@ import { PublicContractError } from './task.js'
 export const RESEARCH_STARTER_SCHEMA_VERSION = 'research-starter/v1' as const
 export const COMPARISON_STARTER_SCHEMA_VERSION = 'comparison-starter/v1' as const
 export const FORM_DRAFT_STARTER_SCHEMA_VERSION = 'form-draft-starter/v1' as const
+export const AUTOPILOT_STARTER_SCHEMA_VERSION = 'autopilot-starter/v1' as const
 
 export interface ResearchStarter {
   schemaVersion: typeof RESEARCH_STARTER_SCHEMA_VERSION
+  goal: string
+  startUrl: string
+  runId?: string
+}
+
+export interface AutopilotStarter {
+  schemaVersion: typeof AUTOPILOT_STARTER_SCHEMA_VERSION
   goal: string
   startUrl: string
   runId?: string
@@ -169,6 +177,48 @@ export function createFormDraftStarter(input: FormDraftStarter): WebTaskInput {
       schemaVersion: 'task-policy/v1',
       defaultSensitiveAction: 'deny',
       rules: sensitiveActions,
+    },
+    ...(input.runId ? { runId: required(input.runId, 'runId') } : {}),
+  }
+}
+
+/**
+ * Maximum-effect autopilot task. Unlike the other starters, this does NOT inject
+ * any deny-write rules: sensitive actions default to `ask`, which the runtime
+ * auto-allows for every non-final high-risk action when the process runs with
+ * `PERMISSION_MODE=autopilot` and `HUMAN_GATE_MODE=auto`. Only the truly
+ * irreversible boundaries (final submit, payment, upload, login, captcha) stay
+ * gated, because the runtime keeps those as hard invariants.
+ *
+ * Use this when you want the agent to drive the task end-to-end for a demo or a
+ * personal run and stop being interrupted for ordinary browser writes.
+ */
+export function createAutopilotStarter(input: AutopilotStarter): WebTaskInput {
+  if (input.schemaVersion !== AUTOPILOT_STARTER_SCHEMA_VERSION) unsupported('AutopilotStarter')
+  return {
+    schemaVersion: 'web-task-input/v1',
+    goal: {
+      instruction: required(input.goal, 'goal'),
+      scenario: 'autopilot',
+    },
+    startUrl: httpUrl(input.startUrl),
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'starter.autopilot.v1',
+      revision: 0,
+      criteria: [{
+        kind: 'evidence_present',
+        id: 'current-page-evidence',
+        description: 'At least one current Main runtime page evidence is required.',
+        evidenceKinds: ['page'],
+        minCount: 1,
+        allowedAuthorities: ['main_runtime'],
+      }],
+    },
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'ask',
+      rules: [],
     },
     ...(input.runId ? { runId: required(input.runId, 'runId') } : {}),
   }

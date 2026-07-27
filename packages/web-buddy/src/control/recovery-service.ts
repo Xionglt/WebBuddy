@@ -56,6 +56,7 @@ export class RecoveryService {
       }
 
       const restartSafe = record.inputSnapshot.goal.metadata?.restartSafe === true
+      const continuationSafe = hasCurrentContinuationCheckpoint(record)
       let sessionExists = false
       let restoreFailure: string | undefined
       if (record.sessionRef) {
@@ -65,9 +66,11 @@ export class RecoveryService {
           restoreFailure = error instanceof Error ? error.message : String(error)
         }
       }
-      const recoverable = restartSafe && sessionExists
+      const recoverable = (restartSafe || continuationSafe) && sessionExists
       const reason = recoverable
-        ? 'Process restarted; explicit resume may restore the durable session, re-observe the page and start a fenced new attempt.'
+        ? continuationSafe
+          ? 'Process restarted after a durable user continuation; explicit resume may restore its exact intent capsule, re-observe the page and start a fenced new attempt.'
+          : 'Process restarted; explicit resume may restore the durable session, re-observe the page and start a fenced new attempt.'
         : restoreFailure
           ? `Process restarted but the durable session failed validation (${restoreFailure}); write actions will not be replayed.`
           : 'Process restarted without both a restorable durable session and a read-only restart contract; write actions will not be replayed.'
@@ -98,4 +101,14 @@ export class RecoveryService {
     }
     return decisions
   }
+}
+
+function hasCurrentContinuationCheckpoint(record: RunRecord): boolean {
+  const capsule = record.lastResumeCapsule
+  return Boolean(capsule
+    && record.sessionRef
+    && capsule.target.runId === record.runId
+    && capsule.target.runRevision === record.runRevision
+    && capsule.target.attempt === record.attempt
+    && capsule.target.sessionId === record.sessionRef.id)
 }
