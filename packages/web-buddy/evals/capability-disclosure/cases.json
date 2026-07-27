@@ -1,0 +1,89 @@
+{
+  "schemaVersion": "capability-disclosure-suite/v1",
+  "cases": [
+    {
+      "id": "explore-handoff",
+      "sources": [{
+        "path": "scripts/agent-loop-test.mjs",
+        "start": "const rawReadOnlyResumeGate = new RecordingCompletionGate('allow')",
+        "end": "const policyDeny = await runLoopScenario({"
+      }],
+      "taskType": "explore",
+      "safetyMode": "raw",
+      "asyncTasks": false,
+      "requiredTools": ["agent_done"]
+    },
+    {
+      "id": "apply-entry-login",
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class ContinueAfterLoginLlm {",
+        "end": "class ActionableDialogDoneLlm {"
+      }],
+      "taskType": "apply_entry",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_audit", "agent_done"]
+    },
+    {
+      "id": "apply-entry-dialog",
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class ActionableDialogDoneLlm {",
+        "end": "class PrematureFillDoneLlm {"
+      }],
+      "taskType": "apply_entry",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_click_text", "agent_done"]
+    },
+    {
+      "id": "fill-text",
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class PrematureFillDoneLlm {",
+        "end": "class RequiredSelectPlaceholderLlm {"
+      }],
+      "taskType": "fill_form",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_audit", "browser_set_field", "agent_done"]
+    },
+    {
+      "id": "fill-select",
+      "sources": [{
+        "path": "scripts/agent-runtime-workflow-test.mjs",
+        "start": "class RequiredSelectPlaceholderLlm {",
+        "end": "class LoginClearingGate {"
+      }],
+      "taskType": "fill_form",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_audit", "browser_set_field", "agent_done"]
+    },
+    {
+      "id": "fill-resume",
+      "sources": [{
+        "path": "scripts/resume-loop-e2e-test.mjs",
+        "start": "class HandoffResumeLlm {",
+        "end": "class AutoGate {"
+      }],
+      "taskType": "fill_form",
+      "safetyMode": "guarded",
+      "asyncTasks": false,
+      "requiredTools": ["browser_form_snapshot", "browser_upload_file", "browser_click_text", "agent_done"]
+    },
+    {
+      "id": "async-workflow-evaluation",
+      "sources": [{
+        "path": "scripts/async-task-agent-loop-test.mjs",
+        "start": "function scriptedAsyncLlm() {",
+        "end": "function call(id, name, args) {"
+      }],
+      "taskType": "explore",
+      "safetyMode": "raw",
+      "asyncTasks": true,
+      "requiredTools": ["browser_wait", "agent_task_spawn", "agent_task_result", "agent_done"]
+    }
+  ]
+}

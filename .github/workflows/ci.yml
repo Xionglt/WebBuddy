@@ -49,6 +49,9 @@ jobs:
       - name: Run Skill Candidate Plane tests
         run: npm run test:skill-candidates:built
 
+      - name: Run capability disclosure eval
+        run: npm run test:capability-disclosure:built
+
       - name: Run deterministic eval
         run: node ./scripts/eval-deterministic-test.mjs
 
