@@ -21,11 +21,18 @@ try {
     'conversationList',
     'welcomeView',
     'conversationView',
+    'conversationShell',
+    'conversationMain',
+    'conversationHeader',
+    'conversationScroller',
+    'conversationComposer',
     'messageList',
     'followupInput',
     'newConversationBtn',
     'conversationApprovalList',
     'executionDetails',
+    'executionPane',
+    'executionDetailsToggle',
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`), `missing Conversation UI element #${id}`)
   }
@@ -34,7 +41,10 @@ try {
   assert.match(html, /\/api\/conversations/)
   assert.match(html, /\/turns/)
   assert.match(html, /function\s+renderMessages\s*\(/)
+  assert.match(html, /function\s+renderMarkdown\s*\(/)
+  assert.match(html, /function\s+setExecutionDetailsOpen\s*\(/)
   assert.match(html, /function\s+submitTurn\s*\(/)
+  assert.match(html, /aria-controls=["']executionPane["']/)
   assert.match(html, /@media\s*\(max-width:\s*760px\)/)
   assert.doesNotMatch(
     html,

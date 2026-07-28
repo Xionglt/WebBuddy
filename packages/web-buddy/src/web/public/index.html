@@ -34,6 +34,7 @@
   [hidden] { display: none !important; }
   html, body { margin: 0; min-height: 100%; }
   body {
+    overflow: hidden;
     background: var(--canvas);
     color: var(--ink);
     font: 14px/1.5 var(--sans);
@@ -58,7 +59,10 @@
   }
 
   .app {
-    min-height: 100vh;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
     display: grid;
     grid-template:
       "header header" 68px
@@ -267,10 +271,16 @@
     grid-area: workspace;
     min-width: 0;
     min-height: 0;
-    overflow: auto;
-    padding: 28px clamp(22px, 4vw, 52px) 40px;
+    overflow: hidden;
   }
-  .workspace-inner { width: min(860px, 100%); margin: 0 auto; }
+  .workspace-inner { width: 100%; height: 100%; min-height: 0; }
+  #welcomeView {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    padding: 28px max(clamp(22px, 4vw, 52px), calc((100% - 860px) / 2)) 40px;
+  }
+  #conversationView { height: 100%; min-height: 0; }
   .workspace-heading { margin-bottom: 18px; }
   .eyebrow {
     color: var(--accent);
@@ -292,7 +302,11 @@
     display: flex;
     align-items: flex-start;
     gap: 18px;
-    margin-bottom: 22px;
+    min-width: 0;
+    margin: 0;
+    padding: 20px clamp(20px, 3vw, 34px) 16px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255, 255, 255, .96);
   }
   .conversation-header-main { min-width: 0; flex: 1; }
   .conversation-header h1 {
@@ -306,8 +320,49 @@
     font: 11px/1.5 var(--mono);
     overflow-wrap: anywhere;
   }
+  .conversation-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .details-toggle { white-space: nowrap; }
+
+  .conversation-shell {
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(330px, 380px);
+    background: var(--canvas);
+  }
+  .conversation-shell.details-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .conversation-main {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  .conversation-scroller {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 20px clamp(20px, 4vw, 54px) 28px;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  .conversation-scroller:focus-visible { box-shadow: inset 0 0 0 3px rgba(37, 87, 214, .18); }
+  .conversation-composer {
+    position: relative;
+    z-index: 2;
+    padding: 12px clamp(20px, 4vw, 54px) 14px;
+    border-top: 1px solid var(--line);
+    background: rgba(244, 246, 249, .96);
+    backdrop-filter: blur(12px);
+  }
 
   .message-list {
+    width: min(760px, 100%);
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
     gap: 15px;
@@ -348,7 +403,54 @@
     color: var(--muted);
     font-size: 10px;
   }
-  .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .message-text { min-width: 0; overflow-wrap: anywhere; }
+  .message-text > :first-child { margin-top: 0; }
+  .message-text > :last-child { margin-bottom: 0; }
+  .message-text p { margin: 0 0 .75em; }
+  .message-text h1,
+  .message-text h2,
+  .message-text h3,
+  .message-text h4 {
+    margin: 1em 0 .45em;
+    line-height: 1.3;
+    letter-spacing: -.02em;
+  }
+  .message-text h1 { font-size: 1.35em; }
+  .message-text h2 { font-size: 1.22em; }
+  .message-text h3 { font-size: 1.12em; }
+  .message-text h4 { font-size: 1em; }
+  .message-text ul,
+  .message-text ol { margin: .55em 0 .8em; padding-left: 1.45em; }
+  .message-text li + li { margin-top: .25em; }
+  .message-text blockquote {
+    margin: .7em 0;
+    padding: .15em 0 .15em .85em;
+    border-left: 3px solid var(--line-strong);
+    color: var(--muted);
+  }
+  .message-text code {
+    border-radius: 5px;
+    padding: .12em .34em;
+    background: #e8edf4;
+    font: .9em/1.5 var(--mono);
+  }
+  .message-text pre {
+    max-width: 100%;
+    margin: .8em 0;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 11px 12px;
+    background: #111827;
+    color: #eef2f7;
+  }
+  .message-text pre code { padding: 0; background: transparent; color: inherit; }
+  .markdown-table-wrap { max-width: 100%; margin: .8em 0; overflow-x: auto; }
+  .message-text table { width: 100%; border-collapse: collapse; font-size: .92em; }
+  .message-text th,
+  .message-text td { border: 1px solid var(--line-strong); padding: 6px 8px; text-align: left; }
+  .message-text th { background: var(--surface-subtle); }
+  .message-text a { color: var(--accent); text-underline-offset: 2px; }
   .message-artifacts { margin-top: 7px; color: var(--muted); font-size: 11px; }
   .message-detail {
     margin-top: 8px;
@@ -368,7 +470,8 @@
   }
 
   .conversation-approval-section {
-    margin: 0 0 18px;
+    width: min(760px, 100%);
+    margin: 0 auto 18px;
     padding: 14px;
     border: 1px solid #e7c78e;
     border-radius: 14px;
@@ -377,9 +480,8 @@
   .conversation-approval-section h2 { margin: 0 0 10px; font-size: 13px; }
 
   .followup-composer {
-    position: sticky;
-    bottom: 0;
-    z-index: 2;
+    width: min(760px, 100%);
+    margin: 0 auto;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px;
@@ -402,36 +504,35 @@
     line-height: 1.55;
   }
   .followup-error, .welcome-error {
+    width: min(760px, 100%);
+    margin-left: auto;
+    margin-right: auto;
     min-height: 20px;
-    margin: 7px 3px 0;
+    margin-top: 7px;
     color: var(--red);
     font-size: 12px;
   }
 
   .execution-details {
-    margin-top: 24px;
-    border: 1px solid var(--line-strong);
-    border-radius: 14px;
+    min-height: 100%;
     background: var(--surface);
   }
-  .execution-details > summary {
+  .execution-panel-heading {
+    position: sticky;
+    top: 0;
+    z-index: 3;
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 14px 16px;
-    cursor: pointer;
-    font-weight: 710;
-    list-style: none;
+    min-height: 58px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255, 255, 255, .96);
+    backdrop-filter: blur(12px);
   }
-  .execution-details > summary::-webkit-details-marker { display: none; }
-  .execution-details > summary::after {
-    content: "+";
-    margin-left: auto;
-    color: var(--muted);
-    font: 16px/1 var(--mono);
-  }
-  .execution-details[open] > summary::after { content: "−"; }
+  .execution-panel-heading h2 { margin: 0; font-size: 13px; }
   .execution-summary-meta {
+    flex: 1;
     min-width: 0;
     color: var(--muted);
     font: 10px/1.4 var(--mono);
@@ -439,11 +540,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .execution-content { padding: 0 18px 18px; border-top: 1px solid var(--line); }
+  .execution-content { padding: 0 18px 18px; }
   .execution-details .inspect-pane {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0 28px;
+    display: block;
     padding: 20px 0 0;
     border: 0;
     background: transparent;
@@ -532,8 +631,8 @@
   }
 
   .activity {
-    margin-top: 28px;
-    border-top: 1px solid var(--line);
+    margin-top: 0;
+    border-top: 0;
   }
   .activity-head {
     display: flex;
@@ -624,6 +723,16 @@
     background: var(--surface);
     border-left: 1px solid var(--line);
   }
+  .execution-pane {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    border-left: 1px solid var(--line);
+    background: var(--surface);
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  .execution-pane:focus-visible { box-shadow: inset 0 0 0 3px rgba(37, 87, 214, .18); }
   .inspect-section { padding: 0 2px 20px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
   .inspect-section:last-child { border-bottom: 0; }
   .inspect-title {
@@ -704,15 +813,28 @@
   @media (max-width: 1120px) {
     .app {
       grid-template:
-        "header header" auto
-        "history workspace" minmax(620px, auto)
+        "header header" 68px
+        "history workspace" minmax(0, 1fr)
         / 230px minmax(0, 1fr);
     }
-    .appbar { min-height: 68px; }
+    .conversation-shell { position: relative; grid-template-columns: minmax(0, 1fr); }
+    .execution-pane {
+      position: absolute;
+      inset: 0 0 0 auto;
+      z-index: 8;
+      width: min(390px, calc(100% - 36px));
+      box-shadow: -18px 0 48px rgba(33, 47, 73, .16);
+    }
   }
 
   @media (max-width: 760px) {
+    html, body { min-height: 100%; }
+    body { overflow: visible; }
     .app {
+      height: auto;
+      min-height: 100vh;
+      min-height: 100dvh;
+      overflow: visible;
       display: grid;
       grid-template:
         "header" auto
@@ -726,16 +848,36 @@
     .token-input { flex: 1; width: auto; min-width: 150px; }
     .history-pane { min-height: 260px; max-height: 420px; border-top: 1px solid var(--line); border-right: 0; }
     .runtime-info { margin-top: 20px; }
-    .workspace { padding: 24px 16px 34px; }
+    .workspace { overflow: visible; }
+    .workspace-inner { height: auto; }
+    #welcomeView { height: auto; overflow: visible; padding: 24px 16px 34px; }
+    #conversationView { height: auto; }
+    .conversation-shell { display: block; height: auto; }
+    .conversation-main { display: block; }
+    .conversation-scroller { overflow: visible; padding: 18px 16px 8px; }
     .workspace-heading h1 { font-size: 28px; }
-    .conversation-header { align-items: flex-start; }
+    .conversation-header { align-items: flex-start; padding: 18px 16px 14px; }
+    .conversation-header-actions { flex-direction: column; align-items: flex-end; }
     .message-body { max-width: 90%; }
+    .conversation-composer {
+      position: sticky;
+      bottom: 0;
+      padding: 10px 16px 12px;
+    }
     .followup-composer { grid-template-columns: 1fr; }
     .followup-composer .btn { width: 100%; }
     .composer-footer { align-items: flex-start; }
     .activity-head { flex-wrap: wrap; padding: 10px 0; }
     .activity-spacer { display: none; }
-    .execution-details .inspect-pane { display: block; }
+    .execution-pane {
+      position: static;
+      width: 100%;
+      max-height: none;
+      overflow: visible;
+      border-top: 1px solid var(--line);
+      border-left: 0;
+      box-shadow: none;
+    }
     .execution-content { padding: 0 12px 12px; }
     .run-id { order: 3; flex-basis: 100%; max-width: none; }
   }
@@ -809,102 +951,119 @@
       </section>
 
       <section id="conversationView" hidden>
-        <header class="conversation-header">
-          <div class="conversation-header-main">
-            <div class="eyebrow">持续目标</div>
-            <h1 id="conversationGoal">-</h1>
-            <div class="conversation-url" id="conversationUrl">-</div>
-          </div>
-          <span class="status" id="conversationStatus"><span class="status-dot"></span><span id="conversationStatusText">空闲</span></span>
-        </header>
-
-        <div class="message-list" id="messageList">
-          <div class="message-empty">这个对话还没有消息。</div>
-        </div>
-
-        <section class="conversation-approval-section" id="conversationApprovalSection" hidden>
-          <h2>需要你确认</h2>
-          <div class="approval-list" id="conversationApprovalList"></div>
-        </section>
-
-        <div class="followup-composer">
-          <label class="sr-only" for="followupInput">继续追问</label>
-          <textarea class="followup-input" id="followupInput" placeholder="继续追问、补充条件，或让 Agent 执行下一步…"></textarea>
-          <button class="btn primary" id="followupBtn" type="button" disabled>发送</button>
-        </div>
-        <div class="followup-error" id="followupError" aria-live="polite"></div>
-
-        <details class="execution-details" id="executionDetails">
-          <summary>执行详情 <span class="execution-summary-meta" id="executionSummaryMeta">尚未运行</span></summary>
-          <div class="execution-content">
-            <section class="activity">
-              <div class="activity-head">
-                <h2>执行路径</h2>
-                <span class="status" id="status"><span class="status-dot"></span><span id="statusText">空闲</span></span>
-                <span class="run-id" id="runId">尚未运行</span>
-                <span class="activity-spacer"></span>
-                <button class="btn ghost small" id="refreshBtn" disabled>刷新轨迹</button>
-                <button class="btn danger small" id="stopBtn" disabled>停止任务</button>
+        <div class="conversation-shell" id="conversationShell">
+          <section class="conversation-main" id="conversationMain" aria-label="当前对话">
+            <header class="conversation-header" id="conversationHeader">
+              <div class="conversation-header-main">
+                <div class="eyebrow">持续目标</div>
+                <h1 id="conversationGoal">-</h1>
+                <div class="conversation-url" id="conversationUrl">-</div>
               </div>
-              <div class="timeline" id="timeline">
-                <div class="timeline-empty"><strong>尚未产生 Run</strong>发送一条消息后，这里会显示执行轨迹。</div>
+              <div class="conversation-header-actions">
+                <span class="status" id="conversationStatus"><span class="status-dot"></span><span id="conversationStatusText">空闲</span></span>
+                <button class="btn secondary small details-toggle" id="executionDetailsToggle" type="button" aria-controls="executionPane" aria-expanded="true">执行详情</button>
+              </div>
+            </header>
+
+            <div class="conversation-scroller" id="conversationScroller" tabindex="0" aria-label="对话消息">
+              <div class="message-list" id="messageList">
+                <div class="message-empty">这个对话还没有消息。</div>
+              </div>
+
+              <section class="conversation-approval-section" id="conversationApprovalSection" hidden>
+                <h2>需要你确认</h2>
+                <div class="approval-list" id="conversationApprovalList"></div>
+              </section>
+            </div>
+
+            <footer class="conversation-composer" id="conversationComposer">
+              <div class="followup-composer">
+                <label class="sr-only" for="followupInput">继续追问</label>
+                <textarea class="followup-input" id="followupInput" placeholder="继续追问、补充条件，或让 Agent 执行下一步…"></textarea>
+                <button class="btn primary" id="followupBtn" type="button" disabled>发送</button>
+              </div>
+              <div class="followup-error" id="followupError" aria-live="polite"></div>
+            </footer>
+          </section>
+
+          <aside class="execution-pane" id="executionPane" aria-label="执行详情" tabindex="-1">
+            <section class="execution-details" id="executionDetails">
+              <header class="execution-panel-heading">
+                <h2>执行详情</h2>
+                <span class="execution-summary-meta" id="executionSummaryMeta">尚未运行</span>
+                <button class="btn ghost small" id="executionDetailsClose" type="button" aria-label="收起执行详情">收起</button>
+              </header>
+              <div class="execution-content">
+                <section class="activity">
+                  <div class="activity-head">
+                    <h2>执行路径</h2>
+                    <span class="status" id="status"><span class="status-dot"></span><span id="statusText">空闲</span></span>
+                    <span class="run-id" id="runId">尚未运行</span>
+                    <span class="activity-spacer"></span>
+                    <button class="btn ghost small" id="refreshBtn" disabled>刷新轨迹</button>
+                    <button class="btn danger small" id="stopBtn" disabled>停止任务</button>
+                  </div>
+                  <div class="timeline" id="timeline">
+                    <div class="timeline-empty"><strong>尚未产生 Run</strong>发送一条消息后，这里会显示执行轨迹。</div>
+                  </div>
+                </section>
+
+                <div class="inspect-pane">
+                  <section class="inspect-section" data-contract="approval-inbox">
+                    <div class="inspect-title"><h2>待人工确认</h2><span class="count-badge" id="approvalCount">0</span></div>
+                    <div class="approval-list" id="approvalList"><div class="panel-empty">当前没有等待确认的动作。</div></div>
+                  </section>
+
+                  <section class="inspect-section">
+                    <div class="inspect-title"><h2>运行详情</h2></div>
+                    <dl class="detail-grid">
+                      <dt>状态</dt><dd id="runStatus">空闲</dd>
+                      <dt>Run ID</dt><dd id="runIdPanel">-</dd>
+                      <dt>修订</dt><dd id="runRevision">-</dd>
+                      <dt>尝试</dt><dd id="runAttempt">-</dd>
+                      <dt>轨迹片段</dt><dd id="spanCount">0</dd>
+                    </dl>
+                    <div class="resource-links">
+                      <a id="traceLink" href="#" target="_blank">查看完整轨迹</a>
+                      <a id="artifactLink" href="#" target="_blank">查看产物</a>
+                    </div>
+                  </section>
+
+                  <section class="inspect-section">
+                    <div class="inspect-title"><h2>执行指标</h2></div>
+                    <div id="metricsEmpty" class="panel-empty">运行后会显示模型与浏览器调用指标。</div>
+                    <div class="metric-grid" id="metricsGrid" hidden>
+                      <div class="metric"><div class="metric-key">耗时</div><div class="metric-value" id="metricDuration">-</div></div>
+                      <div class="metric"><div class="metric-key">模型调用</div><div class="metric-value" id="metricLlmCalls">-</div></div>
+                      <div class="metric"><div class="metric-key">工具调用</div><div class="metric-value" id="metricToolCalls">-</div></div>
+                      <div class="metric"><div class="metric-key">页面快照</div><div class="metric-value" id="metricSnapshots">-</div></div>
+                      <div class="metric"><div class="metric-key">点击</div><div class="metric-value" id="metricClicks">-</div></div>
+                      <div class="metric"><div class="metric-key">截图</div><div class="metric-value" id="metricScreenshots">-</div></div>
+                    </div>
+                  </section>
+
+                  <section class="inspect-section">
+                    <div class="inspect-title"><h2>风险决策</h2></div>
+                    <div id="riskEmpty" class="panel-empty">尚未产生风险决策。</div>
+                    <div id="riskContent" hidden>
+                      <div class="risk-summary">
+                        <div class="risk-stat"><strong id="riskAutoAllowed">0</strong><span>自动放行</span></div>
+                        <div class="risk-stat"><strong id="riskGated">0</strong><span>等待确认</span></div>
+                        <div class="risk-stat"><strong id="riskDenied">0</strong><span>拒绝</span></div>
+                      </div>
+                      <div class="risk-list" id="riskList"></div>
+                    </div>
+                  </section>
+
+                  <section class="inspect-section">
+                    <div class="inspect-title"><h2>轨迹片段</h2></div>
+                    <div class="span-list" id="spans"><div class="panel-empty">尚未生成轨迹片段。</div></div>
+                  </section>
+                </div>
               </div>
             </section>
-
-            <div class="inspect-pane">
-    <section class="inspect-section" data-contract="approval-inbox">
-      <div class="inspect-title"><h2>待人工确认</h2><span class="count-badge" id="approvalCount">0</span></div>
-      <div class="approval-list" id="approvalList"><div class="panel-empty">当前没有等待确认的动作。</div></div>
-    </section>
-
-    <section class="inspect-section">
-      <div class="inspect-title"><h2>运行详情</h2></div>
-      <dl class="detail-grid">
-        <dt>状态</dt><dd id="runStatus">空闲</dd>
-        <dt>Run ID</dt><dd id="runIdPanel">-</dd>
-        <dt>修订</dt><dd id="runRevision">-</dd>
-        <dt>尝试</dt><dd id="runAttempt">-</dd>
-        <dt>轨迹片段</dt><dd id="spanCount">0</dd>
-      </dl>
-      <div class="resource-links">
-        <a id="traceLink" href="#" target="_blank">查看完整轨迹</a>
-        <a id="artifactLink" href="#" target="_blank">查看产物</a>
-      </div>
-    </section>
-
-    <section class="inspect-section">
-      <div class="inspect-title"><h2>执行指标</h2></div>
-      <div id="metricsEmpty" class="panel-empty">运行后会显示模型与浏览器调用指标。</div>
-      <div class="metric-grid" id="metricsGrid" hidden>
-        <div class="metric"><div class="metric-key">耗时</div><div class="metric-value" id="metricDuration">-</div></div>
-        <div class="metric"><div class="metric-key">模型调用</div><div class="metric-value" id="metricLlmCalls">-</div></div>
-        <div class="metric"><div class="metric-key">工具调用</div><div class="metric-value" id="metricToolCalls">-</div></div>
-        <div class="metric"><div class="metric-key">页面快照</div><div class="metric-value" id="metricSnapshots">-</div></div>
-        <div class="metric"><div class="metric-key">点击</div><div class="metric-value" id="metricClicks">-</div></div>
-        <div class="metric"><div class="metric-key">截图</div><div class="metric-value" id="metricScreenshots">-</div></div>
-      </div>
-    </section>
-
-    <section class="inspect-section">
-      <div class="inspect-title"><h2>风险决策</h2></div>
-      <div id="riskEmpty" class="panel-empty">尚未产生风险决策。</div>
-      <div id="riskContent" hidden>
-        <div class="risk-summary">
-          <div class="risk-stat"><strong id="riskAutoAllowed">0</strong><span>自动放行</span></div>
-          <div class="risk-stat"><strong id="riskGated">0</strong><span>等待确认</span></div>
-          <div class="risk-stat"><strong id="riskDenied">0</strong><span>拒绝</span></div>
+          </aside>
         </div>
-        <div class="risk-list" id="riskList"></div>
-      </div>
-    </section>
-
-    <section class="inspect-section">
-      <div class="inspect-title"><h2>轨迹片段</h2></div>
-      <div class="span-list" id="spans"><div class="panel-empty">尚未生成轨迹片段。</div></div>
-    </section>
-            </div>
-          </div>
-        </details>
       </section>
     </div>
   </main>
@@ -952,6 +1111,8 @@ let creatingConversation = false;
 let eventStream = null;
 let traceTimer = null;
 let riskTimelineKeys = new Set();
+let executionDetailsOpen = window.innerWidth > 1120;
+let executionViewportMode = window.innerWidth > 1120 ? 'wide' : 'compact';
 
 function statusLabel(value) {
   return STATUS_LABELS[value] || value || '未知';
@@ -963,6 +1124,22 @@ function statusClass(value) {
   if (value === 'failed') return 'failed';
   if (['completed', 'done'].includes(value)) return 'completed';
   return '';
+}
+
+function setExecutionDetailsOpen(open, options = {}) {
+  executionDetailsOpen = Boolean(open);
+  $('executionPane').hidden = !executionDetailsOpen;
+  $('conversationShell').classList.toggle('details-collapsed', !executionDetailsOpen);
+  $('executionDetailsToggle').setAttribute('aria-expanded', String(executionDetailsOpen));
+  $('executionDetailsToggle').textContent = executionDetailsOpen ? '收起详情' : '执行详情';
+  if (executionDetailsOpen && options.focus) $('executionPane').focus({ preventScroll: true });
+}
+
+function syncExecutionDetailsForViewport(force = false) {
+  const nextMode = window.innerWidth > 1120 ? 'wide' : 'compact';
+  if (!force && nextMode === executionViewportMode) return;
+  executionViewportMode = nextMode;
+  setExecutionDetailsOpen(nextMode === 'wide');
 }
 
 function setStatus(value) {
@@ -1086,8 +1263,230 @@ function showConversation(conversation) {
   setRunControls(BUSY_STATES.includes(latest?.state));
 }
 
+function renderMarkdown(target, source) {
+  const value = String(source ?? '');
+  const fragment = document.createDocumentFragment();
+  try {
+    appendMarkdownBlocks(fragment, value);
+    target.replaceChildren(fragment);
+  } catch {
+    target.textContent = value;
+  }
+}
+
+function appendMarkdownBlocks(root, source) {
+  const lines = source.replace(/\r\n?/g, '\n').split('\n');
+  let index = 0;
+  while (index < lines.length) {
+    if (!lines[index].trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = lines[index].match(/^```([\w-]+)?\s*$/);
+    if (fence) {
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      if (fence[1]) {
+        code.dataset.language = fence[1];
+        code.className = `language-${fence[1]}`;
+      }
+      code.textContent = codeLines.join('\n');
+      pre.appendChild(code);
+      root.appendChild(pre);
+      continue;
+    }
+
+    const heading = lines[index].match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const element = document.createElement(`h${heading[1].length}`);
+      appendInlineMarkdown(element, heading[2]);
+      root.appendChild(element);
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(lines[index])) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ''));
+        index += 1;
+      }
+      const quote = document.createElement('blockquote');
+      appendInlineLines(quote, quoteLines);
+      root.appendChild(quote);
+      continue;
+    }
+
+    const list = lines[index].match(/^\s*([-+*]|\d+\.)\s+(.+)$/);
+    if (list) {
+      const ordered = /\d+\./.test(list[1]);
+      const listElement = document.createElement(ordered ? 'ol' : 'ul');
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*([-+*]|\d+\.)\s+(.+)$/);
+        if (!item || /\d+\./.test(item[1]) !== ordered) break;
+        const listItem = document.createElement('li');
+        appendInlineMarkdown(listItem, item[2]);
+        listElement.appendChild(listItem);
+        index += 1;
+      }
+      root.appendChild(listElement);
+      continue;
+    }
+
+    if (index + 1 < lines.length && isTableRow(lines[index]) && isTableSeparator(lines[index + 1])) {
+      const headers = tableCells(lines[index]);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && isTableRow(lines[index]) && lines[index].trim()) {
+        rows.push(tableCells(lines[index]));
+        index += 1;
+      }
+      const wrapper = document.createElement('div');
+      wrapper.className = 'markdown-table-wrap';
+      const table = document.createElement('table');
+      const head = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      for (const value of headers) {
+        const cell = document.createElement('th');
+        appendInlineMarkdown(cell, value);
+        headRow.appendChild(cell);
+      }
+      head.appendChild(headRow);
+      table.appendChild(head);
+      const body = document.createElement('tbody');
+      for (const values of rows) {
+        const row = document.createElement('tr');
+        for (let cellIndex = 0; cellIndex < headers.length; cellIndex += 1) {
+          const cell = document.createElement('td');
+          appendInlineMarkdown(cell, values[cellIndex] || '');
+          row.appendChild(cell);
+        }
+        body.appendChild(row);
+      }
+      table.appendChild(body);
+      wrapper.appendChild(table);
+      root.appendChild(wrapper);
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (index < lines.length && lines[index].trim()) {
+      if (paragraphLines.length && startsMarkdownBlock(lines, index)) break;
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    const paragraph = document.createElement('p');
+    appendInlineLines(paragraph, paragraphLines);
+    root.appendChild(paragraph);
+  }
+}
+
+function startsMarkdownBlock(lines, index) {
+  const line = lines[index];
+  return /^```/.test(line)
+    || /^(#{1,4})\s+/.test(line)
+    || /^>\s?/.test(line)
+    || /^\s*([-+*]|\d+\.)\s+/.test(line)
+    || (index + 1 < lines.length && isTableRow(line) && isTableSeparator(lines[index + 1]));
+}
+
+function appendInlineLines(parent, lines) {
+  lines.forEach((line, index) => {
+    if (index) parent.appendChild(document.createElement('br'));
+    appendInlineMarkdown(parent, line);
+  });
+}
+
+function appendInlineMarkdown(parent, source) {
+  let remaining = String(source ?? '');
+  const tokenPatterns = [
+    { kind: 'code', regex: /`([^`\n]+)`/ },
+    { kind: 'link', regex: /\[([^\]\n]+)\]\(([^)\n]+)\)/ },
+    { kind: 'strong', regex: /\*\*([^*\n]+)\*\*/ },
+    { kind: 'em', regex: /\*([^*\n]+)\*/ },
+  ];
+  while (remaining) {
+    const candidate = tokenPatterns
+      .map((pattern, priority) => ({ ...pattern, priority, match: remaining.match(pattern.regex) }))
+      .filter((item) => item.match)
+      .sort((left, right) => left.match.index - right.match.index || left.priority - right.priority)[0];
+    if (!candidate) {
+      parent.appendChild(document.createTextNode(remaining));
+      return;
+    }
+    if (candidate.match.index > 0) {
+      parent.appendChild(document.createTextNode(remaining.slice(0, candidate.match.index)));
+    }
+    const token = candidate.match[0];
+    if (candidate.kind === 'code') {
+      const code = document.createElement('code');
+      code.textContent = candidate.match[1];
+      parent.appendChild(code);
+    } else if (candidate.kind === 'link') {
+      const href = safeHttpUrl(candidate.match[2]);
+      if (!href) {
+        parent.appendChild(document.createTextNode(token));
+      } else {
+        const link = document.createElement('a');
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        appendInlineMarkdown(link, candidate.match[1]);
+        parent.appendChild(link);
+      }
+    } else {
+      const element = document.createElement(candidate.kind === 'strong' ? 'strong' : 'em');
+      appendInlineMarkdown(element, candidate.match[1]);
+      parent.appendChild(element);
+    }
+    remaining = remaining.slice(candidate.match.index + token.length);
+  }
+}
+
+function safeHttpUrl(value) {
+  try {
+    const url = new URL(String(value).trim());
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function tableCells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+}
+
+function isTableRow(line) {
+  return tableCells(line).length > 1 && line.includes('|');
+}
+
+function isTableSeparator(line) {
+  const cells = tableCells(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isNearConversationBottom() {
+  const scroller = $('conversationScroller');
+  return scroller.scrollHeight <= scroller.clientHeight
+    || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 96;
+}
+
+function scrollConversationToBottom() {
+  const scroller = $('conversationScroller');
+  scroller.scrollTop = scroller.scrollHeight;
+}
+
 function renderMessages(conversation) {
   const root = $('messageList');
+  const shouldScroll = isNearConversationBottom();
   root.innerHTML = '';
   if (!conversation.turns?.length) {
     root.innerHTML = '<div class="message-empty">这个对话还没有消息。发送第一条请求开始执行。</div>';
@@ -1098,29 +1497,31 @@ function renderMessages(conversation) {
     user.className = 'message user';
     user.innerHTML = '<div class="message-body"><div class="message-meta"></div><div class="message-text"></div></div><div class="message-avatar">你</div>';
     user.querySelector('.message-meta').textContent = `第 ${turn.sequence} 轮 · ${new Date(turn.createdAt).toLocaleString()}`;
-    user.querySelector('.message-text').textContent = turn.userMessage;
+    renderMarkdown(user.querySelector('.message-text'), turn.userMessage);
     root.appendChild(user);
 
     const agent = document.createElement('article');
     agent.className = 'message agent';
     agent.innerHTML = '<div class="message-avatar">AI</div><div class="message-body"><div class="message-meta"></div><div class="message-text"></div><div class="message-artifacts"></div><button class="message-detail" type="button">查看本轮执行详情</button></div>';
     agent.querySelector('.message-meta').textContent = `Agent · ${statusLabel(turn.run.state)}`;
-    agent.querySelector('.message-text').textContent = turn.run.summary
+    const agentMessage = turn.run.summary
       || (BUSY_STATES.includes(turn.run.state)
         ? 'Agent 正在处理这条请求。'
         : `本轮已${statusLabel(turn.run.state)}，可以继续追问或查看执行详情。`);
+    renderMarkdown(agent.querySelector('.message-text'), agentMessage);
     const artifactCount = turn.run.artifacts?.length || 0;
     const artifacts = agent.querySelector('.message-artifacts');
     artifacts.textContent = artifactCount ? `已保留 ${artifactCount} 个结构化产物` : '';
     artifacts.hidden = artifactCount === 0;
     agent.querySelector('.message-detail').addEventListener('click', () => {
-      $('executionDetails').open = true;
+      setExecutionDetailsOpen(true, { focus: true });
       selectRun(turn.run.runId).catch((error) => {
         addEvent({ level: 'error', phase: 'detail', message: error.message || String(error) });
       });
     });
     root.appendChild(agent);
   }
+  if (shouldScroll) scrollConversationToBottom();
 }
 
 function resetRunView(message = '建立安全会话并打开目标网页。') {
@@ -1612,6 +2013,13 @@ $('followupBtn').addEventListener('click', () => submitTurn());
 $('followupInput').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submitTurn();
 });
+$('executionDetailsToggle').addEventListener('click', () => {
+  setExecutionDetailsOpen(!executionDetailsOpen, { focus: !executionDetailsOpen });
+});
+$('executionDetailsClose').addEventListener('click', () => {
+  setExecutionDetailsOpen(false);
+  $('executionDetailsToggle').focus();
+});
 $('stopBtn').addEventListener('click', stopRun);
 $('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => {
   addEvent({ level: 'error', phase: 'trace', message: error.message || String(error) });
@@ -1628,6 +2036,8 @@ $('artifactLink').addEventListener('click', (event) => {
 setInterval(() => {
   if (connected) refreshControlPlane().catch(() => {});
 }, 5000);
+window.addEventListener('resize', () => syncExecutionDetailsForViewport());
+syncExecutionDetailsForViewport(true);
 showWelcome();
 </script>
 </body>
