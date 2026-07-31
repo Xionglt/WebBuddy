@@ -126,6 +126,18 @@
     align-items: center;
     gap: 8px;
   }
+  .poc-entry {
+    padding: 7px 10px;
+    border: 1px solid #b8d1c6;
+    border-radius: 9px;
+    background: #edf5f1;
+    color: #2f6f5e;
+    font-size: 12px;
+    font-weight: 700;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .poc-entry:hover { background: #e4efe9; }
   .token-input {
     width: min(300px, 31vw);
     height: 36px;
@@ -625,6 +637,7 @@
       </div>
     </div>
     <div class="service-connect">
+      <a class="poc-entry" href="/poc/invoice-portal">体验「接手」POC</a>
       <label class="sr-only" for="serviceToken">服务令牌</label>
       <input class="token-input" id="serviceToken" type="password" autocomplete="off" placeholder="输入服务令牌以连接本地 Runtime" />
       <button class="btn secondary" id="connectBtn">连接服务</button>

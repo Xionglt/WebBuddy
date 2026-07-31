@@ -51,6 +51,7 @@
     "test:e2e-auto-apply": "npm run build && node ./scripts/e2e-auto-apply.mjs",
     "test:e2e-web-auto-apply": "npm run build && node ./scripts/e2e-web-auto-apply.mjs",
     "test:venue-fixture": "npm run build && node ./scripts/venue-booking-fixture-test.mjs",
+    "test:invoice-portal-poc": "npm run build && node ./scripts/invoice-portal-poc-test.mjs",
     "test:smoke": "npm run build && node ./scripts/smoke-test.mjs",
     "test:model": "npm run build && node ./scripts/model-smoke-test.mjs",
     "test:resume": "node ./scripts/resume-test.mjs",

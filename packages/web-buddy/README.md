@@ -150,6 +150,7 @@ npm run test:mvp
 | `npm run demo:form` | Local form observation, structured profile filling, and submit-adjacent gate behavior. | Offline fixture; never contacts a real site. |
 | `npm run demo:research` | Read-only page observation, structured summary artifact, trace, metrics, safety report. | Offline fixture; no login, no form submit, no L3/L4 action. |
 | Web console → `Venue` | Compare five venues, choose the only fully compliant option, fill a booking draft, and stop before payment. | Local fixture; uses fake contact data and must leave the payment boundary untouched. |
+| `/poc/invoice-portal` | Supplier-side customer portal invoice preparation, exception isolation, exact approval, and receipt capture. | Deterministic offline POC; no customer portal or real submission is contacted. |
 | `npm run demo:match` | Read-only Alibaba multi-page list/detail matching as a domain Skill example. | Threshold-gated; does not final-submit. |
 | `npm run alibaba:apply:raw` | Complex recruiting workflow through the same generic Web Buddy runtime. | Requires model and human handoff for login/captcha/final submit. |
 
@@ -510,6 +511,7 @@ npm run test:job-crawl-pagination  # multi-page crawl + Top N detail fixture
 npm run test:job-match-threshold   # threshold stops low matches before apply
 npm run test:permission-modes # safe/review/trusted/autopilot rules
 npm run test:direct-submit-flow    # direct-submit review fixtures
+npm run test:invoice-portal-poc    # offline product POC and approval-boundary flow
 npm run test:risk-timeline    # risk-decisions artifact and counters
 npm run test:e2e-auto-apply   # localhost sandbox auto-apply
 npm run test:mvp              # full MVP regression entry

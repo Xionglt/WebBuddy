@@ -75,6 +75,7 @@ import {
 } from '../task/contracts.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
+import INVOICE_PORTAL_POC_HTML from './public/invoice-portal-poc.html'
 import VENUE_BOOKING_HTML from './public/venue-booking.html'
 import {
   WebServiceSecurityBoundary,
@@ -948,6 +949,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if (req.method === 'GET' && (path === '/fixtures/venue-booking' || path === '/fixtures/venue-booking/')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       res.end(VENUE_BOOKING_HTML)
+      return
+    }
+    if (req.method === 'GET' && (path === '/poc/invoice-portal' || path === '/poc/invoice-portal/')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(INVOICE_PORTAL_POC_HTML)
       return
     }
 
