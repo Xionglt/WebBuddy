@@ -103,7 +103,7 @@ export interface HumanLoopConfig {
 }
 
 export interface AsyncTaskConfig {
-  /** Feature flag. Disabled by default until a runner/context provider factory is supplied. */
+  /** Feature flag for the local read-only Researcher/Comparison runtime. Disabled by default for rollout. */
   enabled: boolean
   maxQueuedTasks: number
   maxConcurrentReadOnlyLlmTasks: number

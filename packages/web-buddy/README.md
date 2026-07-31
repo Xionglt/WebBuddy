@@ -333,11 +333,21 @@ runWebTask
 ```
 
 The built-in Runtime derives an explicit task profile. Research/comparison runs
-may receive trusted read-only async workers when a host factory is supplied;
-form and final-review profiles keep foreground effects serial. The ActionLedger
-is the authoritative source for `approved`, `performed`, and `not_performed`
-completion outcomes. Contract-required result artifacts are produced through a
-schema materializer registry rather than scenario-specific Agent Loop branches.
+may receive trusted read-only async workers from the local factory or a
+host-supplied override; form and final-review profiles keep foreground effects
+serial. The local rollout enables the Researcher and Comparison roles, persists
+their Context Envelopes and outputs as immutable session artifacts, and remains
+off by default:
+
+```bash
+WEB_BUDDY_ASYNC_TASKS_ENABLED=true npm run web
+```
+
+The Main Agent remains the only browser writer and must verify every Subagent
+result. The ActionLedger is the authoritative source for `approved`,
+`performed`, and `not_performed` completion outcomes. Contract-required result
+artifacts are produced through a schema materializer registry rather than
+scenario-specific Agent Loop branches.
 
 Local SDK runs use the existing local memory files. Tenant-owned Web service
 runs retrieve MemoryLifecycle records through the exact owner scope and inject

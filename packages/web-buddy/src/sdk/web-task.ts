@@ -49,6 +49,7 @@ import {
   type RuntimeAssembly,
 } from '../runtime/local/runtime-assembler.js'
 import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
+import { createLocalAsyncTaskRuntime } from '../agents/local-async-runtime-factory.js'
 import { PermissionEngine } from '../permission/permission-engine.js'
 import { loadPersistentPermissionRules } from '../permission/persistent-rules.js'
 import { FileToolResultStore, type ToolResultStore } from '../tools/tool-result-store.js'
@@ -563,24 +564,30 @@ async function executeGenericWebTask(
       const persistentPermissionRules = runtimeAssembly.memory.mode === 'legacy_local'
         ? await loadPersistentPermissionRules(config.memory.permissionRulesPath)
         : []
-      const asyncTaskRuntime = runtimeAssembly.asyncTasks.eligible
-        && host.asyncTaskRuntimeFactory
-        && session
-        ? await host.asyncTaskRuntimeFactory({
-            input: request.input,
-            session,
-            config,
-            llm,
-            trace,
-            assembly: runtimeAssembly,
-          })
+      const asyncTaskRuntime = runtimeAssembly.asyncTasks.eligible && session
+        ? host.asyncTaskRuntimeFactory
+          ? await host.asyncTaskRuntimeFactory({
+              input: request.input,
+              session,
+              config,
+              llm,
+              trace,
+              assembly: runtimeAssembly,
+            })
+          : await createLocalAsyncTaskRuntime({
+              session,
+              config,
+              llm,
+              trace,
+              goal: request.input.goal.instruction,
+              taskContract: request.input.contract,
+              contextItems: runtimeContextItems,
+            })
         : undefined
       if (runtimeAssembly.asyncTasks.eligible && !asyncTaskRuntime) {
         trace.agentTrace?.recordEvent('runtime_capability_degraded', {
           capability: 'async_tasks',
-          reason: host.asyncTaskRuntimeFactory
-            ? 'A durable session was unavailable.'
-            : 'No trusted asyncTaskRuntimeFactory was supplied.',
+          reason: 'A durable session was unavailable.',
         })
       }
       const loop = await runAgentLoop({

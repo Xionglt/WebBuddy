@@ -151,6 +151,11 @@ import { workflowEngine as defaultWorkflowEngine, type WorkflowEngineEvaluation,
 import { EvidenceStore, type AddWorkflowEvidenceInput, type WorkflowEvidence } from '../../workflow/workflow-evidence.js'
 import { createInitialWorkflowState, type WorkflowState } from '../../workflow/workflow-state.js'
 import { pageView } from './page-view.js'
+import {
+  AgentProgressGuard,
+  type AgentProgressContext,
+  type AgentProgressGuardOptions,
+} from './progress-guard.js'
 import { ToolRegistry, type ToolContext } from './tool-registry.js'
 import {
   buildAgentTasksPromptSummary,
@@ -214,6 +219,8 @@ export interface AgentLoopInput {
   shouldPause?: () => boolean
   /** Optional execution service for tests or alternate local runtimes. */
   toolExecutionService?: ToolExecutionService
+  /** Exact-action no-progress protection. Enabled by default; false disables it. */
+  progressGuard?: false | Partial<AgentProgressGuardOptions>
   /** Optional permission decision service for tests or alternate runtimes. */
   permissionEngine?: AgentLoopPermissionEngine
   /** Optional in-memory approval queue for tests or embedding runtimes. */
@@ -400,6 +407,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
   const tools = toolsForSafetyMode(registry, safetyMode, Boolean(asyncTaskRuntime))
   const toolExecution = input.toolExecutionService ?? new ToolExecutionService(registry)
+  const progressGuard = input.progressGuard === false ? undefined : new AgentProgressGuard(input.progressGuard)
   const permissionMode = input.permissionMode ?? 'safe'
   const permissionEngine = input.permissionEngine ?? new PermissionEngine({
     permissionMode,
@@ -1854,11 +1862,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       toolCalls += 1
       const tool = registry.get(call.name)
       const toolCategory = tool?.category
+      const dependencyKey = typeof tool?.metadata?.dependencyKey === 'string' && tool.metadata.dependencyKey.trim()
+        ? tool.metadata.dependencyKey.trim()
+        : undefined
       const risk = registry.resolveRisk(call.name, call.arguments, ctx)
       const callRedaction = redactSensitiveData(call.arguments)
       const safeCallArgs = callRedaction.value as Record<string, unknown>
       const argBrief = briefArgs(call.name, safeCallArgs)
       const currentUrl = sessionManager.get(ctx.sessionId)?.page.url()
+      const progressContextBefore: AgentProgressContext = {
+        ...(currentUrl ? { url: currentUrl } : {}),
+        workflowPhase: workflowState.phase,
+        ...(latestContext.page ? { page: latestContext.page } : {}),
+        ...(latestContext.form ? { form: latestContext.form } : {}),
+      }
       await sessionTranscript({
         type: 'tool_call',
         turnId,
@@ -1873,6 +1890,46 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         message: `${call.name}(${argBrief})`,
         data: { name: call.name, risk, argBrief },
       })
+      const progressDecision = progressGuard?.beforeCall(call, progressContextBefore)
+      if (progressDecision && progressDecision.action !== 'allow') {
+        const prefix = progressDecision.action === 'replan' ? 'REPLAN_REQUIRED' : 'NO_PROGRESS_LOOP'
+        const observation = `BLOCKED (${prefix}): ${progressDecision.reason}`
+        await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
+        rememberRecentAction(recentActions, {
+          step,
+          toolName: call.name,
+          argumentsSummary: argBrief,
+          status: 'blocked',
+          risk,
+          observation,
+        })
+        rememberUniqueBlocker(blockers, observation)
+        emit(progressDecision.action === 'replan' ? 'warn' : 'gate', observation, step)
+        ctx.trace.record({
+          phase: 'agent_loop',
+          action: `${prefix}: ${call.name}(${argBrief})`,
+          url: currentUrl,
+          risk,
+          toolCategory,
+          status: progressDecision.action === 'replan' ? 'warn' : 'blocked',
+          observation: progressDecision.reason,
+        })
+        ctx.trace.agentTrace?.recordEvent('no_progress_guard', {
+          step,
+          turnId,
+          toolCallId: call.id,
+          toolName: call.name,
+          action: progressDecision.action,
+          repeats: progressDecision.repeats,
+          fingerprintSha256: progressDecision.fingerprint,
+        })
+        if (progressDecision.action === 'block') {
+          done = true
+          blocked = true
+          summary = observation
+        }
+        return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
+      }
       const refLabel = call.name === 'browser_click' ? labelForClick(call.arguments, ctx) : undefined
       const contextText = actionIntentContextText(latestContext)
       let policyDecision = decideToolPolicy({
@@ -2304,6 +2361,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         toolCallId: call.id,
         local: { ...ctx, ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}) },
         abortSignal: input.abortSignal,
+        ...(executionPolicy.defaultTimeoutMs !== undefined
+          ? { timeoutMs: executionPolicy.defaultTimeoutMs }
+          : {}),
         metadata: {
           step,
           riskLevel: policyDecision.riskLevel,
@@ -2313,6 +2373,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           policyCode: policyDecision.policyCode,
           policyRuleId: policyDecision.ruleId,
           policyGateKind: policyDecision.gateKind,
+          ...(dependencyKey ? { dependencyKey } : {}),
           interruptBehavior: executionPolicy.interruptBehavior,
         },
       }
@@ -2789,6 +2850,24 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           observation: completionGateBlockSummary ?? completionGateDecision.reason,
         })
       }
+      progressGuard?.record(
+        call,
+        progressContextBefore,
+        {
+          ...(sessionManager.get(ctx.sessionId)?.page.url()
+            ? { url: sessionManager.get(ctx.sessionId)!.page.url() }
+            : {}),
+          workflowPhase: workflowState.phase,
+          ...(latestContext.page ? { page: latestContext.page } : {}),
+          ...(latestContext.form ? { form: latestContext.form } : {}),
+        },
+        {
+          ok: toolOk,
+          observation: result.observation,
+          pageChanged: result.pageChanged,
+          done: result.done,
+        },
+      )
 
       // After a page-changing action, refresh the snapshot view so refs stay fresh.
       let observation = result.observation

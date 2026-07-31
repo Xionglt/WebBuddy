@@ -4,6 +4,7 @@ import type { LocalToolContext, LocalToolRunResult } from './local-adapter.js'
 import type { ToolCall, ToolUseContext } from './tool-contract.js'
 import { createNormalizedToolError, messageFromUnknown, type NormalizedToolError } from './tool-errors.js'
 import type { ToolExecutionState, ToolExecutionStatus } from './tool-progress.js'
+import { ToolCircuitBreaker } from './tool-circuit-breaker.js'
 import {
   isValidLocalToolRunResult,
   normalizeLocalToolResult,
@@ -19,6 +20,8 @@ export interface ToolExecutionRegistry {
 
 export interface ToolExecutionServiceOptions {
   defaultTimeoutMs?: number
+  circuitBreaker?: ToolCircuitBreaker | false
+  resolveCircuitKey?: (call: ToolCall, context: ToolUseContext) => string | undefined
 }
 
 type RegistryOutcome =
@@ -31,10 +34,16 @@ type RaceOutcome =
   | { kind: 'timeout'; timeoutMs: number }
 
 export class ToolExecutionService {
+  private readonly circuitBreaker: ToolCircuitBreaker | undefined
+
   constructor(
     private readonly registry: ToolExecutionRegistry,
     private readonly options: ToolExecutionServiceOptions = {},
-  ) {}
+  ) {
+    this.circuitBreaker = options.circuitBreaker === false
+      ? undefined
+      : options.circuitBreaker ?? new ToolCircuitBreaker()
+  }
 
   async execute(call: ToolCall, context: ToolUseContext): Promise<NormalizedToolResult> {
     const timeoutMs = normalizeTimeoutMs(context.timeoutMs ?? this.options.defaultTimeoutMs)
@@ -65,6 +74,19 @@ export class ToolExecutionService {
       return normalizedFailureResult(call, state, error, `FAILED (ABORTED): ${reason}`)
     }
 
+    const circuitKey = circuitKeyFor(call, context, this.options)
+    if (circuitKey && this.circuitBreaker) {
+      const decision = this.circuitBreaker.beforeRequest(circuitKey, nowMs(context))
+      if (!decision.allowed) {
+        const message =
+          `Dependency circuit ${circuitKey} is open; retry after approximately ${decision.retryAfterMs}ms.`
+        const error = createNormalizedToolError('circuit_open', 'CIRCUIT_OPEN', message)
+        state = this.terminalState(context, state, 'blocked', { error, startedAt: undefined })
+        this.publish(context, state)
+        return normalizedFailureResult(call, state, error, `FAILED (CIRCUIT_OPEN): ${message}`)
+      }
+    }
+
     const startedAt = nowIso(context)
     state = { ...state, status: 'running', startedAt }
     this.publish(context, state)
@@ -72,6 +94,7 @@ export class ToolExecutionService {
     const outcome = await this.runWithDeadline(call, context, timeoutMs)
     if (outcome.kind === 'result') {
       if (!isValidLocalToolRunResult(outcome.result)) {
+        this.failCircuit(circuitKey, context)
         const message = `Tool ${call.name} returned an invalid result.`
         const error = createNormalizedToolError('invalid_result', 'INVALID_TOOL_RESULT', message, {
           fatal: true,
@@ -84,6 +107,7 @@ export class ToolExecutionService {
 
       const thrownMessage = toolThrownMessage(call.name, outcome.result.observation)
       if (thrownMessage) {
+        this.failCircuit(circuitKey, context)
         const error = createNormalizedToolError('registry_exception', 'TOOL_EXCEPTION', thrownMessage, {
           fatal: true,
         })
@@ -97,12 +121,16 @@ export class ToolExecutionService {
         outcome.result,
         this.terminalState(context, state, terminalStatusForObservation(outcome.result.observation, call.name), {}),
       )
+      if (normalized.ok) this.succeedCircuit(circuitKey)
+      else if (isTransientDependencyError(normalized.error)) this.failCircuit(circuitKey, context)
+      else this.ignoreCircuit(circuitKey, context)
       state = normalized.state
       this.publish(context, state)
       return normalized
     }
 
     if (outcome.kind === 'exception') {
+      this.failCircuit(circuitKey, context)
       const message = `Tool ${call.name} threw: ${messageFromUnknown(outcome.error)}`
       const error = createNormalizedToolError('registry_exception', 'TOOL_EXCEPTION', message, {
         fatal: true,
@@ -114,13 +142,15 @@ export class ToolExecutionService {
     }
 
     if (outcome.kind === 'timeout') {
+      this.failCircuit(circuitKey, context)
       const message = `Tool ${call.name} timed out after ${outcome.timeoutMs}ms.`
-      const error = createNormalizedToolError('timeout', 'TOOL_TIMEOUT', message)
+      const error = createNormalizedToolError('timeout', 'TOOL_TIMEOUT', message, { retryable: true })
       state = this.terminalState(context, state, 'timed_out', { error })
       this.publish(context, state)
       return normalizedFailureResult(call, state, error, `FAILED (TOOL_TIMEOUT): ${message}`)
     }
 
+    this.ignoreCircuit(circuitKey, context)
     const error = createNormalizedToolError('aborted', 'ABORTED', outcome.reason)
     state = this.terminalState(context, state, 'cancelled', {
       error,
@@ -185,6 +215,18 @@ export class ToolExecutionService {
     }
   }
 
+  private succeedCircuit(key: string | undefined): void {
+    if (key) this.circuitBreaker?.recordSuccess(key)
+  }
+
+  private failCircuit(key: string | undefined, context: ToolUseContext): void {
+    if (key) this.circuitBreaker?.recordFailure(key, nowMs(context))
+  }
+
+  private ignoreCircuit(key: string | undefined, context: ToolUseContext): void {
+    if (key) this.circuitBreaker?.recordIgnored(key, nowMs(context))
+  }
+
   private terminalState(
     context: ToolUseContext,
     state: ToolExecutionState,
@@ -224,6 +266,27 @@ export class ToolExecutionService {
 
 function nowIso(context: ToolUseContext): string {
   return (context.now?.() ?? new Date()).toISOString()
+}
+
+function nowMs(context: ToolUseContext): number {
+  return (context.now?.() ?? new Date()).getTime()
+}
+
+function circuitKeyFor(
+  call: ToolCall,
+  context: ToolUseContext,
+  options: ToolExecutionServiceOptions,
+): string | undefined {
+  const candidate = options.resolveCircuitKey?.(call, context) ?? context.metadata?.dependencyKey
+  return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : undefined
+}
+
+function isTransientDependencyError(error: NormalizedToolError | undefined): boolean {
+  if (!error) return false
+  if (error.retryable || error.kind === 'timeout') return true
+  return /(?:TIMEOUT|TIMED_OUT|RATE_LIMIT|TOO_MANY_REQUESTS|HTTP_5\d\d|ECONNRESET|ECONNREFUSED|EAI_AGAIN|SERVICE_UNAVAILABLE|BAD_GATEWAY|GATEWAY_TIMEOUT)/i.test(
+    error.code,
+  )
 }
 
 function durationMs(startedAt: string, completedAt: string): number {

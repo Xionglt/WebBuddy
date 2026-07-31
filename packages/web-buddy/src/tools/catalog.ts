@@ -516,7 +516,7 @@ const RAW_TOOL_CATALOG: Omit<ToolDef, 'execution'>[] = [
   {
     name: 'agent_task_spawn',
     description:
-      'Start a bounded built-in role or legacy read-only background task and return immediately. Prefer roleId for Planner, Researcher, Comparison, Form Planner, Safety Reviewer, or Verification. The main agent keeps sole control of the browser.',
+      'Start a bounded read-only background task and return immediately. The local rollout enables Researcher and Comparison; other built-in roles require a host-provided runtime. Use only for independent evidence-heavy work, pass completed artifactIds between stages, and keep the main agent in sole control of the browser.',
     category: 'eval',
     risk: 'L0',
     parameters: {

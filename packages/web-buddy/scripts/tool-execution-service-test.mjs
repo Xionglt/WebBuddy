@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { ToolExecutionService } from '../dist/tools/tool-execution-service.js'
+import { ToolCircuitBreaker } from '../dist/tools/tool-circuit-breaker.js'
 import { toLegacyToolRunResult } from '../dist/tools/tool-result.js'
 import { ToolRegistry } from '../dist/runtime/local/tool-registry.js'
 
@@ -172,5 +173,53 @@ assert.equal(timeout.observation, 'FAILED (TOOL_TIMEOUT): Tool slow_tool timed o
 assert.equal(timeout.error.kind, 'timeout')
 assert.equal(timeout.error.code, 'TOOL_TIMEOUT')
 assertTimedResult(timeout)
+
+let circuitNow = Date.parse('2026-07-28T00:00:00.000Z')
+let dependencyHealthy = false
+let dependencyCalls = 0
+const dependencyBreaker = new ToolCircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 1000 })
+const circuitService = new ToolExecutionService({
+  async run() {
+    dependencyCalls += 1
+    if (!dependencyHealthy) throw new Error('upstream unavailable')
+    return { observation: 'upstream recovered', pageChanged: false }
+  },
+}, { circuitBreaker: dependencyBreaker })
+const circuitContext = (id) => makeContext(id, {
+  now: () => new Date(circuitNow),
+  metadata: { dependencyKey: 'profile-api' },
+})
+
+const firstDependencyFailure = await circuitService.execute(
+  { id: 'dep-1', name: 'profile_lookup', arguments: {} },
+  circuitContext('dep-1').context,
+)
+assert.equal(firstDependencyFailure.error.code, 'TOOL_EXCEPTION')
+const secondDependencyFailure = await circuitService.execute(
+  { id: 'dep-2', name: 'profile_lookup', arguments: {} },
+  circuitContext('dep-2').context,
+)
+assert.equal(secondDependencyFailure.error.code, 'TOOL_EXCEPTION')
+assert.equal(dependencyBreaker.snapshot('profile-api').state, 'open')
+
+const openCircuitContext = circuitContext('dep-3')
+const openCircuit = await circuitService.execute(
+  { id: 'dep-3', name: 'profile_lookup', arguments: {} },
+  openCircuitContext.context,
+)
+assert.equal(openCircuit.error.code, 'CIRCUIT_OPEN')
+assert.equal(openCircuit.status, 'blocked')
+assert.deepEqual(statuses(openCircuitContext.states), ['queued', 'blocked'])
+assert.equal(dependencyCalls, 2, 'open circuit must not call the unhealthy dependency')
+
+circuitNow += 1001
+dependencyHealthy = true
+const recovered = await circuitService.execute(
+  { id: 'dep-4', name: 'profile_lookup', arguments: {} },
+  circuitContext('dep-4').context,
+)
+assert.equal(recovered.ok, true)
+assert.equal(dependencyBreaker.snapshot('profile-api').state, 'closed')
+assert.equal(dependencyCalls, 3)
 
 console.log('tool-execution-service-test: PASS')

@@ -330,6 +330,7 @@ function initialMessages(envelope: ReadOnlyLlmContextEnvelope): ChatMessage[] {
         `Also return roleOutput:{artifactKind:"${envelope.builtInRole.outputArtifactKind}",payloadSchemaVersion:"${envelope.builtInRole.outputPayloadSchemaVersion}",payload:object}.`,
         `roleOutput.payload must contain: ${envelope.builtInRole.requiredOutputFields.join(', ')}.`,
         'Safety verdicts are advisory, never ApprovalBindings. Verification assessments are advisory, never completion evidence.',
+        ...roleQualityRubric(envelope.builtInRole.roleId),
       ]
     : []
   return [
@@ -364,6 +365,34 @@ function initialMessages(envelope: ReadOnlyLlmContextEnvelope): ChatMessage[] {
   ]
 }
 
+function roleQualityRubric(roleId: string): string[] {
+  if (roleId === 'researcher') {
+    return [
+      'Researcher rubric: separate observed facts from inference; preserve source disagreements; do not fill missing facts with assumptions.',
+      'Researcher output: findings and sources must be traceable to selected context or artifact IDs, and uncertainties must name the missing evidence.',
+    ]
+  }
+  if (roleId === 'comparison') {
+    return [
+      'Comparison rubric: define criteria before ranking, compare every candidate on the same criteria, and distinguish evidence quality from preference.',
+      'Comparison output: surface material conflicts or missing dimensions before giving one advisory recommendation.',
+    ]
+  }
+  if (roleId === 'planner') {
+    return ['Planner rubric: each step must name its prerequisite, expected artifact, and blocker; never imply that a step was executed.']
+  }
+  if (roleId === 'form-planner') {
+    return ['Form Planner rubric: map only evidence-backed values, leave unknowns explicit, and flag upload/save/submit boundaries.']
+  }
+  if (roleId === 'safety-reviewer') {
+    return ['Safety Reviewer rubric: identify the exact risky action and evidence; use ask when user intent or scope is ambiguous.']
+  }
+  if (roleId === 'verification') {
+    return ['Verification rubric: verify claims against independent evidence and list every gap that prevents a verified assessment.']
+  }
+  return []
+}
+
 function validateRunRequest(
   request: ReadOnlyLlmRunRequest,
   runner: ReadOnlyLlmSubagentRunner,
@@ -391,7 +420,7 @@ function validateRunRequest(
     envelope.schemaVersion !== 'subagent-context-envelope/v1'
     || envelope.taskId !== task.id
     || envelope.taskKind !== task.kind
-    || envelope.sourceGraphRevision !== request.graphRevision
+    || envelope.sourceGraphRevision > request.graphRevision
   ) {
     return policyError('Context envelope does not match the read-only task.')
   }

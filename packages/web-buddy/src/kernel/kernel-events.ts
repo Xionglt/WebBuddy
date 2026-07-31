@@ -21,6 +21,7 @@ export type KernelEventType =
   | 'context_compacted'
   | 'agent_task_notifications_injected'
   | 'agent_task_action_clock_advanced'
+  | 'agent_task_background_error'
   | 'workflow_updated'
   | 'memory_updated'
   | 'memory_retrieved'
