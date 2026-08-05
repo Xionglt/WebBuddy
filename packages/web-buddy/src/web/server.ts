@@ -23,6 +23,13 @@ import {
   type RunRecord,
   type RunStoreEvent,
 } from '../control/index.js'
+import {
+  ConversationStoreError,
+  FileConversationStore,
+  assembleConversationContext,
+  validateConversationText,
+  type ConversationRecord,
+} from '../conversation/index.js'
 import { createAgentRunController, type AgentRunController } from '../kernel/run-controller.js'
 import {
   createFileMemoryLifecycle,
@@ -62,8 +69,10 @@ import {
   validateSessionRef,
   validateWebTaskInputSnapshot,
   type ArtifactRef,
+  type ContextItem,
   type JsonObject,
   type OwnerScope,
+  type SensitiveActionKind,
   type WebTaskInput,
   type WebTaskInputSnapshot,
   type WebTaskResult,
@@ -83,6 +92,13 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled'])
 const MAX_LIVE_EVENTS_PER_RUN = 1000
 const GENERIC_RECOVERY_MODE = 'read_only_reobserve/v1' as const
+const ACTIVE_CONVERSATION_RUN_STATES = new Set([
+  'queued',
+  'running',
+  'resuming',
+  'pausing',
+  'cancelling',
+])
 
 function outputDir(): string {
   return resolve(loadConfig().trace.outDir)
@@ -135,6 +151,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
   const runStore = new FileRunStore({ rootDir: controlStoreDir })
   const runService = new RunService(runStore)
   const approvalService = new ApprovalService(new FileApprovalStore({ rootDir: controlStoreDir }))
+  const conversationStore = new FileConversationStore({ rootDir: controlStoreDir })
   const security = new WebServiceSecurityBoundary({
     rootDir: controlStoreDir,
     options: options.serviceSecurity,
@@ -870,6 +887,121 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       : undefined
   )
 
+  const runsForConversation = async (conversation: ConversationRecord): Promise<RunRecord[]> => {
+    const scope = scoped(conversation.ownerScope)
+    const runs: RunRecord[] = []
+    for (const turn of conversation.turns) {
+      const run = await runService.get(turn.runId, scope)
+      if (!run) {
+        throw new ConversationStoreError(
+          'INVALID_RECORD',
+          `Conversation Turn ${turn.turnId} references a missing Run.`,
+        )
+      }
+      runs.push(run)
+    }
+    return runs
+  }
+
+  const projectConversation = async (
+    conversation: ConversationRecord,
+    scope: ServiceScope,
+  ) => {
+    const runs = await runsForConversation(conversation)
+    return {
+      schemaVersion: 'public-conversation/v1',
+      conversationId: conversation.conversationId,
+      goal: conversation.goal,
+      startUrl: conversation.startUrl,
+      headless: conversation.headless,
+      revision: conversation.recordRevision,
+      scope,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      turns: conversation.turns.map((turn, index) => ({
+        turnId: turn.turnId,
+        sequence: turn.sequence,
+        userMessage: turn.userMessage,
+        createdAt: turn.createdAt,
+        run: projectConversationRun(runs[index]),
+      })),
+    }
+  }
+
+  const projectConversationSummary = async (
+    conversation: ConversationRecord,
+    scope: ServiceScope,
+  ) => {
+    const lastTurn = conversation.turns.at(-1)
+    const lastRun = lastTurn
+      ? await runService.get(lastTurn.runId, scoped(conversation.ownerScope))
+      : undefined
+    if (lastTurn && !lastRun) {
+      throw new ConversationStoreError('INVALID_RECORD', 'Conversation summary references a missing Run.')
+    }
+    return {
+      schemaVersion: 'public-conversation-summary/v1',
+      conversationId: conversation.conversationId,
+      goal: conversation.goal,
+      startUrl: conversation.startUrl,
+      revision: conversation.recordRevision,
+      turnCount: conversation.turns.length,
+      status: lastRun?.state ?? 'ready',
+      scope,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      ...(lastRun ? { lastRun: projectConversationRun(lastRun) } : {}),
+    }
+  }
+
+  const provisionConversationRun = async (input: {
+    conversation: ConversationRecord
+    message: string
+    turnId: string
+    idempotencyKey: string
+    principal: ServicePrincipal
+    requestId: string
+  }): Promise<RunRecord> => {
+    const priorRuns = await runsForConversation(input.conversation)
+    const lastRun = priorRuns.at(-1)
+    if (lastRun && ACTIVE_CONVERSATION_RUN_STATES.has(lastRun.state)) {
+      throw new HttpError(409, 'conversation_has_active_run')
+    }
+    const capturedAt = new Date().toISOString()
+    const contextItems = assembleConversationContext({
+      conversation: input.conversation,
+      priorRuns,
+      capturedAt,
+    })
+    const provisionalRunId = `conversation-run-${createHash('sha256')
+      .update(`${input.conversation.conversationId}\u0000${input.turnId}`)
+      .digest('hex')
+      .slice(0, 24)}`
+    const snapshot = conversationRunSnapshot({
+      conversation: input.conversation,
+      message: input.message,
+      turnId: input.turnId,
+      provisionalRunId,
+      contextItems,
+    })
+    const run = await createRun({
+      schemaVersion: 'run-client-create/v1',
+      input: snapshot,
+    }, input.idempotencyKey, input.principal, input.requestId)
+    await security.audit({
+      principal: input.principal,
+      requestId: input.requestId,
+      action: 'run.create',
+      target: { kind: 'run', id: run.runId },
+      result: 'succeeded',
+      metadata: {
+        conversationId: input.conversation.conversationId,
+        turnId: input.turnId,
+      },
+    })
+    return run
+  }
+
   async function recoverStartupRuns(): Promise<void> {
     await recoveryService.recoverStartupRuns()
     for (const ownerScope of await runStore.listOwnerScopes()) {
@@ -943,6 +1075,110 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         error: 'server_config_required',
         message: 'Model endpoints and credentials are controlled by server-side configuration.',
       })
+      return
+    }
+
+    if (path === '/api/conversations' && req.method === 'POST') {
+      const body = await readJsonBody(req)
+      assertBodyScope(body, principal)
+      rejectInlineSecrets(body, security)
+      if (body.schemaVersion !== 'conversation-create/v1') {
+        throw new HttpError(400, 'Unsupported Conversation create schema.')
+      }
+      validateConversationText(body.goal, 'goal')
+      const startUrl = normalizeRequiredUrl(
+        body.startUrl,
+        process.env.WEB_BUDDY_ALLOW_PRIVATE_NETWORK_FOR_TESTING === 'true',
+      )
+      if (!startUrl) {
+        throw new HttpError(400, 'startUrl must use HTTP(S) and must not target a private network')
+      }
+      if (typeof body.headless !== 'boolean') throw new HttpError(400, 'headless must be a boolean')
+      const externalKey = requireIdempotencyKey(req, body)
+      const idempotencyKey = security.bindIdempotencyKey(principal, externalKey)
+      const conversationId = `conversation-${createHash('sha256')
+        .update(`${serviceScopeKey(principal.scope)}\u0000${externalKey}`)
+        .digest('hex')
+        .slice(0, 24)}`
+      const created = await conversationStore.create({
+        conversationId,
+        goal: body.goal,
+        startUrl,
+        headless: body.headless,
+        ...(ownerScope ? { ownerScope } : {}),
+        idempotencyKey,
+        createdAt: new Date().toISOString(),
+      })
+      respond(201, await projectConversation(created.record, principal.scope))
+      return
+    }
+
+    if (path === '/api/conversations' && req.method === 'GET') {
+      const conversations = await conversationStore.list(ownerScope)
+      const limit = numberQuery(query('limit'), 25)
+      respond(200, {
+        schemaVersion: 'public-conversation-list/v1',
+        items: await Promise.all(
+          conversations.slice(0, limit).map((conversation) => (
+            projectConversationSummary(conversation, principal.scope)
+          )),
+        ),
+      })
+      return
+    }
+
+    const conversationMatch = path.match(/^\/api\/conversations\/([^/]+)$/)
+    if (conversationMatch && req.method === 'GET') {
+      const conversationId = decodeURIComponent(conversationMatch[1])
+      const conversation = await conversationStore.get(conversationId, ownerScope)
+      if (!conversation) return denyResource({ kind: 'api' })
+      respond(200, await projectConversation(conversation, principal.scope))
+      return
+    }
+
+    const conversationTurnMatch = path.match(/^\/api\/conversations\/([^/]+)\/turns$/)
+    if (conversationTurnMatch && req.method === 'POST') {
+      const conversationId = decodeURIComponent(conversationTurnMatch[1])
+      const body = await readJsonBody(req)
+      assertBodyScope(body, principal)
+      rejectInlineSecrets(body, security)
+      if (body.schemaVersion !== 'conversation-turn-create/v1') {
+        throw new HttpError(400, 'Unsupported Conversation Turn create schema.')
+      }
+      validateConversationText(body.message, 'message')
+      const expectedRecordRevision = requireExpectedRevision(body)
+      const conversation = await conversationStore.get(conversationId, ownerScope)
+      if (!conversation) return denyResource({ kind: 'api' })
+      const externalKey = requireIdempotencyKey(req, body)
+      const idempotencyKey = security.bindIdempotencyKey(principal, externalKey)
+      const turnId = `turn-${createHash('sha256')
+        .update(`${serviceScopeKey(principal.scope)}\u0000${conversationId}\u0000${externalKey}`)
+        .digest('hex')
+        .slice(0, 24)}`
+      const runIdempotencyKey = security.bindIdempotencyKey(
+        principal,
+        `conversation-run:${conversationId}:${externalKey}`,
+      )
+      const appended = await conversationStore.appendTurn({
+        conversationId,
+        turnId,
+        userMessage: body.message,
+        expectedRecordRevision,
+        ...(ownerScope ? { ownerScope } : {}),
+        idempotencyKey,
+        createdAt: new Date().toISOString(),
+      }, async () => {
+        const run = await provisionConversationRun({
+          conversation,
+          message: body.message as string,
+          turnId,
+          idempotencyKey: runIdempotencyKey,
+          principal,
+          requestId,
+        })
+        return run.runId
+      })
+      respond(201, await projectConversation(appended.record, principal.scope))
       return
     }
 
@@ -1474,6 +1710,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     server,
     runService,
     approvalService,
+    conversationStore,
     recoveryService,
     serviceSecurity: security,
     controlStoreDir,
@@ -1686,6 +1923,93 @@ function projectPublicRun(run: RunRecord, scope: ServiceScope) {
     updatedAt: run.updatedAt,
     ...(run.reason ? { reason: run.reason } : {}),
   }
+}
+
+function projectConversationRun(run: RunRecord) {
+  return {
+    runId: run.runId,
+    revision: run.runRevision,
+    attempt: run.attempt,
+    state: run.state,
+    ...(run.reason ? { summary: run.reason } : {}),
+    artifacts: run.artifactRefs.map((artifact) => ({
+      id: artifact.id,
+      kind: artifact.kind,
+      payloadSchemaVersion: artifact.payloadSchemaVersion,
+      createdAt: artifact.createdAt,
+    })),
+  }
+}
+
+function conversationRunSnapshot(input: {
+  conversation: ConversationRecord
+  message: string
+  turnId: string
+  provisionalRunId: string
+  contextItems: ContextItem[]
+}): WebTaskInputSnapshot {
+  const actionKinds: SensitiveActionKind[] = [
+    'upload',
+    'send',
+    'publish',
+    'submit',
+    'payment',
+    'memory_write',
+    'permission_write',
+  ]
+  const sensitiveRule = {
+    id: 'web-conversation-sensitive-actions',
+    actionKinds,
+    decision: 'ask' as const,
+    requireApprovalBinding: true,
+  }
+  return snapshotWebTaskInput({
+    schemaVersion: 'web-task-input/v1',
+    goal: {
+      instruction: `持续目标：${input.conversation.goal}\n\n本轮请求：${input.message}`,
+      scenario: 'conversation-web-agent',
+      metadata: {
+        conversationId: input.conversation.conversationId,
+        turnId: input.turnId,
+        headless: input.conversation.headless,
+      },
+    },
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'web-conversation.generic.v1',
+      revision: 0,
+      criteria: [
+        {
+          id: 'current-page-evidence',
+          kind: 'evidence_present',
+          description: 'The Web Agent must preserve current page evidence.',
+          evidenceKinds: ['page'],
+          minCount: 1,
+          allowedAuthorities: ['main_runtime'],
+        },
+        {
+          id: 'final-submit-boundary',
+          kind: 'action_boundary',
+          description: 'The Web Agent must stop before final submission.',
+          actionKinds: ['submit'],
+          outcome: 'not_performed',
+        },
+      ],
+      sensitiveActions: [sensitiveRule],
+    },
+    startUrl: input.conversation.startUrl,
+    contextItems: input.contextItems,
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'ask',
+      rules: [sensitiveRule],
+    },
+    runId: input.provisionalRunId,
+    revision: 0,
+    ...(input.conversation.ownerScope
+      ? { ownerScope: structuredClone(input.conversation.ownerScope) }
+      : {}),
+  }, input.provisionalRunId)
 }
 
 function projectPublicApproval(approval: ApprovalRecord, scope: ServiceScope) {
@@ -2054,6 +2378,12 @@ function sendControlError(
   }
   if (error instanceof ControlStoreError) {
     const status = error.code.endsWith('_NOT_FOUND') ? 404
+      : error.code === 'INVALID_RECORD' ? 400
+        : 409
+    return send(res, status, sanitized({ error: error.code, message: error.message }))
+  }
+  if (error instanceof ConversationStoreError) {
+    const status = error.code === 'CONVERSATION_NOT_FOUND' ? 404
       : error.code === 'INVALID_RECORD' ? 400
         : 409
     return send(res, status, sanitized({ error: error.code, message: error.message }))
