@@ -49,7 +49,7 @@ assert.equal(policyGate.action, 'ask')
 assert.equal(policyGate.source, 'policy')
 assert.equal(policyGate.gateKind, 'high_risk_action')
 assert.equal(policyGate.rememberable, true)
-assert.deepEqual(policyGate.remember.supportedScopes, ['once', 'session', 'always'])
+assert.deepEqual(policyGate.remember.supportedScopes, ['once', 'session'])
 
 const finalSubmit = engine.evaluate(permissionRequest({
   requestId: 'perm-final-submit',

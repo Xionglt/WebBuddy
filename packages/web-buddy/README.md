@@ -282,6 +282,58 @@ Web Buddy keeps run recovery and user memory separate:
 - `~/.web-buddy/memory/permission-rules.json` stores remembered permission rules
   that are matched before default permission rules.
 
+Long-term browser memories can use the `web-memory/v1` evidence envelope. Its
+governance gate runs after retrieval and before prompt injection:
+
+- restrictive constraints may narrow behavior, but Memory never expands
+  runtime permissions;
+- positive authorization is session-bound and is never inherited by a later
+  session; legacy cross-session `allow` records fail closed;
+- site/workflow mismatches are rejected before injection;
+- procedure memories are bound to an order-insensitive semantic page
+  fingerprint (origin, path pattern, workflow stage, form labels/control kinds,
+  and action names/risks); missing live evidence makes them advisory and a
+  fingerprint drift removes them from context;
+- governance diagnostics report evaluated, injected, advisory, and rejected
+  counts with reason codes so stale-memory behavior can be evaluated directly.
+
+`MemoryLifecycle` remains the durable source of scope, provenance, TTL,
+revision, supersede/conflict, and forget semantics. The evidence gate is a
+read-side policy layer; it does not introduce another Memory Store. Build a
+fingerprint with `buildPageSemanticFingerprint()` and validate structured
+records with `evaluateWebMemoryGovernance()`. Tenant runtime retrieval happens
+after initial navigation and uses the observed PageState/FormState plus the
+actual redirected URL; runtimes without a Memory provider do not take the extra
+bootstrap snapshot.
+
+Automatic long-term Memory extraction is an explicit tenant-runtime opt-in:
+
+```bash
+WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
+```
+
+At each completed Agent turn, the extractor first builds a bounded evidence
+set. It calls the model only when the turn contains an explicit durable user
+signal, a direct `ask_user` answer, or a successful allowlisted read-only Web
+observation. Every proposed Memory must cite an exact `evidenceQuote`; code then
+checks the quote against the source, rejects credentials/contact/identity data,
+rejects positive authorization, requires confidence >= 0.85, and binds Web
+procedures to the current semantic page fingerprint. The verified extractive
+quote, rather than the model's paraphrase, becomes the persisted statement.
+Model output is therefore a proposal rather than write authority.
+
+Accepted candidates pass through the ActionLedger and the narrow
+`AUTOMATIC_WEB_MEMORY_WRITE_POLICY` before MemoryLifecycle persistence.
+Preferences expire after 180 days, restrictive constraints after 365 days, and
+page procedures after 30 days. The logical `memoryKey` deduplicates repeated
+observations; a changed statement atomically supersedes the prior active
+revision. Extraction failures and policy denials never fail the foreground
+Agent turn. Trace events expose proposed/accepted/rejected reason counts and
+successful writes continue to use `memory_updated` metrics.
+
+See [Memory System](./docs/memory-system.md) for the complete write, retrieval,
+validity, permission-inheritance, lifecycle, and observability design.
+
 Override memory paths when running tests or isolated profiles:
 
 ```bash

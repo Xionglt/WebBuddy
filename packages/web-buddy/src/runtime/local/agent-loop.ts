@@ -31,7 +31,17 @@ import {
 } from '../../context/run-memory.js'
 import type { ContextRecentAction, ContextSnapshot } from '../../context/types.js'
 import { AnswerStore, type UserAnswer } from '../../context/answer-store.js'
-import { ensureMemdir, queryMemdir, renderMemorySearchResult } from '../../memory/index.js'
+import {
+  automaticMemoryEvidence,
+  ensureMemdir,
+  extractAutomaticMemories,
+  isAutomaticMemoryObservationTool,
+  queryMemdir,
+  renderMemorySearchResult,
+  shouldExtractGoalMemory,
+  type AutomaticMemoryEvidence,
+  type AutomaticMemorySink,
+} from '../../memory/index.js'
 import { ProfileStore, profileStoreContextItem, type LegacyProfileInput, type StructuredProfileInput } from '../../context/profile-store.js'
 import { createFieldPlanner } from '../../fill/field-planner.js'
 import type { FieldPlan } from '../../fill/field-plan.js'
@@ -239,6 +249,10 @@ export interface AgentLoopInput {
   persistentPermissionRules?: PersistentPermissionRulesOptions
   /** Optional memdir root for scoped long-term memory retrieval. */
   memdir?: MemdirOptions
+  /** Explicitly enabled, user-scoped automatic long-term Memory sink. */
+  automaticMemorySink?: AutomaticMemorySink
+  /** Stable scenario key shared with long-term Memory retrieval governance. */
+  automaticMemoryWorkflow?: string
   /** Optional deterministic compactor for tests or alternate local runtimes. */
   contextCompactor?: AgentLoopContextCompactor
   /** Optional workflow evaluator for tests or alternate local runtimes. */
@@ -497,6 +511,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let consecutiveRejectedAgentDoneToolCalls = 0
   let lastRejectedAgentDoneGateSummary: string | undefined
   let lastRejectedAgentDoneGateReason: string | undefined
+  let activeAutomaticMemoryEvidence: AutomaticMemoryEvidence[] = []
+  let activeAutomaticMemoryAssistantContext = ''
+  const automaticMemoryProcessedTurns = new Set<string>()
   const riskDecisions = createRiskDecisionsArtifact({
     runId: ctx.trace.runId,
     sessionId: ctx.trace.agentTrace?.sessionId ?? ctx.sessionId,
@@ -1143,6 +1160,99 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   }
 
   let latestContext = await refreshLoopContext('Initial context built.', step)
+  const processAutomaticMemoryTurn = async (turnId: string) => {
+    const sink = input.automaticMemorySink
+    if (!sink || automaticMemoryProcessedTurns.has(turnId)) return
+    automaticMemoryProcessedTurns.add(turnId)
+    const currentUrl = sessionManager.get(ctx.sessionId)?.page.url()
+    let extraction
+    try {
+      extraction = await extractAutomaticMemories({
+        llm,
+        runId: session?.session.runId ?? ctx.trace.runId,
+        sessionId: session?.session.sessionId ?? ctx.sessionId,
+        turnId,
+        step,
+        workflow: input.automaticMemoryWorkflow,
+        currentUrl,
+        page: latestContext.page,
+        form: latestContext.form,
+        assistantContext: activeAutomaticMemoryAssistantContext,
+        evidence: activeAutomaticMemoryEvidence,
+      })
+    } catch (error) {
+      ctx.trace.agentTrace?.recordEvent('automatic_memory_extraction', {
+        turnId,
+        step,
+        status: 'failed',
+        reason: error instanceof Error ? error.message : String(error),
+      })
+      emit('warn', 'Automatic Memory extraction failed closed; the Agent turn continues.', step)
+      return
+    }
+    ctx.trace.agentTrace?.recordEvent('automatic_memory_extraction', {
+      turnId,
+      step,
+      status: extraction.status,
+      reason: extraction.reason,
+      proposed: extraction.proposed,
+      accepted: extraction.accepted,
+      rejected: extraction.rejected,
+      rejectionReasons: extraction.rejectionReasons,
+    })
+    for (const [index, candidate] of extraction.candidates.entries()) {
+      const actionId = `${turnId}:automatic-memory:${index}`
+      await recordActionLedgerEntry(actionLedger.propose({
+        actionId,
+        actionKind: 'memory_write',
+        toolName: 'automatic_memory_extractor',
+      }))
+      await recordActionLedgerEntry(actionLedger.authorize(
+        actionId,
+        'Automatic long-term Memory was explicitly enabled by the execution host.',
+      ))
+      try {
+        const result = await sink.write(candidate)
+        if (result.status === 'written') {
+          await recordActionLedgerEntry(actionLedger.perform(actionId, 'Evidence-bounded Memory persisted.'))
+          ctx.trace.agentTrace?.recordEvent('memory_updated', {
+            source: 'automatic_memory',
+            turnId,
+            step,
+            effect: candidate.memory.effect,
+            memoryKey: candidate.memoryKey,
+            confidence: candidate.confidence,
+            entryId: result.entryId,
+            revision: result.revision,
+            supersededEntryId: result.supersededEntryId,
+          })
+          await sessionEvent({
+            type: 'memory_updated',
+            turnId,
+            message: `Automatic Memory persisted: ${candidate.memoryKey}.`,
+            data: {
+              source: 'automatic_memory',
+              effect: candidate.memory.effect,
+              memoryKey: candidate.memoryKey,
+              confidence: candidate.confidence,
+              entryId: result.entryId,
+              revision: result.revision,
+              supersededEntryId: result.supersededEntryId,
+            },
+          })
+        } else if (result.status === 'deduplicated') {
+          await recordActionLedgerEntry(actionLedger.skip(actionId, result.reason ?? 'Memory already exists.'))
+        } else {
+          await recordActionLedgerEntry(actionLedger.fail(actionId, result.reason ?? result.status))
+          emit('warn', `Automatic Memory write ${result.status}: ${result.reason ?? candidate.memoryKey}`, step)
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        await recordActionLedgerEntry(actionLedger.fail(actionId, reason))
+        emit('warn', `Automatic Memory write failed: ${reason}`, step)
+      }
+    }
+  }
   const refreshLatestContextForAgentDone = async (currentStep: number): Promise<ContextSnapshot> => {
     const page = sessionManager.get(ctx.sessionId)?.page
     await page?.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
@@ -1478,6 +1588,19 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     if (pausedBeforeTurn) return pausedBeforeTurn
     step += 1
     const turnId = turnIdForStep(step)
+    activeAutomaticMemoryEvidence = []
+    activeAutomaticMemoryAssistantContext = ''
+    if (step === 1 && input.automaticMemorySink && shouldExtractGoalMemory(goal)) {
+      const evidence = automaticMemoryEvidence({
+        evidenceId: `${turnId}:user-goal`,
+        contentId: `${session?.session.runId ?? ctx.trace.runId}:${turnId}:user-goal`,
+        source: 'user_instruction',
+        content: goal,
+        capturedAt: new Date().toISOString(),
+        origin: 'user',
+      })
+      if (evidence) activeAutomaticMemoryEvidence.push(evidence)
+    }
     await sessionEvent({ type: 'turn_started', turnId, message: `Turn ${step} started.` })
     const abortedBeforeModel = await checkAbort(turnId)
     if (abortedBeforeModel) return abortedBeforeModel
@@ -1537,6 +1660,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         toolCalls: completion.toolCalls.map((call) => ({ id: call.id, name: call.name })),
       }),
     })
+    activeAutomaticMemoryAssistantContext = completion.content
     const promptCacheSnapshot = promptCacheSnapshotForLlm(llm, promptCacheNamespace)
     if (completion.usage && promptCacheSnapshot) {
       ctx.trace.agentTrace?.recordEvent('prompt_cache_usage', {
@@ -1596,6 +1720,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           input.abortSignal ?? new AbortController().signal,
           5_000,
         )
+        await processAutomaticMemoryTurn(turnId)
         await sessionEvent({
           type: 'turn_completed',
           turnId,
@@ -1635,6 +1760,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           messages.push({ role: 'assistant', content: completion.content })
           messages.push({ role: 'user', content: `COMPLETION_REJECTED\n${completionGateDecision.reason}` })
           emit('gate', completionGateBlockSummary, step)
+          await processAutomaticMemoryTurn(turnId)
           await sessionEvent({
             type: 'turn_completed',
             turnId,
@@ -1664,6 +1790,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         action: `Loop ended: ${summary.slice(0, 200)}`,
         status: blocked ? 'blocked' : 'ok',
       })
+      await processAutomaticMemoryTurn(turnId)
       await sessionEvent({ type: 'turn_completed', turnId, message: `Turn ${step} completed.`, data: { done, blocked } })
       break
     }
@@ -2644,6 +2771,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       })
       const userAnswer = userAnswerFromToolResult(result)
       if (call.name === 'ask_user' && userAnswer) {
+        const answerEvidence = automaticMemoryEvidence({
+          evidenceId: `${turnId}:${call.id}:user-answer`,
+          contentId: `${session?.session.runId ?? ctx.trace.runId}:${turnId}:${call.id}:user-answer`,
+          source: 'user_correction',
+          content: `Field: ${userAnswer.field}. Question: ${userAnswer.question}. Answer: ${userAnswer.answer}.`,
+          capturedAt: userAnswer.at,
+          origin: 'user',
+        })
+        if (answerEvidence) activeAutomaticMemoryEvidence.push(answerEvidence)
         if (input.persistentAnswerStore
           && !toolResultReusedSavedAnswer(result)
           && taskPolicyAllowsRuntimeWrite(input.taskPolicy, 'memory_write', false)) {
@@ -2685,6 +2821,17 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           message: `User answered ${userAnswer.field}.`,
           data: { field: userAnswer.field, source: userAnswer.source },
         })
+      }
+      if (toolOk && isAutomaticMemoryObservationTool(call.name)) {
+        const observationEvidence = automaticMemoryEvidence({
+          evidenceId: `${turnId}:${call.id}:observation`,
+          contentId: `${session?.session.runId ?? ctx.trace.runId}:${turnId}:${call.id}:observation`,
+          source: 'runtime_observation',
+          content: result.observation,
+          capturedAt: execution?.completedAt ?? new Date().toISOString(),
+          origin: 'web',
+        })
+        if (observationEvidence) activeAutomaticMemoryEvidence.push(observationEvidence)
       }
       ctx.trace.record({
         phase: 'agent_loop',
@@ -3054,12 +3201,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           emit('done', handoff.summary, step)
           ctx.trace.record({ phase: 'agent_loop', action: handoff.summary, status: 'blocked' })
           await recordWorkflowSnapshot(workflowState, step, handoff.summary)
+          await processAutomaticMemoryTurn(turnId)
           break
         }
       }
       messages.push({ role: 'user', content: `UPDATED_CONTEXT\n${renderUserContext(latestContext)}` })
     }
 
+    await processAutomaticMemoryTurn(turnId)
     await sessionEvent({
       type: 'turn_completed',
       turnId,

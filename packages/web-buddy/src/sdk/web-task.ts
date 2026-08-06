@@ -3,6 +3,10 @@ import { LlmGateway } from './llm.js'
 import { loadConfig, hasModelKey, type AgentConfig } from './config.js'
 import { TraceRecorder } from './trace.js'
 import { browserOpen } from '../browser/open.js'
+import { browserSnapshot } from '../browser/snapshot.js'
+import { observationManager } from '../observation/observation-manager.js'
+import type { FormState } from '../observation/form-state.js'
+import type { PageState } from '../observation/page-state.js'
 import { sessionManager } from '../session/manager.js'
 import { runAgentLoop } from '../runtime/local/agent-loop.js'
 import { ToolRegistry } from '../runtime/local/tool-registry.js'
@@ -54,6 +58,7 @@ import { PermissionEngine } from '../permission/permission-engine.js'
 import { loadPersistentPermissionRules } from '../permission/persistent-rules.js'
 import { FileToolResultStore, type ToolResultStore } from '../tools/tool-result-store.js'
 import { observeCompletedWebTaskResult } from '../skills/candidates/observer.js'
+import type { AutomaticMemorySink } from '../memory/automatic-memory.js'
 
 export type {
   ActionBinding,
@@ -96,6 +101,7 @@ export interface WebTaskExecutionHost {
   onSessionReady?: (session: AgentSession) => void | Promise<void>
   persistenceSanitizer?: (value: unknown) => unknown
   memoryContextProvider?: (input: WebTaskMemoryContextRequest) => Promise<ContextItem[]>
+  automaticMemorySink?: AutomaticMemorySink
   asyncTaskRuntimeFactory?: (input: WebTaskAsyncRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
 }
 
@@ -104,6 +110,10 @@ export interface WebTaskMemoryContextRequest {
   sessionId: string
   runId: string
   revision: number
+  phase: 'bootstrap' | 'post_navigation'
+  currentUrl?: string
+  pageState?: PageState
+  formState?: FormState
 }
 
 export interface WebTaskAsyncRuntimeFactoryInput {
@@ -503,24 +513,6 @@ async function executeGenericWebTask(
         })
       }
       let runtimeContextItems = [...request.contextItems]
-      if (host.memoryContextProvider) {
-        const memoryItems = await host.memoryContextProvider({
-          input: request.input,
-          sessionId,
-          runId: request.input.runId,
-          revision: request.input.revision,
-        })
-        for (const item of memoryItems) validateContextItem(item)
-        runtimeContextItems = [...runtimeContextItems, ...memoryItems].filter((item) => isContextItemEligible(item))
-        const ids = runtimeContextItems.map((item) => item.id)
-        if (new Set(ids).size !== ids.length) {
-          throw new Error('Runtime memory context produced duplicate ContextItem ids.')
-        }
-        trace.agentTrace?.recordEvent('memory_retrieved', {
-          source: 'memory_lifecycle',
-          itemCount: memoryItems.length,
-        })
-      }
       const recoveryStartUrl = executionContext?.recoveryMode === 'continuation_reobserve/v1'
         ? host.restoredSession?.latestResumeCapsule?.previousUrl ?? request.input.startUrl
         : request.input.startUrl
@@ -538,6 +530,41 @@ async function executeGenericWebTask(
           throw new Error(opened.error.message)
         }
         await recordBootstrapAction(actionLedger.perform(actionId, 'Initial navigation succeeded.'))
+      }
+      if (host.memoryContextProvider) {
+        // Resolve browser memory only after the initial navigation. This lets a
+        // tenant provider validate procedure memories against the live,
+        // potentially redirected page instead of trusting the requested URL.
+        // The snapshot is read-only and is collected only when a provider is
+        // configured, so non-memory runs pay no additional bootstrap cost.
+        if (recoveryStartUrl) {
+          await browserSnapshot({ sessionId }).catch(() => undefined)
+        }
+        const pageState = observationManager.getPageState(sessionId)
+        const formState = observationManager.getFormState(sessionId)
+        const currentUrl = pageState?.url ?? formState?.url
+        const memoryItems = await host.memoryContextProvider({
+          input: request.input,
+          sessionId,
+          runId: request.input.runId,
+          revision: request.input.revision,
+          phase: recoveryStartUrl ? 'post_navigation' : 'bootstrap',
+          ...(currentUrl ? { currentUrl } : {}),
+          ...(pageState ? { pageState } : {}),
+          ...(formState ? { formState } : {}),
+        })
+        for (const item of memoryItems) validateContextItem(item)
+        runtimeContextItems = [...runtimeContextItems, ...memoryItems].filter((item) => isContextItemEligible(item))
+        const ids = runtimeContextItems.map((item) => item.id)
+        if (new Set(ids).size !== ids.length) {
+          throw new Error('Runtime memory context produced duplicate ContextItem ids.')
+        }
+        trace.agentTrace?.recordEvent('memory_retrieved', {
+          source: 'memory_lifecycle',
+          phase: recoveryStartUrl ? 'post_navigation' : 'bootstrap',
+          livePageValidated: Boolean(pageState),
+          itemCount: memoryItems.length,
+        })
       }
       if (!hasModelKey(config)) {
         const summary = 'Generic runtime is blocked because no model key is configured.'
@@ -617,6 +644,8 @@ async function executeGenericWebTask(
         toolOrchestration: runtimeAssembly.toolOrchestration,
         actionLedger,
         toolResultStore: artifactStore,
+        ...(host.automaticMemorySink ? { automaticMemorySink: host.automaticMemorySink } : {}),
+        ...(request.input.goal.scenario ? { automaticMemoryWorkflow: request.input.goal.scenario } : {}),
         ...(runtimeAssembly.memory.mode === 'legacy_local' ? {
           persistentAnswerStore: { path: config.memory.answerStorePath },
           persistentPermissionRules: { path: config.memory.permissionRulesPath },

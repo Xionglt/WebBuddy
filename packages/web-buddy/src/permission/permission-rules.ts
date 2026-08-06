@@ -240,7 +240,10 @@ function buildDecision(
 
 function rememberScopesFor(action: PermissionDecision['action'], gateKind: GateKind | undefined): PermissionRememberScope[] {
   if (action !== 'ask') return ['once']
-  if (gateKind === 'high_risk_action') return ['once', 'session', 'always']
+  // Positive authorization is intentionally session-bound. A historical
+  // allow must never widen a future session's authority; restrictive deny
+  // rules may still be stored as `always` through the persistent-rule API.
+  if (gateKind === 'high_risk_action') return ['once', 'session']
   return ['once']
 }
 

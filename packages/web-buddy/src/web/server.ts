@@ -25,8 +25,12 @@ import {
 } from '../control/index.js'
 import { createAgentRunController, type AgentRunController } from '../kernel/run-controller.js'
 import {
+  AUTOMATIC_WEB_MEMORY_WRITE_POLICY,
+  buildPageSemanticFingerprint,
+  createLifecycleAutomaticMemorySink,
   createFileMemoryLifecycle,
   retrieveLifecycleMemoryContext,
+  type MemoryActorScope,
   type MemoryLifecycleRecord,
   type MemoryLifecycleService,
 } from '../memory/index.js'
@@ -502,6 +506,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       })
       const config = await runtimeConfig()
       config.human.mode = 'auto'
+      const lifecycleMemory = running.ownerScope
+        ? memoryForOwnerScope(running.ownerScope)
+        : undefined
+      const automaticMemoryEnabled = process.env.WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED === 'true'
       const driver = options.webTaskRuntimeDriver ?? createWebTaskRuntimeDriver({
         config,
         gate,
@@ -517,10 +525,24 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           ? { asyncTaskRuntimeFactory: options.webTaskAsyncRuntimeFactory }
           : {}),
         persistenceSanitizer: (value) => security.sanitize(value),
+        ...(automaticMemoryEnabled && lifecycleMemory && running.ownerScope ? {
+          automaticMemorySink: createLifecycleAutomaticMemorySink({
+            service: lifecycleMemory,
+            actorScope: memoryActorScopeForOwnerScope(running.ownerScope),
+          }),
+        } : {}),
         ...(running.ownerScope ? {
-          memoryContextProvider: async ({ input, sessionId, runId, revision }) => {
-            const service = memoryForOwnerScope(running.ownerScope!)
+          memoryContextProvider: async ({ input, sessionId, runId, revision, currentUrl, pageState, formState }) => {
+            const service = lifecycleMemory
             if (!service) return []
+            const pageFingerprint = currentUrl && (pageState || formState)
+              ? buildPageSemanticFingerprint({
+                  url: currentUrl,
+                  page: pageState,
+                  form: formState,
+                  workflowStage: input.goal.scenario,
+                })
+              : undefined
             return retrieveLifecycleMemoryContext({
               service,
               ownerScope: running.ownerScope!,
@@ -528,6 +550,9 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
               runId,
               revision,
               sessionId,
+              currentUrl: currentUrl ?? input.startUrl,
+              workflow: input.goal.scenario,
+              ...(pageFingerprint ? { pageFingerprint } : {}),
             })
           },
         } : {}),
@@ -909,11 +934,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if (!service) {
       service = createFileMemoryLifecycle({
         root: memoryRoot,
-        actorScope: {
-          tenantId: ownerScope.tenantId,
-          userId: ownerScope.userId,
-          runId: `service-${createHash('sha256').update(key).digest('hex').slice(0, 24)}`,
-        },
+        actorScope: memoryActorScopeForOwnerScope(ownerScope),
+        policy: AUTOMATIC_WEB_MEMORY_WRITE_POLICY,
       }).service
       memories.set(key, service)
     }
@@ -2075,6 +2097,18 @@ function projectMemory(record: Readonly<MemoryLifecycleRecord>) {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}),
+  }
+}
+
+function memoryActorScopeForOwnerScope(ownerScope: OwnerScope): MemoryActorScope {
+  if (!ownerScope.tenantId || !ownerScope.userId) {
+    throw new Error('Long-term Memory requires tenantId and userId.')
+  }
+  const key = `tenant:${ownerScope.tenantId}:user:${ownerScope.userId}`
+  return {
+    tenantId: ownerScope.tenantId,
+    userId: ownerScope.userId,
+    runId: `service-${createHash('sha256').update(key).digest('hex').slice(0, 24)}`,
   }
 }
 
