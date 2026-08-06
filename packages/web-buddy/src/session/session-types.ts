@@ -1,4 +1,5 @@
 import type { KernelEvent } from '../kernel/kernel-events.js'
+import type { ResumeCapsuleV1 } from '../continuation/contracts.js'
 import type { ToolResultArtifactRef } from '../tools/tool-result-store.js'
 import type { TaskNotificationPromptAttachmentV1 } from '../agents/async-task-contracts.js'
 
@@ -138,6 +139,16 @@ export interface UserAnswerEntry extends TranscriptEntryBase {
   data?: unknown
 }
 
+export interface UserContinuationEntry extends TranscriptEntryBase {
+  type: 'user_continuation'
+  continuationId: string
+  questionId: string
+  field: string
+  answer: string
+  intentPatch?: string
+  capsule: ResumeCapsuleV1
+}
+
 export interface WorkflowEvaluationEntry extends TranscriptEntryBase {
   type: 'workflow_evaluation'
   evaluation: unknown
@@ -196,6 +207,7 @@ export type TranscriptEntry =
   | WorkflowEvidenceEntry
   | UserConfirmationEntry
   | UserAnswerEntry
+  | UserContinuationEntry
   | WorkflowEvaluationEntry
   | CompletionGateEntry
   | ContextCompactionEntry

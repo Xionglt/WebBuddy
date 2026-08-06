@@ -172,6 +172,23 @@ assert.equal(sdk.validateAuditEvent({
   result: 'succeeded',
   redaction: 'not_required',
 }).action, 'run.pause')
+assert.equal(sdk.validateAuditEvent({
+  schemaVersion: 'audit-event/v1',
+  eventId: 'audit-continuation-1',
+  requestId: 'request-continuation-1',
+  actor: {
+    schemaVersion: 'audit-actor/v1',
+    actorId: 'user-a',
+    scope: tenantScope,
+    authentication: 'bearer',
+  },
+  action: 'run.continue',
+  target: { kind: 'run', id: 'run-1' },
+  occurredAt: '2026-07-18T00:00:00.000Z',
+  result: 'succeeded',
+  redaction: 'redacted',
+  metadata: { mode: 'live' },
+}).action, 'run.continue')
 assert.throws(
   () => sdk.validateAuditEvent({
     schemaVersion: 'audit-event/v1',
@@ -209,6 +226,19 @@ const runClient = sdk.createRunClient({
           state: 'running',
           scope: tenantScope,
           updatedAt: '2026-07-18T00:00:00.000Z',
+          pendingContinuation: {
+            continuationId: 'continuation-1',
+            kind: 'needs_information',
+            status: 'pending',
+            question: {
+              questionId: 'question-1',
+              field: 'company_name',
+              prompt: 'Which company name should be used?',
+              options: ['Example Labs'],
+            },
+            requestedAt: '2026-07-18T00:00:00.000Z',
+            answer: 'must not leak',
+          },
           internalStorePath: '/must/not/leak',
         }],
       }
@@ -219,6 +249,43 @@ const listed = await runClient.list({ schemaVersion: 'run-client-list/v1' })
 assert.equal(listed.items.length, 1)
 assert.equal('internalStorePath' in listed.items[0], false)
 assert.equal(transportCalls[0].scope.tenantId, 'tenant-a')
+assert.equal(listed.items[0].pendingContinuation?.question.field, 'company_name')
+assert.equal('answer' in listed.items[0].pendingContinuation, false)
+
+const continuationCalls = []
+const continuationClient = sdk.createRunClient({
+  scope: tenantScope,
+  transport: {
+    async send(request) {
+      continuationCalls.push(request)
+      return {
+        schemaVersion: 'public-run/v1',
+        runId: 'run-1',
+        revision: 0,
+        attempt: 1,
+        state: 'running',
+        scope: tenantScope,
+        updatedAt: '2026-07-18T00:00:01.000Z',
+      }
+    },
+  },
+})
+const continued = await continuationClient.continue({
+  schemaVersion: 'run-client-continuation/v1',
+  runId: 'run-1',
+  continuationId: 'continuation-1',
+  expectedRevision: 0,
+  answer: 'Use Example Labs.',
+  intentPatch: 'Keep the task draft-only.',
+  idempotencyKey: 'continue-run-1',
+})
+assert.equal(continued.state, 'running')
+assert.equal(
+  continuationCalls[0].path,
+  '/api/runs/run-1/continuations/continuation-1/resolve',
+)
+assert.equal(continuationCalls[0].body.answer, 'Use Example Labs.')
+assert.equal(continuationCalls[0].body.intentPatch, 'Keep the task draft-only.')
 
 const failed = await sdk.runWebTask({
   ...research,

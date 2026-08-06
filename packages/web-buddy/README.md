@@ -150,6 +150,7 @@ npm run test:mvp
 | `npm run demo:form` | Local form observation, structured profile filling, and submit-adjacent gate behavior. | Offline fixture; never contacts a real site. |
 | `npm run demo:research` | Read-only page observation, structured summary artifact, trace, metrics, safety report. | Offline fixture; no login, no form submit, no L3/L4 action. |
 | Web console → `Venue` | Compare five venues, choose the only fully compliant option, fill a booking draft, and stop before payment. | Local fixture; uses fake contact data and must leave the payment boundary untouched. |
+| `/poc/invoice-portal` | Supplier-side customer portal invoice preparation, exception isolation, exact approval, and receipt capture. | Deterministic offline POC; no customer portal or real submission is contacted. |
 | `npm run demo:match` | Read-only Alibaba multi-page list/detail matching as a domain Skill example. | Threshold-gated; does not final-submit. |
 | `npm run alibaba:apply:raw` | Complex recruiting workflow through the same generic Web Buddy runtime. | Requires model and human handoff for login/captcha/final submit. |
 
@@ -281,6 +282,58 @@ Web Buddy keeps run recovery and user memory separate:
 - `~/.web-buddy/memory/permission-rules.json` stores remembered permission rules
   that are matched before default permission rules.
 
+Long-term browser memories can use the `web-memory/v1` evidence envelope. Its
+governance gate runs after retrieval and before prompt injection:
+
+- restrictive constraints may narrow behavior, but Memory never expands
+  runtime permissions;
+- positive authorization is session-bound and is never inherited by a later
+  session; legacy cross-session `allow` records fail closed;
+- site/workflow mismatches are rejected before injection;
+- procedure memories are bound to an order-insensitive semantic page
+  fingerprint (origin, path pattern, workflow stage, form labels/control kinds,
+  and action names/risks); missing live evidence makes them advisory and a
+  fingerprint drift removes them from context;
+- governance diagnostics report evaluated, injected, advisory, and rejected
+  counts with reason codes so stale-memory behavior can be evaluated directly.
+
+`MemoryLifecycle` remains the durable source of scope, provenance, TTL,
+revision, supersede/conflict, and forget semantics. The evidence gate is a
+read-side policy layer; it does not introduce another Memory Store. Build a
+fingerprint with `buildPageSemanticFingerprint()` and validate structured
+records with `evaluateWebMemoryGovernance()`. Tenant runtime retrieval happens
+after initial navigation and uses the observed PageState/FormState plus the
+actual redirected URL; runtimes without a Memory provider do not take the extra
+bootstrap snapshot.
+
+Automatic long-term Memory extraction is an explicit tenant-runtime opt-in:
+
+```bash
+WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
+```
+
+At each completed Agent turn, the extractor first builds a bounded evidence
+set. It calls the model only when the turn contains an explicit durable user
+signal, a direct `ask_user` answer, or a successful allowlisted read-only Web
+observation. Every proposed Memory must cite an exact `evidenceQuote`; code then
+checks the quote against the source, rejects credentials/contact/identity data,
+rejects positive authorization, requires confidence >= 0.85, and binds Web
+procedures to the current semantic page fingerprint. The verified extractive
+quote, rather than the model's paraphrase, becomes the persisted statement.
+Model output is therefore a proposal rather than write authority.
+
+Accepted candidates pass through the ActionLedger and the narrow
+`AUTOMATIC_WEB_MEMORY_WRITE_POLICY` before MemoryLifecycle persistence.
+Preferences expire after 180 days, restrictive constraints after 365 days, and
+page procedures after 30 days. The logical `memoryKey` deduplicates repeated
+observations; a changed statement atomically supersedes the prior active
+revision. Extraction failures and policy denials never fail the foreground
+Agent turn. Trace events expose proposed/accepted/rejected reason counts and
+successful writes continue to use `memory_updated` metrics.
+
+See [Memory System](./docs/memory-system.md) for the complete write, retrieval,
+validity, permission-inheritance, lifecycle, and observability design.
+
 Override memory paths when running tests or isolated profiles:
 
 ```bash
@@ -333,11 +386,21 @@ runWebTask
 ```
 
 The built-in Runtime derives an explicit task profile. Research/comparison runs
-may receive trusted read-only async workers when a host factory is supplied;
-form and final-review profiles keep foreground effects serial. The ActionLedger
-is the authoritative source for `approved`, `performed`, and `not_performed`
-completion outcomes. Contract-required result artifacts are produced through a
-schema materializer registry rather than scenario-specific Agent Loop branches.
+may receive trusted read-only async workers from the local factory or a
+host-supplied override; form and final-review profiles keep foreground effects
+serial. The local rollout enables the Researcher and Comparison roles, persists
+their Context Envelopes and outputs as immutable session artifacts, and remains
+off by default:
+
+```bash
+WEB_BUDDY_ASYNC_TASKS_ENABLED=true npm run web
+```
+
+The Main Agent remains the only browser writer and must verify every Subagent
+result. The ActionLedger is the authoritative source for `approved`,
+`performed`, and `not_performed` completion outcomes. Contract-required result
+artifacts are produced through a schema materializer registry rather than
+scenario-specific Agent Loop branches.
 
 Local SDK runs use the existing local memory files. Tenant-owned Web service
 runs retrieve MemoryLifecycle records through the exact owner scope and inject
@@ -500,6 +563,7 @@ npm run test:job-crawl-pagination  # multi-page crawl + Top N detail fixture
 npm run test:job-match-threshold   # threshold stops low matches before apply
 npm run test:permission-modes # safe/review/trusted/autopilot rules
 npm run test:direct-submit-flow    # direct-submit review fixtures
+npm run test:invoice-portal-poc    # offline product POC and approval-boundary flow
 npm run test:risk-timeline    # risk-decisions artifact and counters
 npm run test:e2e-auto-apply   # localhost sandbox auto-apply
 npm run test:mvp              # full MVP regression entry

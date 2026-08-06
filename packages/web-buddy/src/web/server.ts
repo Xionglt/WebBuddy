@@ -25,8 +25,12 @@ import {
 } from '../control/index.js'
 import { createAgentRunController, type AgentRunController } from '../kernel/run-controller.js'
 import {
+  AUTOMATIC_WEB_MEMORY_WRITE_POLICY,
+  buildPageSemanticFingerprint,
+  createLifecycleAutomaticMemorySink,
   createFileMemoryLifecycle,
   retrieveLifecycleMemoryContext,
+  type MemoryActorScope,
   type MemoryLifecycleRecord,
   type MemoryLifecycleService,
 } from '../memory/index.js'
@@ -50,9 +54,13 @@ import {
 import { sessionManager } from '../session/manager.js'
 import {
   FileSessionStore,
+  readJsonLines,
   restoreSessionState,
   type RestoredSessionState,
+  type TranscriptEntry,
 } from '../session/index.js'
+import type { ResumeCapsuleV1 } from '../continuation/contracts.js'
+import { buildContinuationMetrics } from '../continuation/metrics.js'
 import {
   digestCanonicalJson,
   snapshotWebTaskInput,
@@ -71,6 +79,7 @@ import {
 } from '../task/contracts.js'
 import type { WebBuddyTaskType } from '../workflow/completion-gate.js'
 import INDEX_HTML from './public/index.html'
+import INVOICE_PORTAL_POC_HTML from './public/invoice-portal-poc.html'
 import VENUE_BOOKING_HTML from './public/venue-booking.html'
 import {
   WebServiceSecurityBoundary,
@@ -83,6 +92,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled'])
 const MAX_LIVE_EVENTS_PER_RUN = 1000
 const GENERIC_RECOVERY_MODE = 'read_only_reobserve/v1' as const
+const CONTINUATION_RECOVERY_MODE = 'continuation_reobserve/v1' as const
 
 function outputDir(): string {
   return resolve(loadConfig().trace.outDir)
@@ -115,6 +125,7 @@ interface LiveExecution {
 
 interface GenericLaunchOptions {
   restoredSession?: RestoredSessionState
+  recoveryMode?: typeof GENERIC_RECOVERY_MODE | typeof CONTINUATION_RECOVERY_MODE
 }
 
 export interface WebControlServerOptions {
@@ -181,19 +192,49 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       )))
     }
   }
+  const persistContinuationTranscript = async (
+    sessionId: string,
+    runId: string,
+    capsule: ResumeCapsuleV1,
+  ): Promise<void> => {
+    const session = await sessionStore.get(sessionId)
+    if (!session || session.runId !== runId) {
+      throw new Error('Continuation session is missing or belongs to another run.')
+    }
+    const entryId = `user_continuation:${capsule.continuationId}`
+    const entries = await readJsonLines<TranscriptEntry>(session.transcriptPath)
+    if (entries.some((entry) => entry.entryId === entryId)) return
+    await sessionStore.appendTranscript({
+      version: 1,
+      sessionId,
+      runId,
+      entryId,
+      ts: capsule.createdAt,
+      type: 'user_continuation',
+      continuationId: capsule.continuationId,
+      questionId: capsule.answeredQuestion.questionId,
+      field: capsule.answeredQuestion.field,
+      answer: capsule.answeredQuestion.answer,
+      ...(capsule.intentPatch ? { intentPatch: capsule.intentPatch } : {}),
+      capsule: structuredClone(capsule),
+    })
+  }
   const validateRestorableSession = async (record: RunRecord): Promise<boolean> => {
-    if (record.inputSnapshot.goal.metadata?.restartSafe !== true) return false
+    const continuationRecovery = hasCurrentContinuationCheckpoint(record)
+    if (record.inputSnapshot.goal.metadata?.restartSafe !== true && !continuationRecovery) return false
     const adapter = executionAdapterFor(record)
     if (adapter === 'generic_web_task') {
       if (options.webTaskRuntimeDriver
-        || record.inputSnapshot.goal.metadata?.recoveryMode !== GENERIC_RECOVERY_MODE
-        || !isReadOnlyGenericSnapshot(record.inputSnapshot)) {
+        || (!continuationRecovery
+          && (record.inputSnapshot.goal.metadata?.recoveryMode !== GENERIC_RECOVERY_MODE
+            || !isReadOnlyGenericSnapshot(record.inputSnapshot)))) {
         return false
       }
       const sessionRef = record.sessionRef ?? record.lastSafeBoundary?.sessionRef
       if (sessionRef?.provider !== 'file-session-store' || !record.sessionRef) return false
     } else if (adapter !== 'recruiting_compat'
-      || record.inputSnapshot.goal.metadata?.mode !== 'demo-research') {
+      || (!continuationRecovery
+        && record.inputSnapshot.goal.metadata?.mode !== 'demo-research')) {
       return false
     }
     return Boolean(await restoreSessionForRecord(record))
@@ -339,6 +380,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         runRevision: running.runRevision,
         attempt: running.attempt,
         taskContract: running.inputSnapshot.contract,
+        goal: running.inputSnapshot.goal.instruction,
         sessionId,
         abortSignal: controller.signal,
         ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
@@ -424,12 +466,21 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         expectedAttempt: record.attempt,
       }, scope)
       launched = running
-      const readOnlyAuthority =
-        running.inputSnapshot.goal.metadata?.recoveryMode === GENERIC_RECOVERY_MODE
-      if (launchOptions.restoredSession && (!readOnlyAuthority || options.webTaskRuntimeDriver)) {
+      const recoveryMode = launchOptions.recoveryMode
+        ?? (launchOptions.restoredSession
+          && running.inputSnapshot.goal.metadata?.recoveryMode === GENERIC_RECOVERY_MODE
+          ? GENERIC_RECOVERY_MODE
+          : undefined)
+      const readOnlyAuthority = recoveryMode === GENERIC_RECOVERY_MODE
+      const continuationAuthority = recoveryMode === CONTINUATION_RECOVERY_MODE
+        && running.lastResumeCapsule?.target.runRevision === running.runRevision
+        && running.lastResumeCapsule.target.attempt === running.attempt
+      if (launchOptions.restoredSession
+        && ((!readOnlyAuthority && !continuationAuthority)
+          || options.webTaskRuntimeDriver)) {
         throw new HttpError(
           409,
-          'Generic recovery requires the built-in read-only runtime.',
+          'Generic recovery requires the built-in runtime and an exact recovery authority.',
         )
       }
       const sessionId = launchOptions.restoredSession?.session.sessionId
@@ -442,6 +493,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         runRevision: running.runRevision,
         attempt: running.attempt,
         taskContract: running.inputSnapshot.contract,
+        goal: running.inputSnapshot.goal.instruction,
         sessionId,
         abortSignal: controller.signal,
         ...(running.ownerScope ? { ownerScope: running.ownerScope } : {}),
@@ -454,6 +506,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       })
       const config = await runtimeConfig()
       config.human.mode = 'auto'
+      const lifecycleMemory = running.ownerScope
+        ? memoryForOwnerScope(running.ownerScope)
+        : undefined
+      const automaticMemoryEnabled = process.env.WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED === 'true'
       const driver = options.webTaskRuntimeDriver ?? createWebTaskRuntimeDriver({
         config,
         gate,
@@ -464,14 +520,29 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           ? { restoredSession: launchOptions.restoredSession }
           : {}),
         readOnlyAuthority,
+        continuationAuthority,
         ...(options.webTaskAsyncRuntimeFactory
           ? { asyncTaskRuntimeFactory: options.webTaskAsyncRuntimeFactory }
           : {}),
         persistenceSanitizer: (value) => security.sanitize(value),
+        ...(automaticMemoryEnabled && lifecycleMemory && running.ownerScope ? {
+          automaticMemorySink: createLifecycleAutomaticMemorySink({
+            service: lifecycleMemory,
+            actorScope: memoryActorScopeForOwnerScope(running.ownerScope),
+          }),
+        } : {}),
         ...(running.ownerScope ? {
-          memoryContextProvider: async ({ input, sessionId, runId, revision }) => {
-            const service = memoryForOwnerScope(running.ownerScope!)
+          memoryContextProvider: async ({ input, sessionId, runId, revision, currentUrl, pageState, formState }) => {
+            const service = lifecycleMemory
             if (!service) return []
+            const pageFingerprint = currentUrl && (pageState || formState)
+              ? buildPageSemanticFingerprint({
+                  url: currentUrl,
+                  page: pageState,
+                  form: formState,
+                  workflowStage: input.goal.scenario,
+                })
+              : undefined
             return retrieveLifecycleMemoryContext({
               service,
               ownerScope: running.ownerScope!,
@@ -479,6 +550,9 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
               runId,
               revision,
               sessionId,
+              currentUrl: currentUrl ?? input.startUrl,
+              workflow: input.goal.scenario,
+              ...(pageFingerprint ? { pageFingerprint } : {}),
             })
           },
         } : {}),
@@ -505,7 +579,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
             message: event.snapshot?.reason ?? event.type,
           })
         },
-        launchOptions.restoredSession ? GENERIC_RECOVERY_MODE : undefined,
+        recoveryMode,
       )
       const settled = runWebTask(input)
         .then((result) => settleWebTaskExecution(running, controller!, result))
@@ -561,6 +635,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
       })
       endRun(rejected.record, result, safeError)
+      return
+    }
+
+    if (current.state === 'blocked_on_human' && current.pendingContinuation) {
+      endRun(current, result, safeError)
       return
     }
 
@@ -674,6 +753,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
       })
       endWebTaskRun(rejected.record, result, safeError)
+      return
+    }
+
+    if (current.state === 'blocked_on_human' && current.pendingContinuation) {
+      endWebTaskRun(current, result, safeError)
       return
     }
 
@@ -850,11 +934,8 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if (!service) {
       service = createFileMemoryLifecycle({
         root: memoryRoot,
-        actorScope: {
-          tenantId: ownerScope.tenantId,
-          userId: ownerScope.userId,
-          runId: `service-${createHash('sha256').update(key).digest('hex').slice(0, 24)}`,
-        },
+        actorScope: memoryActorScopeForOwnerScope(ownerScope),
+        policy: AUTOMATIC_WEB_MEMORY_WRITE_POLICY,
       }).service
       memories.set(key, service)
     }
@@ -890,6 +971,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
     if (req.method === 'GET' && (path === '/fixtures/venue-booking' || path === '/fixtures/venue-booking/')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       res.end(VENUE_BOOKING_HTML)
+      return
+    }
+    if (req.method === 'GET' && (path === '/poc/invoice-portal' || path === '/poc/invoice-portal/')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(INVOICE_PORTAL_POC_HTML)
       return
     }
 
@@ -984,6 +1070,26 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       return
     }
 
+    if (path === '/api/continuations/metrics' && req.method === 'GET') {
+      const page = await runService.list({
+        ...(ownerScope ? { ownerScope } : {}),
+        limit: 1000,
+      })
+      const eventPages = await Promise.all(page.items.map((run) => runService.events(run.runId, {
+        ...(ownerScope ? { ownerScope } : {}),
+      })))
+      const metrics = buildContinuationMetrics(eventPages.flatMap((eventPage) => eventPage.items))
+      await security.audit({
+        principal,
+        requestId,
+        action: 'trace.read',
+        target: { kind: 'trace', id: 'continuation-metrics' },
+        result: 'succeeded',
+      })
+      respond(200, metrics)
+      return
+    }
+
     const runMatch = path.match(/^\/api\/runs\/([^/]+)$/)
     if (runMatch && req.method === 'GET') {
       const runId = decodeURIComponent(runMatch[1])
@@ -1008,6 +1114,180 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         runId,
         items: events.items.map(projectRunEvent),
       })
+      return
+    }
+
+    const continuationMatch = path.match(/^\/api\/runs\/([^/]+)\/continuations\/([^/]+)\/resolve$/)
+    if (continuationMatch && req.method === 'POST') {
+      const runId = decodeURIComponent(continuationMatch[1])
+      const continuationId = decodeURIComponent(continuationMatch[2])
+      const body = await readJsonBody(req)
+      assertBodyScope(body, principal)
+      const visible = await runService.get(runId, storeScope)
+      if (!visible) return denyResource({ kind: 'run' })
+      const expectedRevision = requireExpectedRevision(body)
+      const answer = boundedText(body.answer, 'answer', 4_000)
+      const intentPatch = body.intentPatch === undefined
+        ? undefined
+        : boundedText(body.intentPatch, 'intentPatch', 4_000)
+      const sanitizedAnswer = boundedText(security.sanitize(answer), 'answer', 4_000)
+      const sanitizedIntentPatch = intentPatch === undefined
+        ? undefined
+        : boundedText(security.sanitize(intentPatch), 'intentPatch', 4_000)
+      const idempotencyKey = security.bindIdempotencyKey(
+        principal,
+        requireIdempotencyKey(req, body),
+      )
+      const priorCapsule = visible.lastResumeCapsule?.continuationId === continuationId
+        ? visible.lastResumeCapsule
+        : undefined
+      if (priorCapsule) {
+        const sameResolution = priorCapsule.source.runRevision === expectedRevision
+          && priorCapsule.answeredQuestion.answer === sanitizedAnswer
+          && (priorCapsule.intentPatch ?? undefined) === sanitizedIntentPatch
+        if (!sameResolution) {
+          throw new HttpError(409, 'Continuation was already resolved with different content.')
+        }
+        await security.audit({
+          principal,
+          requestId,
+          action: 'run.continue',
+          target: { kind: 'run', id: runId },
+          result: 'succeeded',
+          metadata: { mode: 'idempotent_replay', continuationId },
+        })
+        respond(200, projectPublicRun(visible, principal.scope))
+        return
+      }
+      if (expectedRevision !== visible.runRevision) {
+        throw new ControlStoreError(
+          'REVISION_CONFLICT',
+          'Continuation run revision does not match the current run.',
+          expectedRevision,
+          visible.runRevision,
+        )
+      }
+      const answered = await runService.answerContinuation(runId, {
+        continuationId,
+        answer: sanitizedAnswer,
+        ...(sanitizedIntentPatch ? { intentPatch: sanitizedIntentPatch } : {}),
+        idempotencyKey,
+        expectedRecordRevision: visible.recordRevision,
+        expectedRunRevision: visible.runRevision,
+        expectedAttempt: visible.attempt,
+      }, storeScope)
+
+      const liveExecution = executions.get(runId)
+      const resumedLive = await liveExecution?.gate.resolveInformationLive(continuationId) ?? false
+      if (resumedLive) {
+        const current = await runService.get(runId, storeScope)
+        if (!current?.lastResumeCapsule) {
+          throw new Error('Live continuation resumed without a durable resume capsule.')
+        }
+        await persistContinuationTranscript(
+          current.lastResumeCapsule.target.sessionId,
+          runId,
+          current.lastResumeCapsule,
+        )
+        await security.audit({
+          principal,
+          requestId,
+          action: 'run.continue',
+          target: { kind: 'run', id: runId },
+          result: 'succeeded',
+          metadata: { mode: 'live', continuationId },
+        })
+        respond(200, projectPublicRun(current, principal.scope))
+        return
+      }
+      if (liveExecution) {
+        return respond(409, {
+          error: 'continuation_live_attempt_not_ready',
+          message: 'The live attempt still owns this continuation but could not consume it yet.',
+        })
+      }
+
+      const priorSessionRef = answered.record.sessionRef
+        ?? answered.record.lastSafeBoundary?.sessionRef
+      if (!priorSessionRef
+        || priorSessionRef.provider !== 'file-session-store'
+        || priorSessionRef.runId !== runId
+        || priorSessionRef.attempt !== answered.record.attempt) {
+        return respond(409, {
+          error: 'continuation_requires_durable_session',
+          message: 'Cold continuation requires the exact durable session from the blocked attempt.',
+        })
+      }
+      const restoredBeforeResume = await restoreSessionForRecord(answered.record)
+      if (!restoredBeforeResume) {
+        return respond(409, {
+          error: 'continuation_session_validation_failed',
+          message: 'The durable continuation session could not be validated.',
+        })
+      }
+      await approvalService.cancelPendingForRun(
+        runId,
+        'Approval invalidated when a user continuation created a new run revision.',
+        `continuation-approval-fence:${answered.record.runRevision}:${answered.record.attempt}`,
+        storeScope,
+        {
+          expectedRunRevision: answered.record.runRevision,
+          expectedAttempt: answered.record.attempt,
+        },
+      )
+      const resuming = await runService.resumeAnsweredContinuation(
+        runId,
+        continuationId,
+        `cold-continuation:${idempotencyKey}`,
+        storeScope,
+      )
+      const capsule = resuming.lastResumeCapsule
+      if (!capsule) throw new Error('Cold continuation resumed without a durable resume capsule.')
+      await persistContinuationTranscript(priorSessionRef.id, runId, capsule)
+      const restoredSession = await restoreSessionState({
+        session: restoredBeforeResume.session,
+      })
+
+      try {
+        const rebound = await runService.attachSession(resuming.runId, {
+          schemaVersion: 'session-ref/v1',
+          provider: 'file-session-store',
+          id: priorSessionRef.id,
+          runId: resuming.runId,
+          attempt: resuming.attempt,
+        }, `continuation-session:${resuming.runRevision}:${resuming.attempt}:${priorSessionRef.id}`, storeScope)
+        if (executionAdapterFor(rebound) === 'generic_web_task') {
+          await launchWebTask(rebound, {
+            restoredSession,
+            recoveryMode: CONTINUATION_RECOVERY_MODE,
+          })
+        } else if (executionAdapterFor(rebound) === 'recruiting_compat') {
+          await launch(rebound, {
+            ...launchOptionsFromRecord(rebound),
+            restoredSessionId: priorSessionRef.id,
+          })
+        } else {
+          throw new HttpError(409, 'Stored run has no continuation-capable execution adapter.')
+        }
+      } catch (error) {
+        await persistPrelaunchFailure(
+          resuming,
+          undefined,
+          executionAdapterFor(resuming) === 'recruiting_compat' ? 'recruiting' : 'web-task',
+          error,
+        )
+        throw error
+      }
+      const current = (await runService.get(runId, storeScope)) ?? resuming
+      await security.audit({
+        principal,
+        requestId,
+        action: 'run.continue',
+        target: { kind: 'run', id: runId },
+        result: 'succeeded',
+        metadata: { mode: 'cold', continuationId },
+      })
+      respond(202, projectPublicRun(current, principal.scope))
       return
     }
 
@@ -1087,6 +1367,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       const current = visible
       const adapter = executionAdapterFor(current)
       const genericRecovery = adapter === 'generic_web_task'
+      const continuationRecovery = hasCurrentContinuationCheckpoint(current)
       if (genericRecovery
         && (!['paused', 'recoverable'].includes(current.state)
           || executions.has(runId))) {
@@ -1097,22 +1378,25 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       }
       if (genericRecovery
         && (options.webTaskRuntimeDriver
-          || current.inputSnapshot.goal.metadata?.recoveryMode !== GENERIC_RECOVERY_MODE
-          || !isReadOnlyGenericSnapshot(current.inputSnapshot))) {
+          || (!continuationRecovery
+            && (current.inputSnapshot.goal.metadata?.recoveryMode !== GENERIC_RECOVERY_MODE
+              || !isReadOnlyGenericSnapshot(current.inputSnapshot))))) {
         return respond(409, {
           error: 'generic_resume_requires_read_only_runtime',
-          message: 'Generic resume requires an explicitly opted-in read-only contract and the built-in recovery runtime.',
+          message: 'Generic resume requires either an exact continuation checkpoint or an explicitly opted-in read-only contract, plus the built-in recovery runtime.',
         })
       }
       if (!genericRecovery
         && (adapter !== 'recruiting_compat'
-          || current.inputSnapshot.goal.metadata?.mode !== 'demo-research')) {
+          || (!continuationRecovery
+            && current.inputSnapshot.goal.metadata?.mode !== 'demo-research'))) {
         return respond(409, {
           error: 'resume_requires_safe_session',
           message: 'This execution adapter is not authorized for read-only recovery.',
         })
       }
       const restartSafe = current.inputSnapshot.goal.metadata?.restartSafe === true
+        || continuationRecovery
       const priorSessionRef = genericRecovery
         ? current.sessionRef
         : current.sessionRef ?? current.lastSafeBoundary?.sessionRef
@@ -1127,6 +1411,13 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           error: 'resume_requires_safe_session',
           message: 'Generic resume requires the built-in durable file session; no prior action was replayed.',
         })
+      }
+      if (continuationRecovery && current.lastResumeCapsule) {
+        await persistContinuationTranscript(
+          priorSessionRef.id,
+          runId,
+          current.lastResumeCapsule,
+        )
       }
       let restoredSession: RestoredSessionState | undefined
       try {
@@ -1153,12 +1444,19 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           expectedAttempt: current.attempt,
         },
       )
-      const resuming = await runService.resume(
-        runId,
-        idempotencyKey,
-        storeScope,
-        controlExpectation,
-      )
+      const resuming = continuationRecovery
+        ? await runService.resumeFromContinuationCheckpoint(
+            runId,
+            idempotencyKey,
+            storeScope,
+            controlExpectation,
+          )
+        : await runService.resume(
+            runId,
+            idempotencyKey,
+            storeScope,
+            controlExpectation,
+          )
       if (genericRecovery) {
         try {
           const rebound = await runService.attachSession(resuming.runId, {
@@ -1168,7 +1466,12 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
             runId: resuming.runId,
             attempt: resuming.attempt,
           }, `generic-resume-session:${resuming.runRevision}:${resuming.attempt}:${priorSessionRef.id}`, storeScope)
-          await launchWebTask(rebound, { restoredSession })
+          await launchWebTask(rebound, {
+            restoredSession,
+            recoveryMode: continuationRecovery
+              ? CONTINUATION_RECOVERY_MODE
+              : GENERIC_RECOVERY_MODE,
+          })
         } catch (error) {
           await persistPrelaunchFailure(resuming, undefined, 'web-task', error)
           throw error
@@ -1621,6 +1924,16 @@ function isReadOnlyGenericSnapshot(snapshot: WebTaskInputSnapshot): boolean {
   })
 }
 
+function hasCurrentContinuationCheckpoint(record: RunRecord): boolean {
+  const capsule = record.lastResumeCapsule
+  return Boolean(capsule
+    && record.sessionRef
+    && capsule.target.runId === record.runId
+    && capsule.target.runRevision === record.runRevision
+    && capsule.target.attempt === record.attempt
+    && capsule.target.sessionId === record.sessionRef.id)
+}
+
 function rejectInlineSecrets(
   body: Record<string, unknown>,
   security: WebServiceSecurityBoundary,
@@ -1685,6 +1998,24 @@ function projectPublicRun(run: RunRecord, scope: ServiceScope) {
     scope,
     updatedAt: run.updatedAt,
     ...(run.reason ? { reason: run.reason } : {}),
+    ...(run.pendingContinuation
+      ? {
+          pendingContinuation: {
+            continuationId: run.pendingContinuation.continuationId,
+            kind: run.pendingContinuation.kind,
+            status: run.pendingContinuation.status,
+            question: {
+              questionId: run.pendingContinuation.question.questionId,
+              field: run.pendingContinuation.question.field,
+              prompt: run.pendingContinuation.question.prompt,
+              ...(run.pendingContinuation.question.options
+                ? { options: run.pendingContinuation.question.options }
+                : {}),
+            },
+            requestedAt: run.pendingContinuation.requestedAt,
+          },
+        }
+      : {}),
   }
 }
 
@@ -1769,6 +2100,18 @@ function projectMemory(record: Readonly<MemoryLifecycleRecord>) {
   }
 }
 
+function memoryActorScopeForOwnerScope(ownerScope: OwnerScope): MemoryActorScope {
+  if (!ownerScope.tenantId || !ownerScope.userId) {
+    throw new Error('Long-term Memory requires tenantId and userId.')
+  }
+  const key = `tenant:${ownerScope.tenantId}:user:${ownerScope.userId}`
+  return {
+    tenantId: ownerScope.tenantId,
+    userId: ownerScope.userId,
+    runId: `service-${createHash('sha256').update(key).digest('hex').slice(0, 24)}`,
+  }
+}
+
 function scoped(ownerScope?: OwnerScope): { ownerScope: OwnerScope } | undefined {
   return ownerScope ? { ownerScope } : undefined
 }
@@ -1778,6 +2121,17 @@ function plainRecord(value: unknown, label: string): Record<string, unknown> {
     throw new HttpError(400, `${label} must be an object`)
   }
   return value as Record<string, unknown>
+}
+
+function boundedText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new HttpError(400, `${label} must be a non-empty string`)
+  }
+  const normalized = value.trim()
+  if (normalized.length > maxLength) {
+    throw new HttpError(400, `${label} must not exceed ${maxLength} characters`)
+  }
+  return normalized
 }
 
 function parseLaunchOptions(
@@ -1827,7 +2181,7 @@ function webTaskInputFromRecord(
   record: RunRecord,
   driver: WebTaskRuntimeDriver,
   onEvent: NonNullable<WebTaskInput['onEvent']>,
-  recoveryMode?: typeof GENERIC_RECOVERY_MODE,
+  recoveryMode?: typeof GENERIC_RECOVERY_MODE | typeof CONTINUATION_RECOVERY_MODE,
 ): WebTaskInput {
   const snapshot = record.inputSnapshot
   if (snapshot.contextProviders.length > 0) {

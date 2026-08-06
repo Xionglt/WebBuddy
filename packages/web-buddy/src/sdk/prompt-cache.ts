@@ -35,6 +35,8 @@ export interface PromptCacheUsage {
   cacheHitRatio: number
   cacheWriteInferred: boolean
   requestStartedAt: string
+  firstTokenAt?: string
+  ttftMs?: number
   completedAt: string
   durationMs: number
 }
@@ -52,6 +54,8 @@ export interface PromptCacheSnapshot {
   capability: PromptCacheCapability
   namespace: string
   lastUsage?: PromptCacheUsage
+  /** Bounded recent history used to distinguish a transient miss from a cold cache. */
+  recentUsages?: PromptCacheUsage[]
   cacheActivityAt?: string
   totals: PromptCacheTotals
 }
@@ -79,6 +83,7 @@ const TTL_MS: Record<PromptCacheTtl, number> = {
   '1h': 60 * 60_000,
   '24h': 24 * 60 * 60_000,
 }
+const MAX_RECENT_CACHE_USAGES = 10
 
 export function resolvePromptCacheCapability(model: ModelConfig): PromptCacheCapability {
   if (model.promptCache?.enabled === false) {
@@ -176,6 +181,7 @@ export function normalizeOpenAiPromptCacheUsage(input: {
   capability: PromptCacheCapability
   namespace: string
   requestStartedAt: Date
+  firstTokenAt?: Date
   completedAt: Date
 }): PromptCacheUsage {
   const promptTokens = nonNegative(input.usage?.prompt_tokens)
@@ -199,6 +205,7 @@ export function normalizeOpenAiPromptCacheUsage(input: {
     cacheCreationInputTokens: cacheCreation,
     cacheWriteInferred,
     requestStartedAt: input.requestStartedAt,
+    firstTokenAt: input.firstTokenAt,
     completedAt: input.completedAt,
   })
 }
@@ -208,6 +215,7 @@ export function normalizeAnthropicPromptCacheUsage(input: {
   capability: PromptCacheCapability
   namespace: string
   requestStartedAt: Date
+  firstTokenAt?: Date
   completedAt: Date
 }): PromptCacheUsage {
   const uncachedInput = nonNegative(input.usage?.input_tokens)
@@ -222,6 +230,7 @@ export function normalizeAnthropicPromptCacheUsage(input: {
     cacheCreationInputTokens: cacheCreation,
     cacheWriteInferred: false,
     requestStartedAt: input.requestStartedAt,
+    firstTokenAt: input.firstTokenAt,
     completedAt: input.completedAt,
   })
 }
@@ -239,10 +248,12 @@ export function accumulatePromptCacheSnapshot(
   const hasCacheActivity = usage.cacheReadInputTokens > 0
     || usage.cacheCreationInputTokens > 0
     || usage.cacheWriteInferred
+  const recentUsages = [...(previous?.recentUsages ?? []), usage].slice(-MAX_RECENT_CACHE_USAGES)
   return {
     capability,
     namespace: usage.namespace,
     lastUsage: usage,
+    recentUsages,
     ...(hasCacheActivity
       ? { cacheActivityAt: usage.completedAt }
       : previous?.cacheActivityAt
@@ -287,6 +298,7 @@ function usageResult(input: {
   cacheCreationInputTokens: number
   cacheWriteInferred: boolean
   requestStartedAt: Date
+  firstTokenAt?: Date
   completedAt: Date
 }): PromptCacheUsage {
   const uncachedInputTokens = Math.max(0, input.inputTokens - input.cacheReadInputTokens)
@@ -303,6 +315,12 @@ function usageResult(input: {
     cacheHitRatio: ratio(input.cacheReadInputTokens, input.inputTokens),
     cacheWriteInferred: input.cacheWriteInferred,
     requestStartedAt: input.requestStartedAt.toISOString(),
+    ...(input.firstTokenAt
+      ? {
+          firstTokenAt: input.firstTokenAt.toISOString(),
+          ttftMs: Math.max(0, input.firstTokenAt.getTime() - input.requestStartedAt.getTime()),
+        }
+      : {}),
     completedAt: input.completedAt.toISOString(),
     durationMs: Math.max(0, input.completedAt.getTime() - input.requestStartedAt.getTime()),
   }

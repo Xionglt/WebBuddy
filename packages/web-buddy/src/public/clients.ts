@@ -44,6 +44,20 @@ export interface PublicRun {
   scope: ServiceScope
   updatedAt: string
   reason?: string
+  pendingContinuation?: PublicContinuation
+}
+
+export interface PublicContinuation {
+  continuationId: string
+  kind: 'needs_information' | 'human_takeover' | 'operator_pause' | 'external_blocker'
+  status: 'pending' | 'answered'
+  question: {
+    questionId: string
+    field: string
+    prompt: string
+    options?: string[]
+  }
+  requestedAt: string
 }
 
 export interface PublicRunList {
@@ -108,6 +122,7 @@ export interface RunClient {
   }): Promise<PublicRun | undefined>
   pause(request: RunControlRequest): Promise<PublicRun>
   resume(request: RunControlRequest): Promise<PublicRun>
+  continue(request: ContinueRunRequest): Promise<PublicRun>
   cancel(request: RunControlRequest): Promise<PublicRun>
   events(request: {
     schemaVersion: 'run-client-events/v1'
@@ -124,6 +139,16 @@ export interface RunControlRequest {
   schemaVersion: 'run-client-control/v1'
   runId: string
   expectedRevision: number
+  idempotencyKey: string
+}
+
+export interface ContinueRunRequest {
+  schemaVersion: 'run-client-continuation/v1'
+  runId: string
+  continuationId: string
+  expectedRevision: number
+  answer: string
+  intentPatch?: string
   idempotencyKey: string
 }
 
@@ -183,6 +208,14 @@ export function createRunClient(input: {
     },
     pause: (request) => control(send, scope, 'pause', request),
     resume: (request) => control(send, scope, 'resume', request),
+    async continue(request) {
+      version(request, 'run-client-continuation/v1', 'RunClient.continue')
+      return publicRun(await send({
+        method: 'POST',
+        path: `/api/runs/${segment(request.runId)}/continuations/${segment(request.continuationId)}/resolve`,
+        body: jsonObject(request),
+      }), scope)
+    },
     cancel: (request) => control(send, scope, 'cancel', request),
     async events(request) {
       version(request, 'run-client-events/v1', 'RunClient.events')
@@ -266,6 +299,49 @@ function publicRun(value: unknown, scope: ServiceScope): PublicRun {
     scope: resourceScope,
     updatedAt: requiredTimestamp(record.updatedAt, 'PublicRun.updatedAt'),
     ...(record.reason === undefined ? {} : { reason: requiredString(record.reason, 'PublicRun.reason') }),
+    ...(record.pendingContinuation === undefined
+      ? {}
+      : { pendingContinuation: publicContinuation(record.pendingContinuation) }),
+  }
+}
+
+function publicContinuation(value: unknown): PublicContinuation {
+  const continuation = object(value, 'PublicRun.pendingContinuation')
+  const question = object(continuation.question, 'PublicRun.pendingContinuation.question')
+  if (!CONTINUATION_KINDS.has(String(continuation.kind))) {
+    transportError('PublicRun.pendingContinuation.kind is invalid.')
+  }
+  if (continuation.status !== 'pending' && continuation.status !== 'answered') {
+    transportError('PublicRun.pendingContinuation.status is invalid.')
+  }
+  if (question.options !== undefined && !Array.isArray(question.options)) {
+    transportError('PublicRun.pendingContinuation.question.options must be an array.')
+  }
+  return {
+    continuationId: requiredString(
+      continuation.continuationId,
+      'PublicRun.pendingContinuation.continuationId',
+    ),
+    kind: continuation.kind as PublicContinuation['kind'],
+    status: continuation.status,
+    question: {
+      questionId: requiredString(
+        question.questionId,
+        'PublicRun.pendingContinuation.question.questionId',
+      ),
+      field: requiredString(question.field, 'PublicRun.pendingContinuation.question.field'),
+      prompt: requiredString(question.prompt, 'PublicRun.pendingContinuation.question.prompt'),
+      ...(question.options === undefined
+        ? {}
+        : {
+            options: question.options.map((option, index) =>
+              requiredString(option, `PublicRun.pendingContinuation.question.options[${index}]`)),
+          }),
+    },
+    requestedAt: requiredTimestamp(
+      continuation.requestedAt,
+      'PublicRun.pendingContinuation.requestedAt',
+    ),
   }
 }
 
@@ -455,5 +531,11 @@ const RUN_STATES = new Set<string>([
   'failed',
   'interrupted',
   'recoverable',
+])
+const CONTINUATION_KINDS = new Set<string>([
+  'needs_information',
+  'human_takeover',
+  'operator_pause',
+  'external_blocker',
 ])
 const APPROVAL_STATES = new Set<string>(['pending', 'approved', 'denied', 'expired', 'cancelled'])

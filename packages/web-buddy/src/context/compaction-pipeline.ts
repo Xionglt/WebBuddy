@@ -183,7 +183,7 @@ export async function compactContextIfNeeded(
 
   const compactedMessages: ChatMessage[] = [
     { role: 'system', content: input.systemContent },
-    finalCompaction.compactedMessage,
+    asCompactionCheckpoint(finalCompaction.compactedMessage),
     ...recent.messages,
   ]
   const postCompactionTokenBudget = estimateTokenBudget(compactedMessages, input.tokenBudgetOptions, input.tools)
@@ -231,7 +231,7 @@ export function createCompactedMessageSet(
   return {
     messages: [
       { role: 'system', content: input.systemContent },
-      input.compactedMessage,
+      asCompactionCheckpoint(input.compactedMessage),
       ...recent.messages,
     ],
     recentRawRetention: recent.stats,
@@ -244,6 +244,13 @@ export function sanitizeMessageBoundary(messages: ChatMessage[]): ChatMessage[] 
 
 export function isCompactedRunContextMessage(message: ChatMessage): boolean {
   return message.role === 'user' && message.content.startsWith(COMPACTED_RUN_CONTEXT_PREFIX)
+}
+
+function asCompactionCheckpoint(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    cacheBoundary: 'compaction_checkpoint',
+  }
 }
 
 export function isCompactedRunContextSystemMarker(message: ChatMessage): boolean {

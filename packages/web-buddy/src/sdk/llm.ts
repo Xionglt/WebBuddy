@@ -37,6 +37,8 @@ export interface ToolCall {
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  /** Internal cache boundary metadata. Stripped from provider wire payloads. */
+  cacheBoundary?: 'compaction_checkpoint'
   /** Present on assistant messages that requested tool calls. */
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
   /** Present on tool-role messages (the result of a tool call). */
@@ -67,6 +69,8 @@ export interface ChatOptions {
   toolChoice?: 'auto' | 'none'
   /** Cap the number of output tokens. */
   maxTokens?: number
+  /** Stream provider deltas so time-to-first-token can be measured. */
+  stream?: boolean
   /** Disable request-side prompt caching for one-off calls such as semantic compaction. */
   promptCache?: boolean
   /** Independent cache metrics bucket. */
@@ -177,7 +181,7 @@ export class LlmGateway {
 
     const body: Record<string, unknown> = {
       model: this.model.name,
-      messages,
+      messages: messages.map(stripInternalMessageMetadata),
       temperature: options.temperature ?? 0.2,
       ...(this.model.extraBody ?? {}),
     }
@@ -187,6 +191,10 @@ export class LlmGateway {
       body.tool_choice = options.toolChoice ?? 'auto'
     }
     if (options.maxTokens) body.max_tokens = options.maxTokens
+    if (options.stream) {
+      body.stream = true
+      body.stream_options = { include_usage: true }
+    }
     const capability = effectivePromptCacheCapability(this.promptCacheCapability, options)
     applyOpenAiPromptCacheFields(body, {
       capability,
@@ -207,7 +215,19 @@ export class LlmGateway {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '')
+        if (options.stream && canRetryWithoutStreaming(res.status)) {
+          return await this.requestOpenai(messages, { ...options, stream: false })
+        }
         throw new LlmError(`HTTP ${res.status} from ${this.model.name}: ${text.slice(0, 300)}`, 'HTTP')
+      }
+
+      if (options.stream && isEventStreamResponse(res)) {
+        return await readOpenAiStream({
+          response: res,
+          capability,
+          namespace: options.promptCacheNamespace ?? 'default',
+          requestStartedAt,
+        })
       }
 
       const json = (await res.json()) as {
@@ -276,6 +296,7 @@ export class LlmGateway {
     // in a user message as {type:'tool_result'}. Consecutive tool results are
     // grouped into one user message.
     const converted: Array<Record<string, unknown>> = []
+    let compactionCheckpointIndex: number | undefined
     let i = 0
     while (i < messages.length) {
       const m = messages[i]
@@ -305,6 +326,9 @@ export class LlmGateway {
       } else {
         converted.push({ role: m.role, content: m.content })
       }
+      if (m.cacheBoundary === 'compaction_checkpoint') {
+        compactionCheckpointIndex = converted.length - 1
+      }
       i += 1
     }
 
@@ -331,7 +355,13 @@ export class LlmGateway {
       }
       body.tool_choice = options.toolChoice === 'none' ? { type: 'none' } : { type: 'auto' }
     }
-    if (cacheControl) markLastAnthropicMessageCacheable(converted, cacheControl)
+    if (cacheControl) {
+      if (compactionCheckpointIndex !== undefined) {
+        markAnthropicMessageCacheableAt(converted, compactionCheckpointIndex, cacheControl)
+      }
+      markLastAnthropicMessageCacheable(converted, cacheControl)
+    }
+    if (options.stream) body.stream = true
     const requestStartedAt = new Date()
 
     try {
@@ -348,7 +378,19 @@ export class LlmGateway {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '')
+        if (options.stream && canRetryWithoutStreaming(res.status)) {
+          return await this.requestAnthropic(messages, { ...options, stream: false })
+        }
         throw new LlmError(`HTTP ${res.status} from ${this.model.name}: ${text.slice(0, 300)}`, 'HTTP')
+      }
+
+      if (options.stream && isEventStreamResponse(res)) {
+        return await readAnthropicStream({
+          response: res,
+          capability,
+          namespace: options.promptCacheNamespace ?? 'default',
+          requestStartedAt,
+        })
       }
 
       const json = (await res.json()) as {
@@ -460,6 +502,7 @@ function traceChatOptions(options: ChatOptions): Record<string, unknown> {
     timeoutMs: options.timeoutMs,
     toolChoice: options.toolChoice,
     maxTokens: options.maxTokens,
+    stream: options.stream,
     promptCache: options.promptCache,
     promptCacheNamespace: options.promptCacheNamespace,
     promptCacheKeyConfigured: Boolean(options.promptCacheKey),
@@ -470,6 +513,277 @@ function traceChatOptions(options: ChatOptions): Record<string, unknown> {
       parameters: tool.function.parameters,
     })),
   }
+}
+
+async function readOpenAiStream(input: {
+  response: Response
+  capability: PromptCacheCapability
+  namespace: string
+  requestStartedAt: Date
+}): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: PromptCacheUsage }> {
+  let content = ''
+  let firstTokenAt: Date | undefined
+  let usagePayload: OpenAiUsagePayload | undefined
+  const toolCallsByIndex = new Map<number, {
+    id: string
+    name: string
+    arguments: string
+  }>()
+
+  await forEachSseData(input.response, (data) => {
+    if (data === '[DONE]') return
+    const event = parseJsonRecord(data)
+    if (!event) return
+    if (isRecord(event.error)) {
+      throw new LlmError(streamErrorMessage(event.error), 'HTTP')
+    }
+    if (isRecord(event.usage)) usagePayload = event.usage as OpenAiUsagePayload
+    const choices = Array.isArray(event.choices) ? event.choices : []
+    for (const choice of choices) {
+      if (!isRecord(choice) || !isRecord(choice.delta)) continue
+      const delta = choice.delta
+      if (typeof delta.content === 'string' && delta.content) {
+        firstTokenAt ??= new Date()
+        content += delta.content
+      }
+      const toolDeltas = Array.isArray(delta.tool_calls) ? delta.tool_calls : []
+      for (const rawToolDelta of toolDeltas) {
+        if (!isRecord(rawToolDelta)) continue
+        const index = nonNegativeInteger(rawToolDelta.index, toolCallsByIndex.size)
+        const current = toolCallsByIndex.get(index) ?? {
+          id: '',
+          name: '',
+          arguments: '',
+        }
+        if (typeof rawToolDelta.id === 'string' && rawToolDelta.id) current.id = rawToolDelta.id
+        if (isRecord(rawToolDelta.function)) {
+          if (typeof rawToolDelta.function.name === 'string') current.name += rawToolDelta.function.name
+          if (typeof rawToolDelta.function.arguments === 'string') {
+            current.arguments += rawToolDelta.function.arguments
+          }
+        }
+        if (current.id || current.name || current.arguments) firstTokenAt ??= new Date()
+        toolCallsByIndex.set(index, current)
+      }
+    }
+  })
+
+  const completedAt = new Date()
+  const toolCalls = [...toolCallsByIndex.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([index, toolCall]) => ({
+      id: toolCall.id || `call_${index}`,
+      name: toolCall.name,
+      arguments: parseToolArguments(toolCall.arguments),
+    }))
+
+  return {
+    content: content || null,
+    toolCalls,
+    usage: normalizeOpenAiPromptCacheUsage({
+      usage: usagePayload,
+      capability: input.capability,
+      namespace: input.namespace,
+      requestStartedAt: input.requestStartedAt,
+      firstTokenAt,
+      completedAt,
+    }),
+  }
+}
+
+async function readAnthropicStream(input: {
+  response: Response
+  capability: PromptCacheCapability
+  namespace: string
+  requestStartedAt: Date
+}): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: PromptCacheUsage }> {
+  let firstTokenAt: Date | undefined
+  let usagePayload: AnthropicUsagePayload = {}
+  const blocks = new Map<number, {
+    type: string
+    text: string
+    id: string
+    name: string
+    partialJson: string
+    input?: Record<string, unknown>
+  }>()
+
+  await forEachSseData(input.response, (data) => {
+    const event = parseJsonRecord(data)
+    if (!event) return
+    if (event.type === 'error' && isRecord(event.error)) {
+      throw new LlmError(streamErrorMessage(event.error), 'HTTP')
+    }
+
+    if (event.type === 'message_start' && isRecord(event.message) && isRecord(event.message.usage)) {
+      usagePayload = mergeAnthropicUsage(usagePayload, event.message.usage)
+      return
+    }
+    if (event.type === 'message_delta' && isRecord(event.usage)) {
+      usagePayload = mergeAnthropicUsage(usagePayload, event.usage)
+      return
+    }
+
+    const index = nonNegativeInteger(event.index, -1)
+    if (index < 0) return
+    if (event.type === 'content_block_start' && isRecord(event.content_block)) {
+      const contentBlock = event.content_block
+      const block = {
+        type: typeof contentBlock.type === 'string' ? contentBlock.type : 'unknown',
+        text: typeof contentBlock.text === 'string' ? contentBlock.text : '',
+        id: typeof contentBlock.id === 'string' ? contentBlock.id : '',
+        name: typeof contentBlock.name === 'string' ? contentBlock.name : '',
+        partialJson: '',
+        ...(isRecord(contentBlock.input)
+          ? { input: contentBlock.input as Record<string, unknown> }
+          : {}),
+      }
+      if (block.text || block.id || block.name) firstTokenAt ??= new Date()
+      blocks.set(index, block)
+      return
+    }
+    if (event.type !== 'content_block_delta' || !isRecord(event.delta)) return
+    const block = blocks.get(index) ?? {
+      type: 'unknown',
+      text: '',
+      id: '',
+      name: '',
+      partialJson: '',
+    }
+    if (typeof event.delta.text === 'string' && event.delta.text) {
+      block.text += event.delta.text
+      firstTokenAt ??= new Date()
+    }
+    if (typeof event.delta.partial_json === 'string' && event.delta.partial_json) {
+      block.partialJson += event.delta.partial_json
+      firstTokenAt ??= new Date()
+    }
+    blocks.set(index, block)
+  })
+
+  const orderedBlocks = [...blocks.entries()].sort(([left], [right]) => left - right)
+  const content = orderedBlocks
+    .filter(([, block]) => block.type === 'text')
+    .map(([, block]) => block.text)
+    .join('')
+  const toolCalls = orderedBlocks
+    .filter(([, block]) => block.type === 'tool_use')
+    .map(([index, block]) => ({
+      id: block.id || `call_${index}`,
+      name: block.name,
+      arguments: block.partialJson ? parseToolArguments(block.partialJson) : (block.input ?? {}),
+    }))
+  const completedAt = new Date()
+
+  return {
+    content: content || null,
+    toolCalls,
+    usage: normalizeAnthropicPromptCacheUsage({
+      usage: usagePayload,
+      capability: input.capability,
+      namespace: input.namespace,
+      requestStartedAt: input.requestStartedAt,
+      firstTokenAt,
+      completedAt,
+    }),
+  }
+}
+
+async function forEachSseData(
+  response: Response,
+  visit: (data: string) => void,
+): Promise<void> {
+  if (!response.body) throw new LlmError('Streaming response had no body.', 'PARSE')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    buffer = consumeSseEvents(buffer, visit)
+  }
+  buffer += decoder.decode()
+  consumeSseEvents(`${buffer}\n\n`, visit)
+}
+
+function consumeSseEvents(buffer: string, visit: (data: string) => void): string {
+  let remaining = buffer
+  while (true) {
+    const boundary = /\r?\n\r?\n/.exec(remaining)
+    if (!boundary || boundary.index === undefined) return remaining
+    const rawEvent = remaining.slice(0, boundary.index)
+    remaining = remaining.slice(boundary.index + boundary[0].length)
+    const data = rawEvent
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (data) visit(data)
+  }
+}
+
+function isEventStreamResponse(response: Response): boolean {
+  return response.headers.get('content-type')?.toLowerCase().includes('text/event-stream') ?? false
+}
+
+function canRetryWithoutStreaming(status: number): boolean {
+  return status === 400 || status === 404 || status === 415 || status === 422
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function parseToolArguments(value: string): Record<string, unknown> {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) ? parsed : { _value: parsed }
+  } catch {
+    return { _raw: value }
+  }
+}
+
+function streamErrorMessage(error: Record<string, unknown>): string {
+  return typeof error.message === 'string' && error.message
+    ? `Streaming provider error: ${error.message}`
+    : 'Streaming provider returned an error event.'
+}
+
+function mergeAnthropicUsage(
+  current: AnthropicUsagePayload,
+  next: Record<string, unknown>,
+): AnthropicUsagePayload {
+  return {
+    input_tokens: numericValue(next.input_tokens, current.input_tokens),
+    output_tokens: numericValue(next.output_tokens, current.output_tokens),
+    cache_read_input_tokens: numericValue(
+      next.cache_read_input_tokens,
+      current.cache_read_input_tokens,
+    ),
+    cache_creation_input_tokens: numericValue(
+      next.cache_creation_input_tokens,
+      current.cache_creation_input_tokens,
+    ),
+  }
+}
+
+function numericValue(value: unknown, fallback: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function nonNegativeInteger(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 function effectivePromptCacheCapability(
@@ -489,7 +803,15 @@ function markLastAnthropicMessageCacheable(
   messages: Array<Record<string, unknown>>,
   cacheControl: Record<string, unknown>,
 ): void {
-  const message = messages[messages.length - 1]
+  markAnthropicMessageCacheableAt(messages, messages.length - 1, cacheControl)
+}
+
+function markAnthropicMessageCacheableAt(
+  messages: Array<Record<string, unknown>>,
+  index: number,
+  cacheControl: Record<string, unknown>,
+): void {
+  const message = messages[index]
   if (!message) return
   const content = message.content
   if (typeof content === 'string') {
@@ -504,6 +826,11 @@ function markLastAnthropicMessageCacheable(
     ...(last as Record<string, unknown>),
     cache_control: cacheControl,
   }
+}
+
+function stripInternalMessageMetadata(message: ChatMessage): Omit<ChatMessage, 'cacheBoundary'> {
+  const { cacheBoundary: _, ...wireMessage } = message
+  return wireMessage
 }
 
 function redactChatMessages(messages: ChatMessage[]): ChatMessage[] {

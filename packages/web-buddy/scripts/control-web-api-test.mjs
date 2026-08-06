@@ -4,8 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createWebControlServer } from '../dist/web/server.js'
+import { createPendingContinuation } from '../dist/control/index.js'
+import { FileSessionStore, restoreSessionState } from '../dist/session/index.js'
 
 const rootDir = await mkdtemp(join(tmpdir(), 'web-buddy-control-api-'))
+const previousTraceOutDir = process.env.TRACE_OUT_DIR
+process.env.TRACE_OUT_DIR = rootDir
 const token = 'control-web-api-test-token'
 const scope = {
   schemaVersion: 'service-scope/v1',
@@ -87,6 +91,181 @@ try {
   assert.equal(detail.runId, created.runId)
   const events = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/events`)
   assert.equal(events.items[0].type, 'run_created')
+
+  const continuationCreateResponse = await request(base, '/api/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'raw',
+      startUrl: 'https://example.test/continuation',
+      taskPrompt: 'Prepare a draft and stop before submission.',
+    }),
+  })
+  assert.equal(continuationCreateResponse.status, 201)
+  const continuationCreated = await continuationCreateResponse.json()
+  await control.runService.start(
+    continuationCreated.runId,
+    'continuation-api-start-c3',
+    { ownerScope },
+  )
+  const continuationSessionStore = new FileSessionStore({
+    rootDir: join(rootDir, 'sessions'),
+  })
+  const continuationSession = await continuationSessionStore.create({
+    sessionId: `session-${continuationCreated.runId}`,
+    runId: continuationCreated.runId,
+    source: 'test',
+    goal: 'Prepare a draft and stop before submission.',
+    mode: 'continuation-api-test',
+  })
+  let continuationRun = await control.runService.get(
+    continuationCreated.runId,
+    { ownerScope },
+  )
+  continuationRun = await control.runService.attachSession(
+    continuationCreated.runId,
+    {
+      schemaVersion: 'session-ref/v1',
+      provider: 'file-session-store',
+      id: continuationSession.sessionId,
+      runId: continuationCreated.runId,
+      attempt: continuationRun.attempt,
+    },
+    'continuation-api-session-c3',
+    { ownerScope },
+  )
+  const pendingContinuation = createPendingContinuation({
+    runId: continuationRun.runId,
+    runRevision: continuationRun.runRevision,
+    attempt: continuationRun.attempt,
+    sessionId: continuationSession.sessionId,
+    goal: continuationRun.inputSnapshot.goal.instruction,
+    goalRevision: continuationRun.inputSnapshot.contract.revision,
+    contract: continuationRun.inputSnapshot.contract,
+    field: 'company_name',
+    question: 'Which company name should be used in the draft?',
+    currentUrl: 'https://example.test/continuation',
+  })
+  await control.runService.requestContinuation(
+    continuationRun.runId,
+    pendingContinuation,
+    'continuation-api-request-c3',
+    { ownerScope },
+  )
+  const continuationDetail = await json(
+    base,
+    `/api/runs/${encodeURIComponent(continuationRun.runId)}`,
+  )
+  assert.equal(continuationDetail.state, 'blocked_on_human')
+  assert.equal(continuationDetail.pendingContinuation.status, 'pending')
+  assert.equal(continuationDetail.pendingContinuation.question.field, 'company_name')
+  assert.equal('answer' in continuationDetail.pendingContinuation, false)
+
+  const continuationResolveRequest = {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'idempotency-key': 'continuation-api-answer-c3',
+    },
+    body: JSON.stringify({
+      expectedRevision: continuationRun.runRevision,
+      answer: 'Example Labs',
+      intentPatch: 'Use it only in the draft; do not submit.',
+    }),
+  }
+  const continuationResolvedResponse = await request(
+    base,
+    `/api/runs/${encodeURIComponent(continuationRun.runId)}/continuations/${encodeURIComponent(pendingContinuation.continuationId)}/resolve`,
+    continuationResolveRequest,
+  )
+  assert.equal(continuationResolvedResponse.status, 202)
+  const continuationResolved = await continuationResolvedResponse.json()
+  assert.equal(continuationResolved.state, 'resuming')
+  assert.equal(continuationResolved.revision, continuationRun.runRevision + 1)
+  assert.equal(continuationResolved.attempt, continuationRun.attempt + 1)
+  assert.equal(continuationResolved.pendingContinuation, undefined)
+  const continuedRun = await control.runService.get(continuationRun.runId, { ownerScope })
+  assert.equal(continuedRun.lastResumeCapsule?.answeredQuestion.answer, 'Example Labs')
+  assert.equal(continuedRun.lastResumeCapsule?.priorApprovalsInvalid, true)
+  const restoredContinuationSession = await restoreSessionState({
+    session: continuationSession,
+  })
+  assert.equal(
+    restoredContinuationSession.latestResumeCapsule?.continuationId,
+    pendingContinuation.continuationId,
+  )
+  assert.match(
+    restoredContinuationSession.restoredMessages.at(-1)?.content,
+    /current page observation is authoritative/i,
+  )
+
+  const replayedContinuation = await request(
+    base,
+    `/api/runs/${encodeURIComponent(continuationRun.runId)}/continuations/${encodeURIComponent(pendingContinuation.continuationId)}/resolve`,
+    continuationResolveRequest,
+  )
+  assert.equal(replayedContinuation.status, 200)
+  assert.equal((await replayedContinuation.json()).revision, continuationRun.runRevision + 1)
+  const conflictingContinuation = await request(
+    base,
+    `/api/runs/${encodeURIComponent(continuationRun.runId)}/continuations/${encodeURIComponent(pendingContinuation.continuationId)}/resolve`,
+    {
+      ...continuationResolveRequest,
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'continuation-api-conflict-c3',
+      },
+      body: JSON.stringify({
+        expectedRevision: continuationRun.runRevision,
+        answer: 'Different Company',
+      }),
+    },
+  )
+  assert.equal(conflictingContinuation.status, 409)
+  const continuationMetrics = await json(base, '/api/continuations/metrics')
+  assert.equal(continuationMetrics.schemaVersion, 'continuation-metrics/v1')
+  assert.equal(continuationMetrics.requested, 1)
+  assert.equal(continuationMetrics.answered, 1)
+  assert.equal(continuationMetrics.resumed, 1)
+  assert.equal(continuationMetrics.coldResumed, 1)
+  assert.equal(continuationMetrics.activeAfterResume, 1)
+  assert.equal(continuationMetrics.answerRate, 1)
+  assert.equal(continuationMetrics.resumeRate, 1)
+
+  const continuationRecoveryDecisions = await control.recoveryService.recoverStartupRuns({ ownerScope })
+  assert.equal(continuationRecoveryDecisions.length, 1)
+  assert.equal(continuationRecoveryDecisions[0].runId, continuationRun.runId)
+  assert.equal(continuationRecoveryDecisions[0].toState, 'recoverable')
+  const recoveredContinuationResponse = await request(
+    base,
+    `/api/runs/${encodeURIComponent(continuationRun.runId)}/resume`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'continuation-api-restart-resume-c3',
+      },
+      body: JSON.stringify({ expectedRevision: continuationRun.runRevision + 1 }),
+    },
+  )
+  assert.equal(recoveredContinuationResponse.status, 202)
+  const recoveredContinuation = await recoveredContinuationResponse.json()
+  assert.equal(recoveredContinuation.state, 'resuming')
+  assert.equal(recoveredContinuation.revision, continuationRun.runRevision + 2)
+  assert.equal(recoveredContinuation.attempt, continuationRun.attempt + 2)
+  const recoveredContinuationRecord = await control.runService.get(
+    continuationRun.runId,
+    { ownerScope },
+  )
+  assert.equal(
+    recoveredContinuationRecord.lastResumeCapsule?.target.runRevision,
+    continuationRun.runRevision + 2,
+  )
+  assert.equal(
+    recoveredContinuationRecord.lastResumeCapsule?.target.attempt,
+    continuationRun.attempt + 2,
+  )
+  assert.equal(recoveredContinuationRecord.sessionRef?.attempt, continuationRun.attempt + 2)
 
   await control.runService.start(created.runId, 'api-start-c3', { ownerScope })
   const pausedRequest = await json(base, `/api/runs/${encodeURIComponent(created.runId)}/pause`, {
@@ -371,6 +550,8 @@ try {
   assert.equal(reused.status, 409, 'resolved approval cannot cross a second action')
 
   const html = await (await request(base, '/')).text()
+  assert.match(html, /data-contract="continuation-inbox"/)
+  assert.match(html, /id="continuationSuccessRate"/)
   assert.match(html, /data-contract="approval-inbox"/)
   assert.match(html, /id="artifactLink"/)
   assert.match(html, /id="stopBtn"/)
@@ -381,6 +562,8 @@ try {
   console.log('control web API tests passed')
 } finally {
   await control.close().catch(() => {})
+  if (previousTraceOutDir === undefined) delete process.env.TRACE_OUT_DIR
+  else process.env.TRACE_OUT_DIR = previousTraceOutDir
   await rm(rootDir, { recursive: true, force: true })
 }
 

@@ -12,6 +12,9 @@ import type {
   HumanInfoResponse,
 } from '../sdk/human.js'
 import {
+  createPendingContinuation,
+} from '../continuation/contracts.js'
+import {
   digestCanonicalJson,
   type ActionBinding,
   type OwnerScope,
@@ -24,6 +27,11 @@ interface PendingGate {
   removeAbortListener: () => void
 }
 
+interface PendingInformation {
+  resolve: (response: HumanInfoResponse) => void
+  removeAbortListener: () => void
+}
+
 export interface DurableHumanGateOptions {
   runs: RunService
   approvals: ApprovalService
@@ -31,6 +39,7 @@ export interface DurableHumanGateOptions {
   runRevision: number
   attempt: number
   taskContract: TaskContract
+  goal: string
   sessionId: string
   abortSignal: AbortSignal
   ownerScope?: OwnerScope
@@ -43,6 +52,7 @@ export interface DurableHumanGateOptions {
  */
 export class DurableHumanGate implements HumanGate {
   private readonly pending = new Map<string, PendingGate>()
+  private readonly pendingInformation = new Map<string, PendingInformation>()
 
   constructor(readonly options: DurableHumanGateOptions) {}
 
@@ -50,8 +60,60 @@ export class DurableHumanGate implements HumanGate {
     return 'takeover'
   }
 
-  async requestInfo(_request: HumanInfoRequest): Promise<HumanInfoResponse> {
-    return { answer: '' }
+  async requestInfo(request: HumanInfoRequest): Promise<HumanInfoResponse> {
+    const scope = scoped(this.options.ownerScope)
+    const current = await this.options.runs.get(this.options.runId, scope)
+    if (!current
+      || current.runRevision !== this.options.runRevision
+      || current.attempt !== this.options.attempt
+      || current.state !== 'running') {
+      return { answer: '' }
+    }
+    const continuation = createPendingContinuation({
+      runId: this.options.runId,
+      runRevision: this.options.runRevision,
+      attempt: this.options.attempt,
+      sessionId: this.options.sessionId,
+      goal: this.options.goal,
+      goalRevision: this.options.taskContract.revision,
+      contract: this.options.taskContract,
+      field: request.field,
+      question: request.question,
+      ...(request.options?.length ? { options: request.options } : {}),
+      ...(request.currentUrl ? { currentUrl: request.currentUrl } : {}),
+    })
+    let resolveInformation!: (response: HumanInfoResponse) => void
+    const response = new Promise<HumanInfoResponse>((resolve) => {
+      resolveInformation = resolve
+    })
+    const onAbort = () => {
+      this.pendingInformation.delete(continuation.continuationId)
+      resolveInformation({ answer: '' })
+    }
+    request.abortSignal?.addEventListener('abort', onAbort, { once: true })
+    this.options.abortSignal.addEventListener('abort', onAbort, { once: true })
+    this.pendingInformation.set(continuation.continuationId, {
+      resolve: resolveInformation,
+      removeAbortListener: () => {
+        request.abortSignal?.removeEventListener('abort', onAbort)
+        this.options.abortSignal.removeEventListener('abort', onAbort)
+      },
+    })
+    try {
+      await this.options.runs.requestContinuation(
+        this.options.runId,
+        continuation,
+        `runtime-continuation:${this.options.runRevision}:${this.options.attempt}:${continuation.continuationId}`,
+        scope,
+      )
+    } catch (error) {
+      const pending = this.pendingInformation.get(continuation.continuationId)
+      this.pendingInformation.delete(continuation.continuationId)
+      pending?.removeAbortListener()
+      throw error
+    }
+    if (request.abortSignal?.aborted || this.options.abortSignal.aborted) onAbort()
+    return response
   }
 
   async confirmPermission(
@@ -166,6 +228,38 @@ export class DurableHumanGate implements HumanGate {
     this.pending.delete(approvalId)
     pending.removeAbortListener()
     pending.resolve(decision === 'approved' ? 'approve' : 'decline')
+    return true
+  }
+
+  async resolveInformationLive(continuationId: string): Promise<boolean> {
+    const pending = this.pendingInformation.get(continuationId)
+    if (!pending) return false
+    const scope = scoped(this.options.ownerScope)
+    const current = await this.options.runs.get(this.options.runId, scope)
+    const continuation = current?.pendingContinuation
+    if (!current
+      || current.state !== 'blocked_on_human'
+      || current.runRevision !== this.options.runRevision
+      || current.attempt !== this.options.attempt
+      || !continuation
+      || continuation.continuationId !== continuationId
+      || continuation.status !== 'answered'
+      || !continuation.answer) {
+      return false
+    }
+    await this.options.runs.continueAnsweredContinuationLive(
+      this.options.runId,
+      continuationId,
+      scope,
+    )
+    this.pendingInformation.delete(continuationId)
+    pending.removeAbortListener()
+    pending.resolve({
+      answer: continuation.answer.answer,
+      ...(continuation.answer.intentPatch
+        ? { intentPatch: continuation.answer.intentPatch }
+        : {}),
+    })
     return true
   }
 }

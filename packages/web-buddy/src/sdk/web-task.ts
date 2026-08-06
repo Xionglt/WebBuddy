@@ -3,6 +3,10 @@ import { LlmGateway } from './llm.js'
 import { loadConfig, hasModelKey, type AgentConfig } from './config.js'
 import { TraceRecorder } from './trace.js'
 import { browserOpen } from '../browser/open.js'
+import { browserSnapshot } from '../browser/snapshot.js'
+import { observationManager } from '../observation/observation-manager.js'
+import type { FormState } from '../observation/form-state.js'
+import type { PageState } from '../observation/page-state.js'
 import { sessionManager } from '../session/manager.js'
 import { runAgentLoop } from '../runtime/local/agent-loop.js'
 import { ToolRegistry } from '../runtime/local/tool-registry.js'
@@ -49,10 +53,12 @@ import {
   type RuntimeAssembly,
 } from '../runtime/local/runtime-assembler.js'
 import type { AsyncTaskRuntime } from '../agents/async-task-runtime.js'
+import { createLocalAsyncTaskRuntime } from '../agents/local-async-runtime-factory.js'
 import { PermissionEngine } from '../permission/permission-engine.js'
 import { loadPersistentPermissionRules } from '../permission/persistent-rules.js'
 import { FileToolResultStore, type ToolResultStore } from '../tools/tool-result-store.js'
 import { observeCompletedWebTaskResult } from '../skills/candidates/observer.js'
+import type { AutomaticMemorySink } from '../memory/automatic-memory.js'
 
 export type {
   ActionBinding,
@@ -91,9 +97,11 @@ export interface WebTaskExecutionHost {
   durableSession?: boolean
   restoredSession?: RestoredSessionState
   readOnlyAuthority?: boolean
+  continuationAuthority?: boolean
   onSessionReady?: (session: AgentSession) => void | Promise<void>
   persistenceSanitizer?: (value: unknown) => unknown
   memoryContextProvider?: (input: WebTaskMemoryContextRequest) => Promise<ContextItem[]>
+  automaticMemorySink?: AutomaticMemorySink
   asyncTaskRuntimeFactory?: (input: WebTaskAsyncRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
 }
 
@@ -102,6 +110,10 @@ export interface WebTaskMemoryContextRequest {
   sessionId: string
   runId: string
   revision: number
+  phase: 'bootstrap' | 'post_navigation'
+  currentUrl?: string
+  pageState?: PageState
+  formState?: FormState
 }
 
 export interface WebTaskAsyncRuntimeFactoryInput {
@@ -409,19 +421,29 @@ async function executeGenericWebTask(
     let session: SessionRecorder | undefined
     let sessionRef = executionContext?.sessionRef ?? request.input.sessionRef
     let restoredMessages: ReturnType<typeof sanitizeRestoredMessagesForResume> | undefined
-    const actionLedger = new ActionLedger()
+    const actionLedger = host.restoredSession?.actionLedgerEntries?.length
+      ? ActionLedger.restore(host.restoredSession.actionLedgerEntries)
+      : new ActionLedger()
     const monitoredActionKinds = request.input.contract.criteria.flatMap((criterion) => (
       criterion.kind === 'action_boundary' ? criterion.actionKinds : []
     ))
     try {
       const recoveryRequested = executionContext?.recoveryMode !== undefined
+      const authorizedRecovery =
+        executionContext?.recoveryMode === 'read_only_reobserve/v1'
+          ? host.readOnlyAuthority === true
+          : executionContext?.recoveryMode === 'continuation_reobserve/v1'
+            ? host.continuationAuthority === true
+            : false
       if (recoveryRequested
-        && (executionContext.recoveryMode !== 'read_only_reobserve/v1'
-          || runtimeAssembly.durableSession !== true
+        && (runtimeAssembly.durableSession !== true
           || !host.restoredSession
-          || host.readOnlyAuthority !== true)) {
+          || !authorizedRecovery)) {
+        const authority = executionContext?.recoveryMode === 'read_only_reobserve/v1'
+          ? 'read-only authority'
+          : 'continuation authority'
         throw new Error(
-          'Generic recovery requires a durable restored session and explicit read-only authority.',
+          `Generic recovery requires a durable restored session and explicit ${authority}.`,
         )
       }
       if (host.restoredSession && !recoveryRequested) {
@@ -433,11 +455,10 @@ async function executeGenericWebTask(
           sanitize: host.persistenceSanitizer,
         })
         if (host.restoredSession) {
-          if (executionContext?.recoveryMode !== 'read_only_reobserve/v1'
-            || host.readOnlyAuthority !== true) {
-            throw new Error('Generic session recovery requires explicit read-only authority.')
+          if (!authorizedRecovery) {
+            throw new Error('Generic session recovery requires explicit recovery authority.')
           }
-          const expectedRef = executionContext.sessionRef
+          const expectedRef = executionContext?.sessionRef
           if (!expectedRef
             || expectedRef.provider !== 'file-session-store'
             || expectedRef.id !== sessionId
@@ -492,12 +513,45 @@ async function executeGenericWebTask(
         })
       }
       let runtimeContextItems = [...request.contextItems]
+      const recoveryStartUrl = executionContext?.recoveryMode === 'continuation_reobserve/v1'
+        ? host.restoredSession?.latestResumeCapsule?.previousUrl ?? request.input.startUrl
+        : request.input.startUrl
+      if (recoveryStartUrl) {
+        const actionId = `runtime-bootstrap:navigate:${request.input.runId}:attempt-${executionContext?.attempt ?? 1}`
+        await recordBootstrapAction(actionLedger.propose({
+          actionId,
+          actionKind: 'navigate',
+          toolName: 'browser_open',
+        }))
+        await recordBootstrapAction(actionLedger.authorize(actionId, 'User supplied startUrl.'))
+        const opened = await browserOpen({ url: recoveryStartUrl, sessionId, waitUntil: 'domcontentloaded' })
+        if (!opened.ok) {
+          await recordBootstrapAction(actionLedger.fail(actionId, opened.error.message))
+          throw new Error(opened.error.message)
+        }
+        await recordBootstrapAction(actionLedger.perform(actionId, 'Initial navigation succeeded.'))
+      }
       if (host.memoryContextProvider) {
+        // Resolve browser memory only after the initial navigation. This lets a
+        // tenant provider validate procedure memories against the live,
+        // potentially redirected page instead of trusting the requested URL.
+        // The snapshot is read-only and is collected only when a provider is
+        // configured, so non-memory runs pay no additional bootstrap cost.
+        if (recoveryStartUrl) {
+          await browserSnapshot({ sessionId }).catch(() => undefined)
+        }
+        const pageState = observationManager.getPageState(sessionId)
+        const formState = observationManager.getFormState(sessionId)
+        const currentUrl = pageState?.url ?? formState?.url
         const memoryItems = await host.memoryContextProvider({
           input: request.input,
           sessionId,
           runId: request.input.runId,
           revision: request.input.revision,
+          phase: recoveryStartUrl ? 'post_navigation' : 'bootstrap',
+          ...(currentUrl ? { currentUrl } : {}),
+          ...(pageState ? { pageState } : {}),
+          ...(formState ? { formState } : {}),
         })
         for (const item of memoryItems) validateContextItem(item)
         runtimeContextItems = [...runtimeContextItems, ...memoryItems].filter((item) => isContextItemEligible(item))
@@ -507,23 +561,10 @@ async function executeGenericWebTask(
         }
         trace.agentTrace?.recordEvent('memory_retrieved', {
           source: 'memory_lifecycle',
+          phase: recoveryStartUrl ? 'post_navigation' : 'bootstrap',
+          livePageValidated: Boolean(pageState),
           itemCount: memoryItems.length,
         })
-      }
-      if (request.input.startUrl) {
-        const actionId = `runtime-bootstrap:navigate:${request.input.runId}`
-        await recordBootstrapAction(actionLedger.propose({
-          actionId,
-          actionKind: 'navigate',
-          toolName: 'browser_open',
-        }))
-        await recordBootstrapAction(actionLedger.authorize(actionId, 'User supplied startUrl.'))
-        const opened = await browserOpen({ url: request.input.startUrl, sessionId, waitUntil: 'domcontentloaded' })
-        if (!opened.ok) {
-          await recordBootstrapAction(actionLedger.fail(actionId, opened.error.message))
-          throw new Error(opened.error.message)
-        }
-        await recordBootstrapAction(actionLedger.perform(actionId, 'Initial navigation succeeded.'))
       }
       if (!hasModelKey(config)) {
         const summary = 'Generic runtime is blocked because no model key is configured.'
@@ -550,24 +591,30 @@ async function executeGenericWebTask(
       const persistentPermissionRules = runtimeAssembly.memory.mode === 'legacy_local'
         ? await loadPersistentPermissionRules(config.memory.permissionRulesPath)
         : []
-      const asyncTaskRuntime = runtimeAssembly.asyncTasks.eligible
-        && host.asyncTaskRuntimeFactory
-        && session
-        ? await host.asyncTaskRuntimeFactory({
-            input: request.input,
-            session,
-            config,
-            llm,
-            trace,
-            assembly: runtimeAssembly,
-          })
+      const asyncTaskRuntime = runtimeAssembly.asyncTasks.eligible && session
+        ? host.asyncTaskRuntimeFactory
+          ? await host.asyncTaskRuntimeFactory({
+              input: request.input,
+              session,
+              config,
+              llm,
+              trace,
+              assembly: runtimeAssembly,
+            })
+          : await createLocalAsyncTaskRuntime({
+              session,
+              config,
+              llm,
+              trace,
+              goal: request.input.goal.instruction,
+              taskContract: request.input.contract,
+              contextItems: runtimeContextItems,
+            })
         : undefined
       if (runtimeAssembly.asyncTasks.eligible && !asyncTaskRuntime) {
         trace.agentTrace?.recordEvent('runtime_capability_degraded', {
           capability: 'async_tasks',
-          reason: host.asyncTaskRuntimeFactory
-            ? 'A durable session was unavailable.'
-            : 'No trusted asyncTaskRuntimeFactory was supplied.',
+          reason: 'A durable session was unavailable.',
         })
       }
       const loop = await runAgentLoop({
@@ -597,6 +644,8 @@ async function executeGenericWebTask(
         toolOrchestration: runtimeAssembly.toolOrchestration,
         actionLedger,
         toolResultStore: artifactStore,
+        ...(host.automaticMemorySink ? { automaticMemorySink: host.automaticMemorySink } : {}),
+        ...(request.input.goal.scenario ? { automaticMemoryWorkflow: request.input.goal.scenario } : {}),
         ...(runtimeAssembly.memory.mode === 'legacy_local' ? {
           persistentAnswerStore: { path: config.memory.answerStorePath },
           persistentPermissionRules: { path: config.memory.permissionRulesPath },

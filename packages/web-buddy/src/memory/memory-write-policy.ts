@@ -7,6 +7,7 @@ import type {
 } from '../task/contracts.js'
 import { redactSensitiveData } from '../security/redaction.js'
 import type { MemoryScope } from './types.js'
+import { isEvidenceBoundedWebMemory } from './web-memory-governance.js'
 
 export const MEMORY_ENTRY_SCHEMA_VERSION = 'memory-entry/v2' as const
 export const MEMORY_WRITE_REQUEST_SCHEMA_VERSION = 'memory-write-request/v2' as const
@@ -249,6 +250,26 @@ export function evaluateMemoryWriteRequest(
   request: unknown,
   actorScope: MemoryActorScope,
 ): MemoryWriteDecision {
+  return evaluateMemoryWriteRequestWithOptions(request, actorScope, false)
+}
+
+/**
+ * Trusted runtime policy used only by the automatic-memory sink. It preserves
+ * every B1 validation and opens one narrow reusable path for evidence-bounded,
+ * non-authoritative Web Memory. The default policy remains fail-closed for
+ * arbitrary Web/tool/derived content.
+ */
+export const AUTOMATIC_WEB_MEMORY_WRITE_POLICY: MemoryWritePolicy = Object.freeze({
+  evaluate(request: unknown, actorScope: MemoryActorScope): MemoryWriteDecision {
+    return evaluateMemoryWriteRequestWithOptions(request, actorScope, true)
+  },
+})
+
+function evaluateMemoryWriteRequestWithOptions(
+  request: unknown,
+  actorScope: MemoryActorScope,
+  allowEvidenceBoundedAutomaticMemory: boolean,
+): MemoryWriteDecision {
   let requestId: string | undefined
   try {
     const trustedActor = validateActorScope(actorScope, 'configured actorScope')
@@ -258,7 +279,7 @@ export function evaluateMemoryWriteRequest(
       throw new PolicyRejection('actor_scope_mismatch', 'Memory request actor scope does not match the writer.')
     }
     validateTargetScope(validated.targetScope, trustedActor)
-    enforcePolicy(validated)
+    enforcePolicy(validated, allowEvidenceBoundedAutomaticMemory)
     return {
       schemaVersion: MEMORY_WRITE_DECISION_SCHEMA_VERSION,
       action: 'allow',
@@ -445,7 +466,10 @@ function validateTransform(value: unknown, index: number): MemoryTransformStep {
   }
 }
 
-function enforcePolicy(request: MemoryWriteRequest): void {
+function enforcePolicy(
+  request: MemoryWriteRequest,
+  allowEvidenceBoundedAutomaticMemory = false,
+): void {
   const { security } = request
   validateAncestry(security, request.actorScope)
   validateTransformChain(security)
@@ -504,9 +528,12 @@ function enforcePolicy(request: MemoryWriteRequest): void {
     )
   }
 
+  const governedAutomaticMemory = allowEvidenceBoundedAutomaticMemory
+    && isGovernedAutomaticMemoryPromotion(request)
   if (
     REUSABLE_SCOPES.has(request.targetScope.kind)
     && lineage.some((item) => EXTERNAL_ORIGINS.has(item.origin))
+    && !governedAutomaticMemory
   ) {
     throw new PolicyRejection(
       'reusable_untrusted_source',
@@ -520,6 +547,7 @@ function enforcePolicy(request: MemoryWriteRequest): void {
       || item.trust === 'derived_untrusted'
       || item.trust === 'non_authoritative'
     ))
+    && !governedAutomaticMemory
   ) {
     throw new PolicyRejection(
       'reusable_untrusted_source',
@@ -532,6 +560,47 @@ function enforcePolicy(request: MemoryWriteRequest): void {
   ) {
     throw new PolicyRejection('scope_violation', 'Personal Memory may not be persisted to project scope.')
   }
+}
+
+function isGovernedAutomaticMemoryPromotion(request: MemoryWriteRequest): boolean {
+  const content = request.content
+  if (!isEvidenceBoundedWebMemory(content) || content.effect === 'authorization') return false
+  if (request.targetScope.kind !== 'user' || !content.memoryKey) return false
+  if (request.security.origin !== 'derived' || request.security.trust !== 'derived_untrusted') return false
+  if (request.security.derivedFrom.length !== 1 || request.security.transformChain.length !== 1) return false
+  const source = request.security.derivedFrom[0]!
+  const transform = request.security.transformChain[0]!
+  if (transform.kind !== 'summary' || content.evidence.contentId !== source.contentId) return false
+  if (!content.evidence.quoteHash || !content.evidence.runId || !content.evidence.turnId) return false
+  if (content.evidence.capturedAt !== source.provenance.capturedAt) return false
+  if (looksLikeAutomaticMemoryAuthority(content.statement)
+    || looksLikeAutomaticMemoryPromptInjection(content.statement)) return false
+
+  if (content.effect === 'procedure') {
+    const fingerprint = content.evidence.pageFingerprint
+    return content.evidence.source === 'runtime_observation'
+      && content.validation.mode === 'current_page'
+      && Boolean(fingerprint)
+      && content.applicability?.urlOrigin === fingerprint?.urlOrigin
+      && content.applicability?.pathPattern === fingerprint?.pathPattern
+      && (source.origin === 'web' || source.origin === 'tool')
+      && source.trust === 'untrusted_external'
+      && (source.sensitivity === 'public' || source.sensitivity === 'internal')
+  }
+  return (content.effect === 'preference' || content.effect === 'restrictive_constraint')
+    && (content.evidence.source === 'user_instruction' || content.evidence.source === 'user_correction')
+    && content.validation.mode === 'none'
+    && source.origin === 'user'
+    && source.trust === 'user_authorized'
+    && (source.sensitivity === 'internal' || source.sensitivity === 'personal')
+}
+
+function looksLikeAutomaticMemoryAuthority(value: string): boolean {
+  return /(?:auto(?:matically)?|自动|无需|不用|不必).{0,24}(?:submit|send|upload|login|approve|提交|发送|上传|登录|批准)|(?:allow|authorize|permission|允许|授权).{0,24}(?:submit|send|upload|login|提交|发送|上传|登录)/iu.test(value)
+}
+
+function looksLikeAutomaticMemoryPromptInjection(value: string): boolean {
+  return /ignore.{0,24}(?:previous|system|developer).{0,16}(?:instruction|message)|system prompt|developer message|jailbreak|忽略.{0,24}(?:之前|系统|开发者).{0,16}(?:指令|消息)|系统提示|越狱/iu.test(value)
 }
 
 function validateAncestry(security: MemoryWriteSecurity, actorScope: MemoryActorScope): void {

@@ -209,6 +209,7 @@ export class ContextCompactor {
     const compactedMessage: ChatMessage = {
       role: 'user',
       content: renderCompactedRunContext(summary),
+      cacheBoundary: 'compaction_checkpoint',
     }
     const estimatedInputTokensBefore = estimateMessagesTokens(input.messages ?? [])
     const estimatedInputTokensAfter = estimateTokens(compactedMessage.content)

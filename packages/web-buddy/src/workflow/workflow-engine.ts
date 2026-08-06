@@ -18,9 +18,13 @@ import {
 import type { EvidenceKind, EvidenceStoreSnapshot, WorkflowEvidence } from './workflow-evidence.js'
 import type { WorkflowPhase, WorkflowState } from './workflow-state.js'
 import { transitionWorkflowState } from './workflow-transition.js'
+import {
+  guardWorkflowTransition,
+  type WorkflowTransitionGuardDecision,
+} from './workflow-transition-guard.js'
 
 export type WorkflowCriteriaKind = WorkflowCompletionCriterionKind | 'phase_required_evidence'
-export type WorkflowBlockerKind = 'human_handoff' | 'workflow_blocked' | 'missing_evidence'
+export type WorkflowBlockerKind = 'human_handoff' | 'workflow_blocked' | 'missing_evidence' | 'invalid_transition'
 
 export interface WorkflowRecentAction {
   toolName?: string
@@ -132,6 +136,7 @@ export interface WorkflowEngineEvaluation {
   blockers: WorkflowBlocker[]
   evidenceIds: string[]
   reason: string
+  transitionGuard?: WorkflowTransitionGuardDecision
 }
 
 interface RuntimeFacts {
@@ -194,8 +199,21 @@ export class WorkflowEngine {
       transitionStatePhase(transitionedState, input.previous, observationPhase, now),
       observationPhase,
     )
-    const stateForEvaluation = withRequiredHandoffState(classifiedState, input.previous, observationFacts, this.definition, now)
-    const baseBlockers = handoffAndWorkflowBlockers(stateForEvaluation, observationFacts, this.definition)
+    const unguardedState = withRequiredHandoffState(classifiedState, input.previous, observationFacts, this.definition, now)
+    const transitionGuard = guardWorkflowTransition({
+      previous: input.previous,
+      candidate: unguardedState,
+      definition: this.definition,
+      hasFreshObservation: Boolean(input.page || input.form),
+    })
+    const stateForEvaluation = transitionGuard.state
+    const transitionBlockers = transitionGuard.disposition === 'rejected'
+      ? [invalidTransitionBlocker(stateForEvaluation, transitionGuard)]
+      : []
+    const baseBlockers = [
+      ...handoffAndWorkflowBlockers(stateForEvaluation, observationFacts, this.definition),
+      ...transitionBlockers,
+    ]
     const { matchedCriteria, missingCriteria } = evaluateCriteria(this.definition, stateForEvaluation, evidence, baseBlockers)
     const blockers = uniqueBlockers([
       ...baseBlockers,
@@ -214,6 +232,7 @@ export class WorkflowEngine {
       blockers,
       evidenceIds,
       reason: evaluationReason(stateForEvaluation, matchedCriteria, missingCriteria, blockers),
+      transitionGuard,
     }
   }
 }
@@ -544,6 +563,18 @@ function missingEvidenceBlocker(state: WorkflowState, criterion: WorkflowCriteri
     criterionId: criterion.id,
     missingEvidenceKinds: criterion.missingEvidenceKinds,
     evidenceIds: criterion.evidenceIds,
+  }
+}
+
+function invalidTransitionBlocker(
+  state: WorkflowState,
+  guard: WorkflowTransitionGuardDecision,
+): WorkflowBlocker {
+  return {
+    id: `invalid-transition-${guard.from}-${guard.requested}`,
+    kind: 'invalid_transition',
+    message: guard.reason,
+    phase: state.phase,
   }
 }
 

@@ -1,4 +1,10 @@
 import { createHash } from 'node:crypto'
+import {
+  validatePendingContinuation,
+  validateResumeCapsule,
+  type PendingContinuationV1,
+  type ResumeCapsuleV1,
+} from '../continuation/contracts.js'
 import { WebTaskContractError, validateWebTaskInputSnapshot } from '../task/contracts.js'
 import type {
   ActionBinding,
@@ -111,6 +117,8 @@ export interface RunRecord {
   artifactRefs: ArtifactRef[]
   resourceRefs: OpaqueResourceRef[]
   pendingApprovalIds: string[]
+  pendingContinuation?: PendingContinuationV1
+  lastResumeCapsule?: ResumeCapsuleV1
   nextEventSequence: number
   createdAt: string
   updatedAt: string
@@ -125,6 +133,9 @@ export type RunStoreEventType =
   | 'reference_attached'
   | 'recovery_classified'
   | 'late_result_rejected'
+  | 'continuation_requested'
+  | 'continuation_answered'
+  | 'continuation_resumed'
 
 export interface RunStoreEvent {
   schemaVersion: typeof RUN_EVENT_SCHEMA_VERSION
@@ -339,6 +350,38 @@ export function validateRunRecord(record: RunRecord): void {
   validateSessionRef(record.sessionRef, record.runId, record.attempt)
   validateCheckpointRef(record.checkpointRef)
   if (record.lastSafeBoundary) validateSafeBoundary(record.lastSafeBoundary, record)
+  if (record.pendingContinuation) {
+    try {
+      validatePendingContinuation(record.pendingContinuation, {
+        runId: record.runId,
+        runRevision: record.runRevision,
+        attempt: record.attempt,
+      })
+    } catch (error) {
+      invalid(`pendingContinuation is invalid: ${errorMessage(error)}`)
+    }
+    if (record.state !== 'blocked_on_human') {
+      invalid('pendingContinuation requires blocked_on_human run state.')
+    }
+    if (!record.sessionRef
+      || record.sessionRef.provider !== 'file-session-store'
+      || record.sessionRef.id !== record.pendingContinuation.binding.sessionId
+      || record.sessionRef.runId !== record.runId
+      || record.sessionRef.attempt !== record.attempt) {
+      binding('pendingContinuation requires the exact durable session for the current run epoch.')
+    }
+  }
+  if (record.lastResumeCapsule) {
+    try {
+      validateResumeCapsule(record.lastResumeCapsule, record.runId)
+    } catch (error) {
+      invalid(`lastResumeCapsule is invalid: ${errorMessage(error)}`)
+    }
+    if (record.lastResumeCapsule.target.runRevision > record.runRevision
+      || record.lastResumeCapsule.target.attempt > record.attempt) {
+      binding('lastResumeCapsule cannot target a future run epoch.')
+    }
+  }
   arrays(
     ['pendingApprovalIds', record.pendingApprovalIds],
     ['artifactRefs', record.artifactRefs],
@@ -883,6 +926,9 @@ const RUN_EVENT_TYPES = new Set<RunStoreEventType>([
   'reference_attached',
   'recovery_classified',
   'late_result_rejected',
+  'continuation_requested',
+  'continuation_answered',
+  'continuation_resumed',
 ])
 const APPROVAL_EVENT_TYPES = new Set<ApprovalStoreEventType>([
   'approval_enqueued',

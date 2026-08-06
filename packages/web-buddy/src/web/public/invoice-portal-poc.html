@@ -1,0 +1,1325 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="color-scheme" content="light" />
+<title>接手 · 客户门户代办箱</title>
+<style>
+  :root {
+    --canvas: #f6f5f1;
+    --surface: #ffffff;
+    --surface-subtle: #faf9f6;
+    --ink: #191a18;
+    --ink-soft: #4f514c;
+    --muted: #7c7f77;
+    --faint: #a7aaa2;
+    --line: #e7e5df;
+    --line-strong: #d8d5cd;
+    --accent: #2f6f5e;
+    --accent-hover: #285f51;
+    --accent-soft: #e7f1ed;
+    --blue: #3d638d;
+    --blue-soft: #eaf0f7;
+    --amber: #9a6417;
+    --amber-soft: #faf0dc;
+    --red: #a0443e;
+    --red-soft: #f8e9e7;
+    --sidebar: #20221f;
+    --sidebar-muted: #a9ada5;
+    --radius: 10px;
+    --font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { min-width: 320px; background: var(--canvas); }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--canvas);
+    color: var(--ink);
+    font: 14px/1.5 var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, select { font: inherit; }
+  button { color: inherit; }
+  button, select, a { outline: none; }
+  button:focus-visible, select:focus-visible, a:focus-visible {
+    outline: 2px solid #6d968a;
+    outline-offset: 2px;
+  }
+  [hidden] { display: none !important; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 224px minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    padding: 22px 14px 16px;
+    background: var(--sidebar);
+    color: #f3f2ee;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 0 9px 25px;
+  }
+  .brand-mark {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border: 1px solid #495048;
+    border-radius: 8px;
+    background: #2d322d;
+    color: #dce9e2;
+    font-weight: 800;
+    letter-spacing: -.04em;
+  }
+  .brand-name { font-weight: 720; letter-spacing: -.02em; }
+  .brand-meta { color: var(--sidebar-muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+
+  .nav-label {
+    padding: 0 10px 7px;
+    color: #777c75;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+  }
+  .nav { display: grid; gap: 3px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 38px;
+    border: 0;
+    border-radius: 7px;
+    padding: 0 10px;
+    background: transparent;
+    color: #c4c7c0;
+    text-align: left;
+    cursor: pointer;
+  }
+  .nav-item:hover { background: #292c28; color: #fff; }
+  .nav-item.active { background: #30342f; color: #fff; }
+  .nav-icon {
+    display: grid;
+    width: 18px;
+    height: 18px;
+    place-items: center;
+    color: #92978f;
+    font-size: 15px;
+  }
+  .nav-item.active .nav-icon { color: #b9d5ca; }
+  .nav-count {
+    margin-left: auto;
+    min-width: 20px;
+    border-radius: 999px;
+    padding: 1px 6px;
+    background: #3a3e39;
+    color: #cdd0c9;
+    font: 10px/1.6 var(--mono);
+    text-align: center;
+  }
+
+  .sidebar-foot {
+    margin-top: auto;
+    padding: 12px 8px 4px;
+  }
+  .connection-card {
+    border: 1px solid #3b403a;
+    border-radius: 9px;
+    padding: 11px;
+    background: #262925;
+  }
+  .connection-head { display: flex; align-items: center; gap: 8px; }
+  .connection-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #79b59e;
+    box-shadow: 0 0 0 3px rgba(121, 181, 158, .11);
+  }
+  .connection-title { font-size: 11px; font-weight: 700; }
+  .connection-detail {
+    margin-top: 6px;
+    color: var(--sidebar-muted);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+
+  .main { min-width: 0; }
+  .topbar {
+    display: flex;
+    align-items: center;
+    min-height: 62px;
+    padding: 0 28px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255,255,255,.82);
+    backdrop-filter: blur(12px);
+  }
+  .breadcrumb { color: var(--muted); font-size: 12px; }
+  .breadcrumb strong { color: var(--ink); font-weight: 680; }
+  .topbar-spacer { flex: 1; }
+  .live-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-right: 12px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .live-label::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .workspace {
+    width: min(1460px, 100%);
+    margin: 0 auto;
+    padding: 30px 30px 50px;
+  }
+  .intro {
+    display: flex;
+    align-items: flex-end;
+    gap: 24px;
+    margin-bottom: 25px;
+  }
+  .intro-copy { min-width: 0; }
+  .eyebrow {
+    margin-bottom: 7px;
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 780;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(26px, 3.2vw, 38px);
+    font-weight: 720;
+    line-height: 1.1;
+    letter-spacing: -.04em;
+  }
+  .intro p {
+    max-width: 700px;
+    margin: 9px 0 0;
+    color: var(--ink-soft);
+    font-size: 13px;
+  }
+  .intro-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-height: 36px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 0 13px;
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 670;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+  }
+  .btn:hover { background: var(--surface-subtle); border-color: #c7c4bb; }
+  .btn:active { transform: translateY(1px); }
+  .btn.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .btn.primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
+  .btn.dark { border-color: #333631; background: #222420; color: #fff; }
+  .btn.dark:hover { background: #31342f; }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+  .btn.small { min-height: 30px; padding: 0 10px; font-size: 11px; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-bottom: 20px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .metric {
+    min-width: 0;
+    padding: 16px 18px;
+    border-right: 1px solid var(--line);
+  }
+  .metric:last-child { border-right: 0; }
+  .metric-label { color: var(--muted); font-size: 11px; }
+  .metric-row { display: flex; align-items: baseline; gap: 7px; margin-top: 5px; }
+  .metric-value { font-size: 23px; font-weight: 720; letter-spacing: -.035em; }
+  .metric-note { color: var(--faint); font-size: 10px; }
+  .metric-value.good { color: var(--accent); }
+  .metric-value.warn { color: var(--amber); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 330px;
+    gap: 18px;
+    align-items: start;
+  }
+  .panel {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    min-height: 57px;
+    gap: 12px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .panel-title { font-weight: 700; letter-spacing: -.01em; }
+  .panel-subtitle { color: var(--muted); font-size: 11px; }
+  .panel-spacer { flex: 1; }
+
+  .filters { display: flex; gap: 4px; }
+  .filter {
+    min-height: 28px;
+    border: 0;
+    border-radius: 6px;
+    padding: 0 9px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .filter:hover { background: var(--surface-subtle); color: var(--ink); }
+  .filter.active { background: #efeee9; color: var(--ink); font-weight: 680; }
+
+  .table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+  }
+  th {
+    height: 38px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-subtle);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 680;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  td {
+    min-height: 61px;
+    padding: 12px 14px;
+    border-bottom: 1px solid #efede8;
+    vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background 140ms ease; }
+  tbody tr:hover { background: #fcfbf8; }
+  .invoice-id { font: 11px/1.4 var(--mono); font-weight: 650; }
+  .invoice-meta { margin-top: 2px; color: var(--muted); font-size: 10px; }
+  .customer { font-size: 12px; font-weight: 650; }
+  .po { margin-top: 2px; color: var(--muted); font: 10px/1.4 var(--mono); }
+  .amount { font-size: 12px; font-weight: 680; white-space: nowrap; }
+  .portal { color: var(--ink-soft); font-size: 11px; }
+  .row-action { text-align: right; }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 23px;
+    border-radius: 999px;
+    padding: 0 8px;
+    background: #f0efeb;
+    color: #666961;
+    font-size: 10px;
+    font-weight: 650;
+    white-space: nowrap;
+  }
+  .status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .status.ready, .status.submitted { background: var(--accent-soft); color: var(--accent); }
+  .status.processing { background: var(--blue-soft); color: var(--blue); }
+  .status.needs_input, .status.exception { background: var(--amber-soft); color: var(--amber); }
+  .status.duplicate { background: var(--red-soft); color: var(--red); }
+  .status.processing::before { animation: pulse 1s ease-in-out infinite; }
+
+  .queue-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 58px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-subtle);
+  }
+  .selection-summary { color: var(--muted); font-size: 11px; }
+  .selection-summary strong { color: var(--ink); }
+  .queue-footer .btn { margin-left: auto; }
+
+  .side-stack { display: grid; gap: 14px; }
+  .browser-card {
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .browser-head { display: flex; align-items: center; gap: 9px; }
+  .browser-favicon {
+    display: grid;
+    width: 29px;
+    height: 29px;
+    place-items: center;
+    border-radius: 7px;
+    background: #eef4f1;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 800;
+  }
+  .browser-name { font-size: 11px; font-weight: 700; }
+  .browser-origin {
+    max-width: 230px;
+    color: var(--muted);
+    font: 9px/1.5 var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope-tag {
+    margin-left: auto;
+    border-radius: 999px;
+    padding: 3px 7px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 9px;
+    font-weight: 700;
+  }
+  .browser-policy {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+    margin-top: 12px;
+  }
+  .policy-stat {
+    padding: 8px;
+    border-radius: 7px;
+    background: var(--surface-subtle);
+  }
+  .policy-stat span { display: block; color: var(--muted); font-size: 9px; }
+  .policy-stat strong { display: block; margin-top: 2px; font-size: 10px; font-weight: 700; }
+
+  .activity-panel .panel-head { min-height: 51px; }
+  .run-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .run-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b1b3ad; }
+  .run-state.running { color: var(--blue); }
+  .run-state.running::before { background: var(--blue); animation: pulse 1s ease-in-out infinite; }
+  .run-state.attention { color: var(--amber); }
+  .run-state.attention::before { background: var(--amber); }
+  .run-state.done { color: var(--accent); }
+  .run-state.done::before { background: var(--accent); }
+
+  .timeline {
+    min-height: 210px;
+    max-height: 330px;
+    overflow: auto;
+    padding: 14px 15px 16px;
+  }
+  .timeline-empty { padding: 34px 10px; color: var(--muted); font-size: 11px; text-align: center; }
+  .event {
+    position: relative;
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    gap: 9px;
+    padding: 0 0 15px;
+  }
+  .event::before {
+    content: "";
+    position: absolute;
+    top: 13px;
+    bottom: 0;
+    left: 5px;
+    width: 1px;
+    background: var(--line);
+  }
+  .event:last-child { padding-bottom: 0; }
+  .event:last-child::before { display: none; }
+  .event-dot {
+    position: relative;
+    z-index: 1;
+    width: 11px;
+    height: 11px;
+    margin-top: 2px;
+    border: 3px solid var(--surface);
+    border-radius: 50%;
+    background: var(--faint);
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .event.success .event-dot { background: var(--accent); }
+  .event.warn .event-dot { background: var(--amber); }
+  .event.active .event-dot { background: var(--blue); animation: pulse 1s ease-in-out infinite; }
+  .event-title { font-size: 10px; font-weight: 680; }
+  .event-detail { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+  .event-time { margin-top: 3px; color: var(--faint); font: 9px/1.4 var(--mono); }
+
+  .attention {
+    border-color: #e5c78d;
+    background: #fffdf8;
+  }
+  .attention-body { padding: 14px; }
+  .attention-kicker { color: var(--amber); font-size: 9px; font-weight: 780; letter-spacing: .08em; text-transform: uppercase; }
+  .attention-title { margin-top: 5px; font-size: 12px; font-weight: 700; }
+  .attention-text { margin-top: 5px; color: var(--muted); font-size: 10px; }
+  .attention-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin-top: 11px; }
+  .select {
+    min-width: 0;
+    min-height: 34px;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    padding: 0 9px;
+    background: var(--surface);
+    color: var(--ink);
+    font-size: 11px;
+  }
+
+  .empty-note {
+    padding: 18px;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: center;
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    z-index: 30;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(25,26,24,.42);
+  }
+  .modal {
+    width: min(570px, 100%);
+    max-height: calc(100vh - 40px);
+    overflow: auto;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: 0 18px 55px rgba(20,22,19,.2);
+  }
+  .modal-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 20px 20px 15px;
+    border-bottom: 1px solid var(--line);
+  }
+  .modal-icon {
+    display: grid;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border-radius: 9px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 800;
+  }
+  .modal-title { margin: 0; font-size: 16px; font-weight: 730; letter-spacing: -.02em; }
+  .modal-subtitle { margin-top: 3px; color: var(--muted); font-size: 11px; }
+  .modal-close {
+    margin-left: auto;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .modal-body { padding: 18px 20px; }
+  .approval-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--surface-subtle);
+  }
+  .approval-stat { padding: 12px; border-right: 1px solid var(--line); }
+  .approval-stat:last-child { border-right: 0; }
+  .approval-stat span { display: block; color: var(--muted); font-size: 9px; }
+  .approval-stat strong { display: block; margin-top: 3px; font-size: 13px; }
+  .checks { display: grid; gap: 8px; margin-top: 14px; }
+  .check {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    color: var(--ink-soft);
+    font-size: 11px;
+  }
+  .check-mark {
+    display: grid;
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 800;
+  }
+  .binding {
+    margin-top: 15px;
+    border-left: 2px solid var(--line-strong);
+    padding: 3px 0 3px 11px;
+    color: var(--muted);
+    font: 9px/1.6 var(--mono);
+    overflow-wrap: anywhere;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 20px 18px;
+    border-top: 1px solid var(--line);
+  }
+
+  .receipt-banner {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    border: 1px solid #bcd8cc;
+    border-radius: 9px;
+    padding: 12px;
+    background: var(--accent-soft);
+  }
+  .receipt-banner strong { display: block; color: #225648; font-size: 12px; }
+  .receipt-banner span { display: block; margin-top: 2px; color: #507568; font-size: 10px; }
+  .receipt-list { display: grid; gap: 7px; margin-top: 14px; }
+  .receipt-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    border-bottom: 1px solid var(--line);
+    padding: 8px 0;
+  }
+  .receipt-row:last-child { border-bottom: 0; }
+  .receipt-row strong { font-size: 10px; }
+  .receipt-row span { color: var(--muted); font: 9px/1.5 var(--mono); }
+  .receipt-id { color: var(--accent) !important; }
+
+  .exception-note {
+    border-left: 3px solid var(--amber);
+    padding: 1px 0 1px 12px;
+  }
+  .exception-note strong { display: block; font-size: 12px; }
+  .exception-note p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+  .evidence-list { display: grid; gap: 7px; margin-top: 16px; }
+  .evidence {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 9px 10px;
+    border-radius: 7px;
+    background: var(--surface-subtle);
+    font-size: 10px;
+  }
+  .evidence span { color: var(--muted); }
+
+  .toast {
+    position: fixed;
+    z-index: 50;
+    right: 22px;
+    bottom: 22px;
+    max-width: min(360px, calc(100vw - 44px));
+    border: 1px solid #bcd8cc;
+    border-radius: 9px;
+    padding: 11px 13px;
+    background: #f3faf7;
+    color: #285b4d;
+    box-shadow: 0 10px 30px rgba(30,50,42,.12);
+    font-size: 11px;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: .45; transform: scale(.9); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+
+  @media (max-width: 1080px) {
+    .layout { grid-template-columns: 1fr; }
+    .side-stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .attention { grid-column: 1 / -1; }
+  }
+  @media (max-width: 780px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar {
+      position: static;
+      display: block;
+      min-height: auto;
+      padding: 12px 14px;
+    }
+    .brand { padding: 0; }
+    .brand-meta, .nav-label, .sidebar-foot { display: none; }
+    .nav { display: flex; margin-top: 11px; overflow-x: auto; }
+    .nav-item { width: auto; white-space: nowrap; }
+    .nav-count { margin-left: 4px; }
+    .topbar { min-height: 54px; padding: 0 16px; }
+    .workspace { padding: 23px 16px 38px; }
+    .intro { align-items: flex-start; flex-direction: column; margin-bottom: 20px; }
+    .intro-actions { width: 100%; margin-left: 0; }
+    .intro-actions .btn { flex: 1; }
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .metric:nth-child(2) { border-right: 0; }
+    .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+    .side-stack { grid-template-columns: 1fr; }
+    .panel-head { align-items: flex-start; flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
+    .filters { width: 100%; overflow-x: auto; }
+    .filters .filter { white-space: nowrap; }
+    .column-portal { display: none; }
+    .approval-summary { grid-template-columns: 1fr; }
+    .approval-stat { border-right: 0; border-bottom: 1px solid var(--line); }
+    .approval-stat:last-child { border-bottom: 0; }
+  }
+  @media (max-width: 520px) {
+    .topbar .live-label { display: none; }
+    .metrics { grid-template-columns: 1fr; }
+    .metric { border-right: 0; border-bottom: 1px solid var(--line); }
+    .metric:last-child { border-bottom: 0; }
+    .column-po { display: none; }
+    td, th { padding-left: 10px; padding-right: 10px; }
+    .queue-footer { align-items: stretch; flex-direction: column; }
+    .queue-footer .btn { width: 100%; margin-left: 0; }
+    .modal-actions { flex-direction: column-reverse; }
+    .modal-actions .btn { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">接</div>
+      <div>
+        <div class="brand-name">接手</div>
+        <div class="brand-meta">网页代办箱</div>
+      </div>
+    </div>
+
+    <div class="nav-label">工作台</div>
+    <nav class="nav" aria-label="产品导航">
+      <button class="nav-item active" type="button" data-view="queue"><span class="nav-icon" aria-hidden="true">◫</span>发票队列<span class="nav-count">6</span></button>
+      <button class="nav-item" type="button" data-view="exceptions"><span class="nav-icon" aria-hidden="true">!</span>需要处理<span class="nav-count" id="navExceptionCount">2</span></button>
+      <button class="nav-item" type="button" data-view="approvals"><span class="nav-icon" aria-hidden="true">✓</span>待批准<span class="nav-count" id="navApprovalCount">0</span></button>
+      <button class="nav-item" type="button" data-view="receipts"><span class="nav-icon" aria-hidden="true">↳</span>提交回执<span class="nav-count" id="navReceiptCount">0</span></button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="connection-card">
+        <div class="connection-head">
+          <span class="connection-dot"></span>
+          <span class="connection-title">当前标签页已授权</span>
+        </div>
+        <div class="connection-detail">仅控制华东智造财务共享门户；不会读取其他标签页或浏览器历史。</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="breadcrumb">财务运营&nbsp; / &nbsp;<strong>客户门户代办</strong></div>
+      <div class="topbar-spacer"></div>
+      <div class="live-label">产品交互 POC</div>
+      <span class="status ready">本地运行</span>
+    </header>
+
+    <div class="workspace">
+      <section class="intro">
+        <div class="intro-copy">
+          <div class="eyebrow">供应商回款运营</div>
+          <h1>6 项回款资料，4 项可以直接提交</h1>
+          <p>代办助手先核对订单、金额与附件，再填写客户门户；资料缺失、疑似重复和最终提交都会停下来找你。</p>
+        </div>
+        <div class="intro-actions">
+          <button class="btn" id="resetButton" type="button">重置演示</button>
+          <button class="btn dark" id="connectButton" type="button">已接管当前门户</button>
+        </div>
+      </section>
+
+      <section class="metrics" aria-label="发票批次概要">
+        <div class="metric">
+          <div class="metric-label">批次总金额</div>
+          <div class="metric-row"><span class="metric-value">¥217,900</span><span class="metric-note">6 张</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">可自动处理</div>
+          <div class="metric-row"><span class="metric-value good" id="readyMetric">4</span><span class="metric-note">¥186,400</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">需要人工处理</div>
+          <div class="metric-row"><span class="metric-value warn" id="exceptionMetric">2</span><span class="metric-note">已阻止提交</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">关键字段校验</div>
+          <div class="metric-row"><span class="metric-value">18/18</span><span class="metric-note">来自 ERP</span></div>
+        </div>
+      </section>
+
+      <div class="layout">
+        <section class="panel queue-panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">本次发票批次</div>
+              <div class="panel-subtitle">ERP CSV 是金额、币种和发票号的权威来源</div>
+            </div>
+            <div class="panel-spacer"></div>
+            <div class="filters" role="group" aria-label="筛选发票">
+              <button class="filter active" type="button" data-filter="all">全部 6</button>
+              <button class="filter" type="button" data-filter="processable">可处理 4</button>
+              <button class="filter" type="button" data-filter="exception">异常 2</button>
+              <button class="filter" type="button" data-filter="submitted">已提交</button>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>发票</th>
+                  <th>客户</th>
+                  <th class="column-po">采购订单</th>
+                  <th>金额</th>
+                  <th class="column-portal">门户</th>
+                  <th>状态</th>
+                  <th><span class="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody id="invoiceRows"></tbody>
+            </table>
+          </div>
+
+          <div class="queue-footer">
+            <div class="selection-summary"><strong id="selectionCount">4 张</strong>已通过重复、客户、PO 余额和总额检查</div>
+            <button class="btn primary" id="runButton" type="button">开始准备这 4 项</button>
+          </div>
+        </section>
+
+        <aside class="side-stack">
+          <section class="browser-card">
+            <div class="browser-head">
+              <div class="browser-favicon">华</div>
+              <div>
+                <div class="browser-name">华东智造 · 财务共享门户</div>
+                <div class="browser-origin">https://fssc.huadong.example</div>
+              </div>
+              <span class="scope-tag">单标签页</span>
+            </div>
+            <div class="browser-policy">
+              <div class="policy-stat"><span>导航范围</span><strong>当前 Origin</strong></div>
+              <div class="policy-stat"><span>最终提交</span><strong>必须批准</strong></div>
+            </div>
+          </section>
+
+          <section class="panel activity-panel">
+            <div class="panel-head">
+              <div class="panel-title">网页执行现场</div>
+              <span class="run-state" id="runState">尚未开始</span>
+            </div>
+            <div class="timeline" id="timeline">
+              <div class="timeline-empty">启动任务后，这里只展示业务动作和验证结果。</div>
+            </div>
+          </section>
+
+          <section class="panel attention" id="attentionCard" hidden>
+            <div class="attention-body">
+              <div class="attention-kicker">需要你补充</div>
+              <div class="attention-title">INV-CN-260603 缺少服务期间</div>
+              <div class="attention-text">客户门户把“服务期间”设为必填项；ERP 文件中没有这个字段。</div>
+              <div class="attention-field">
+                <label class="sr-only" for="servicePeriod">选择服务期间</label>
+                <select class="select" id="servicePeriod">
+                  <option value="2026年6月">2026年6月</option>
+                  <option value="2026年第二季度">2026年第二季度</option>
+                </select>
+                <button class="btn primary small" id="resolveButton" type="button">补充并继续</button>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="approvalModal" role="presentation" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="approvalTitle">
+    <div class="modal-head">
+      <div class="modal-icon" aria-hidden="true">✓</div>
+      <div>
+        <h2 class="modal-title" id="approvalTitle">批准提交 4 张发票</h2>
+        <div class="modal-subtitle">这是会在客户门户产生真实记录的最终动作。</div>
+      </div>
+      <button class="modal-close" type="button" data-close="approvalModal" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="approval-summary">
+        <div class="approval-stat"><span>客户</span><strong>华东智造集团</strong></div>
+        <div class="approval-stat"><span>总金额</span><strong>¥186,400</strong></div>
+        <div class="approval-stat"><span>附件</span><strong>4 个 PDF</strong></div>
+      </div>
+      <div class="checks">
+        <div class="check"><span class="check-mark">✓</span><span>4 个 PO 均已匹配，币种与供应商法人一致。</span></div>
+        <div class="check"><span class="check-mark">✓</span><span>表头、税额、行项目和总金额已从页面回读。</span></div>
+        <div class="check"><span class="check-mark">✓</span><span>已排除 1 张重复发票和 1 张超过 PO 余额的发票。</span></div>
+      </div>
+      <div class="binding">本次批准只对当前 4 张发票、¥186,400、4 个附件和华东智造门户有效；任何字段变化都会重新请求批准。</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close="approvalModal">退回检查</button>
+      <button class="btn primary" id="approveButton" type="button">批准并提交 4 张</button>
+    </div>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="receiptModal" role="presentation" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="receiptTitle">
+    <div class="modal-head">
+      <div class="modal-icon" aria-hidden="true">↳</div>
+      <div>
+        <h2 class="modal-title" id="receiptTitle">4 张发票已被门户接受</h2>
+        <div class="modal-subtitle">每一条结果都绑定门户确认号、时间和提交证据。</div>
+      </div>
+      <button class="modal-close" type="button" data-close="receiptModal" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="receipt-banner">
+        <div class="check-mark">✓</div>
+        <div><strong>本次提交已完成</strong><span>未处理的 2 张异常发票仍保持阻止状态。</span></div>
+      </div>
+      <div class="receipt-list" id="receiptList"></div>
+      <div class="binding">回执包含确认页、字段回读结果和附件摘要，可用于后续对账与退回排查。</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close="receiptModal">返回队列</button>
+      <button class="btn primary" id="recipeButton" type="button">生成待审核门户 Recipe</button>
+    </div>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="exceptionModal" role="presentation" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="exceptionTitle">
+    <div class="modal-head">
+      <div class="modal-icon" style="background:var(--amber-soft);color:var(--amber)" aria-hidden="true">!</div>
+      <div>
+        <h2 class="modal-title" id="exceptionTitle">发票已阻止提交</h2>
+        <div class="modal-subtitle" id="exceptionSubtitle">代办助手没有对该发票执行写入操作。</div>
+      </div>
+      <button class="modal-close" type="button" data-close="exceptionModal" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="exception-note">
+        <strong id="exceptionReason"></strong>
+        <p id="exceptionDescription"></p>
+      </div>
+      <div class="evidence-list" id="exceptionEvidence"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" type="button" data-close="exceptionModal">我知道了</button>
+    </div>
+  </section>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+const invoices = [
+  { id: 'INV-CN-260601', date: '2026-07-28', customer: '华东智造集团', po: 'PO-7841', amount: 48600, portal: '财务共享', status: 'queued' },
+  { id: 'INV-CN-260602', date: '2026-07-28', customer: '华东智造集团', po: 'PO-7890', amount: 36000, portal: '财务共享', status: 'queued' },
+  { id: 'INV-CN-260603', date: '2026-07-29', customer: '华东智造集团', po: 'PO-7922', amount: 62800, portal: '财务共享', status: 'queued', needsServicePeriod: true },
+  { id: 'INV-CN-260604', date: '2026-07-30', customer: '华东智造集团', po: 'PO-7954', amount: 39000, portal: '财务共享', status: 'queued' },
+  {
+    id: 'INV-CN-260598',
+    date: '2026-07-27',
+    customer: '华东智造集团',
+    po: 'PO-7712',
+    amount: 19500,
+    portal: '财务共享',
+    status: 'duplicate',
+    blocker: {
+      reason: '检测到重复发票号',
+      description: '门户中已存在相同供应商、发票号和金额的记录 CSP-884019。本次批次不会再次创建。',
+      evidence: [['门户记录', 'CSP-884019'], ['已提交金额', '¥19,500'], ['提交时间', '2026-07-04 10:22']],
+    },
+  },
+  {
+    id: 'INV-CN-260605',
+    date: '2026-07-30',
+    customer: '华东智造集团',
+    po: 'PO-7991',
+    amount: 12000,
+    portal: '财务共享',
+    status: 'exception',
+    blocker: {
+      reason: '超过 PO 剩余可开金额',
+      description: 'ERP 发票金额为 ¥12,000，但门户显示该 PO 剩余可开金额只有 ¥8,400。',
+      evidence: [['ERP 发票金额', '¥12,000'], ['PO 剩余金额', '¥8,400'], ['差额', '¥3,600']],
+    },
+  },
+]
+
+const initialInvoices = structuredClone(invoices)
+const state = {
+  connected: true,
+  running: false,
+  awaitingInput: false,
+  approved: false,
+  filter: 'all',
+  receipts: [],
+  inputResolver: null,
+}
+
+const $ = (id) => document.getElementById(id)
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const currency = (value) => `¥${value.toLocaleString('zh-CN')}`
+let lastFocusedElement = null
+
+function openModal(id) {
+  const modal = $(id)
+  lastFocusedElement = document.activeElement
+  modal.hidden = false
+  window.requestAnimationFrame(() => {
+    modal.querySelector('button:not([disabled]), select:not([disabled])')?.focus()
+  })
+}
+
+function closeModal(id) {
+  $(id).hidden = true
+  const target = lastFocusedElement instanceof HTMLElement && !lastFocusedElement.closest('[hidden]')
+    ? lastFocusedElement
+    : $('runButton')
+  target?.focus()
+  lastFocusedElement = null
+}
+
+const statusLabels = {
+  queued: '等待处理',
+  processing: '处理中',
+  needs_input: '缺少字段',
+  ready: '待批准',
+  duplicate: '重复发票',
+  exception: '金额异常',
+  submitted: '已提交',
+}
+
+function renderRows() {
+  const rows = invoices.filter((invoice) => {
+    if (state.filter === 'processable') return ['queued', 'processing', 'needs_input', 'ready'].includes(invoice.status)
+    if (state.filter === 'exception') return ['duplicate', 'exception'].includes(invoice.status)
+    if (state.filter === 'submitted') return invoice.status === 'submitted'
+    return true
+  })
+  $('invoiceRows').innerHTML = rows.length
+    ? rows.map((invoice) => {
+        const action = ['duplicate', 'exception'].includes(invoice.status)
+          ? `<button class="btn ghost small" type="button" data-exception="${invoice.id}">查看原因</button>`
+          : invoice.status === 'submitted'
+            ? `<button class="btn ghost small" type="button" data-receipt="${invoice.id}">查看回执</button>`
+            : ''
+        return `<tr data-invoice="${invoice.id}">
+          <td><div class="invoice-id">${invoice.id}</div><div class="invoice-meta">${invoice.date} · PDF 已校验</div></td>
+          <td><div class="customer">${invoice.customer}</div><div class="invoice-meta">华东法人 · CNY</div></td>
+          <td class="column-po"><div class="po">${invoice.po}</div></td>
+          <td><div class="amount">${currency(invoice.amount)}</div></td>
+          <td class="column-portal"><div class="portal">${invoice.portal}</div></td>
+          <td><span class="status ${invoice.status}">${statusLabels[invoice.status]}</span></td>
+          <td class="row-action">${action}</td>
+        </tr>`
+      }).join('')
+    : '<tr><td colspan="7"><div class="empty-note">当前筛选条件下没有发票。</div></td></tr>'
+
+  document.querySelectorAll('[data-exception]').forEach((button) => {
+    button.addEventListener('click', () => openException(button.dataset.exception))
+  })
+  document.querySelectorAll('[data-receipt]').forEach((button) => {
+    button.addEventListener('click', () => openReceipt(button.dataset.receipt))
+  })
+  syncCounts()
+  syncPublicState()
+}
+
+function syncCounts() {
+  const ready = invoices.filter((item) => ['queued', 'processing', 'needs_input', 'ready'].includes(item.status)).length
+  const exceptions = invoices.filter((item) => ['duplicate', 'exception'].includes(item.status)).length
+  const approvals = invoices.filter((item) => item.status === 'ready').length
+  const submitted = invoices.filter((item) => item.status === 'submitted').length
+  $('readyMetric').textContent = String(ready)
+  $('exceptionMetric').textContent = String(exceptions)
+  $('navExceptionCount').textContent = String(exceptions)
+  $('navApprovalCount').textContent = String(approvals)
+  $('navReceiptCount').textContent = String(submitted)
+  $('selectionCount').textContent = `${ready || approvals} 张`
+}
+
+function addEvent(title, detail, tone = 'success') {
+  if ($('timeline').querySelector('.timeline-empty')) $('timeline').innerHTML = ''
+  const row = document.createElement('div')
+  row.className = `event ${tone}`
+  row.innerHTML = `<div class="event-dot"></div><div><div class="event-title"></div><div class="event-detail"></div><div class="event-time"></div></div>`
+  row.querySelector('.event-title').textContent = title
+  row.querySelector('.event-detail').textContent = detail
+  row.querySelector('.event-time').textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  $('timeline').appendChild(row)
+  $('timeline').scrollTop = $('timeline').scrollHeight
+}
+
+function setRunState(label, tone = '') {
+  $('runState').textContent = label
+  $('runState').className = `run-state ${tone}`.trim()
+}
+
+async function startAgentRun() {
+  if (state.running || !state.connected) return
+  state.running = true
+  state.approved = false
+  $('runButton').disabled = true
+  $('resetButton').disabled = true
+  setRunState('正在准备草稿', 'running')
+  addEvent('批次检查通过', '4 张发票可处理；2 张异常已隔离。')
+  await delay(420)
+
+  const candidates = invoices.filter((invoice) => invoice.status === 'queued')
+  for (const invoice of candidates) {
+    invoice.status = 'processing'
+    renderRows()
+    addEvent(`正在处理 ${invoice.id}`, `打开 ${invoice.po}，写入表头与行项目。`, 'active')
+    await delay(520)
+
+    if (invoice.needsServicePeriod) {
+      invoice.status = 'needs_input'
+      state.awaitingInput = true
+      renderRows()
+      setRunState('等待补充信息', 'attention')
+      addEvent('客户必填字段缺失', `${invoice.id} 缺少“服务期间”，已暂停该发票。`, 'warn')
+      $('attentionCard').hidden = false
+      await new Promise((resolve) => { state.inputResolver = resolve })
+      invoice.servicePeriod = $('servicePeriod').value
+      state.awaitingInput = false
+      invoice.status = 'ready'
+      renderRows()
+      setRunState('继续执行', 'running')
+      addEvent('已补充服务期间', `${invoice.id}：${invoice.servicePeriod}，页面回读一致。`)
+      await delay(360)
+      continue
+    }
+
+    invoice.status = 'ready'
+    renderRows()
+    addEvent(`草稿已验证`, `${invoice.id} 金额、税额、PO 与附件均已回读。`)
+    await delay(260)
+  }
+
+  state.running = false
+  $('resetButton').disabled = false
+  setRunState('等待最终批准', 'attention')
+  addEvent('4 张发票准备提交', '最终提交已停止在审批边界；代办助手未点击提交。', 'warn')
+  openModal('approvalModal')
+  $('navApprovalCount').textContent = '4'
+  syncPublicState()
+}
+
+async function approveAndSubmit() {
+  if (state.running || state.approved) return
+  state.approved = true
+  state.running = true
+  closeModal('approvalModal')
+  setRunState('正在提交', 'running')
+  addEvent('审批已绑定', '批准范围：4 张发票、¥186,400、4 个附件、当前门户 Origin。')
+
+  for (const invoice of invoices.filter((item) => item.status === 'ready')) {
+    await delay(430)
+    invoice.status = 'submitted'
+    invoice.confirmation = `CSP-${String(884120 + state.receipts.length)}`
+    state.receipts.push({
+      invoiceId: invoice.id,
+      confirmation: invoice.confirmation,
+      submittedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    })
+    renderRows()
+    addEvent(`门户已接受 ${invoice.id}`, `确认号 ${invoice.confirmation}；确认页与字段证据已保存。`)
+  }
+
+  state.running = false
+  setRunState('本次任务完成', 'done')
+  renderReceipts()
+  openModal('receiptModal')
+  syncPublicState()
+}
+
+function resolveMissingInput() {
+  if (!state.awaitingInput || !state.inputResolver) return
+  $('attentionCard').hidden = true
+  const resolver = state.inputResolver
+  state.inputResolver = null
+  resolver()
+}
+
+function openException(invoiceId) {
+  const invoice = invoices.find((item) => item.id === invoiceId)
+  if (!invoice?.blocker) return
+  $('exceptionTitle').textContent = `${invoice.id} 已阻止提交`
+  $('exceptionSubtitle').textContent = `${invoice.customer} · ${invoice.po} · ${currency(invoice.amount)}`
+  $('exceptionReason').textContent = invoice.blocker.reason
+  $('exceptionDescription').textContent = invoice.blocker.description
+  $('exceptionEvidence').innerHTML = invoice.blocker.evidence
+    .map(([label, value]) => `<div class="evidence"><span>${label}</span><strong>${value}</strong></div>`)
+    .join('')
+  openModal('exceptionModal')
+}
+
+function renderReceipts() {
+  $('receiptList').innerHTML = state.receipts
+    .map((receipt) => `<div class="receipt-row"><div><strong>${receipt.invoiceId}</strong><br><span>${receipt.submittedAt}</span></div><span class="receipt-id">${receipt.confirmation}</span></div>`)
+    .join('')
+}
+
+function openReceipt(invoiceId) {
+  const receipt = state.receipts.find((item) => item.invoiceId === invoiceId)
+  if (!receipt) return
+  renderReceipts()
+  $('receiptTitle').textContent = `${invoiceId} 提交回执`
+  openModal('receiptModal')
+}
+
+function showToast(message) {
+  $('toast').textContent = message
+  $('toast').hidden = false
+  window.clearTimeout(showToast.timer)
+  showToast.timer = window.setTimeout(() => { $('toast').hidden = true }, 3200)
+}
+
+function resetDemo() {
+  if (state.inputResolver) state.inputResolver()
+  invoices.splice(0, invoices.length, ...structuredClone(initialInvoices))
+  Object.assign(state, {
+    connected: true,
+    running: false,
+    awaitingInput: false,
+    approved: false,
+    filter: 'all',
+    receipts: [],
+    inputResolver: null,
+  })
+  $('timeline').innerHTML = '<div class="timeline-empty">启动任务后，这里只展示业务动作和验证结果。</div>'
+  $('attentionCard').hidden = true
+  $('approvalModal').hidden = true
+  $('receiptModal').hidden = true
+  $('exceptionModal').hidden = true
+  $('runButton').disabled = false
+  $('resetButton').disabled = false
+  setRunState('尚未开始')
+  document.querySelectorAll('.filter').forEach((button) => button.classList.toggle('active', button.dataset.filter === 'all'))
+  renderRows()
+  syncPublicState()
+  showToast('演示批次已恢复到初始状态。')
+}
+
+function syncPublicState() {
+  window.__INVOICE_POC_STATE__ = {
+    connected: state.connected,
+    running: state.running,
+    awaitingInput: state.awaitingInput,
+    approved: state.approved,
+    invoiceStatuses: Object.fromEntries(invoices.map((item) => [item.id, item.status])),
+    receiptCount: state.receipts.length,
+    committedSubmissions: invoices.filter((item) => item.status === 'submitted').length,
+  }
+}
+
+document.querySelectorAll('.filter').forEach((button) => {
+  button.addEventListener('click', () => {
+    state.filter = button.dataset.filter
+    document.querySelectorAll('.filter').forEach((item) => item.classList.toggle('active', item === button))
+    renderRows()
+  })
+})
+
+document.querySelectorAll('.nav-item').forEach((button) => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item === button))
+    const view = button.dataset.view
+    const matchingFilter = view === 'exceptions' ? 'exception' : view === 'receipts' ? 'submitted' : 'all'
+    const filter = document.querySelector(`[data-filter="${matchingFilter}"]`)
+    filter?.click()
+    if (view === 'approvals') {
+      const approvalCount = invoices.filter((item) => item.status === 'ready').length
+      if (approvalCount > 0) openModal('approvalModal')
+      else showToast('目前没有等待批准的发票。')
+    }
+  })
+})
+
+document.querySelectorAll('[data-close]').forEach((button) => {
+  button.addEventListener('click', () => closeModal(button.dataset.close))
+})
+
+$('runButton').addEventListener('click', () => { void startAgentRun().finally(syncPublicState) })
+$('resolveButton').addEventListener('click', resolveMissingInput)
+$('approveButton').addEventListener('click', () => { void approveAndSubmit() })
+$('resetButton').addEventListener('click', resetDemo)
+$('connectButton').addEventListener('click', () => showToast('当前标签页授权有效；代办助手只能访问 fssc.huadong.example。'))
+$('recipeButton').addEventListener('click', () => {
+  closeModal('receiptModal')
+  showToast('已生成待审核 Recipe；它不会自动提升未来任务权限。')
+})
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return
+  const openDialog = [...document.querySelectorAll('.modal-backdrop')].find((modal) => !modal.hidden)
+  if (openDialog) closeModal(openDialog.id)
+})
+
+renderRows()
+syncPublicState()
+</script>
+</body>
+</html>

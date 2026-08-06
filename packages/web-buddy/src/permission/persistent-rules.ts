@@ -8,6 +8,8 @@ export interface PersistentPermissionRule {
   id: string
   action: Extract<PermissionDecision['action'], 'allow' | 'deny'>
   scope: 'session' | 'always'
+  /** Required for session-scoped grants so they cannot leak into a later run. */
+  sessionId?: string
   gateKind?: string
   toolName?: string
   policyCode?: string
@@ -71,6 +73,7 @@ export function upsertPersistentPermissionRule(
   const index = next.findIndex((item) =>
     item.action === rule.action &&
     item.scope === rule.scope &&
+    item.sessionId === rule.sessionId &&
     item.gateKind === rule.gateKind &&
     item.toolName === rule.toolName &&
     item.policyCode === rule.policyCode &&
@@ -106,12 +109,18 @@ export function persistentPermissionRuleFromDecision(input: {
   if (isHardGate(gateKind)) return undefined
   if (gateKind && gateKind !== 'high_risk_action') return undefined
   if (input.request.subject.kind !== 'tool_call') return undefined
+  const scope = input.rememberScope ?? (input.decision.action === 'allow' ? 'session' : 'always')
+  // Asymmetric memory trust: restrictive decisions can survive sessions,
+  // while enabling decisions are valid only inside the session that granted
+  // them. This also blocks legacy callers that bypass supportedScopes.
+  if (input.decision.action === 'allow' && scope === 'always') return undefined
   const now = input.now ?? new Date().toISOString()
   return {
     schemaVersion: 'persistent-permission-rule/v1',
     id: input.id,
     action: input.decision.action,
-    scope: input.rememberScope ?? 'always',
+    scope,
+    ...(scope === 'session' ? { sessionId: input.request.sessionId } : {}),
     ...(gateKind ? { gateKind } : {}),
     toolName: input.request.subject.toolName,
     policyCode: input.request.policy.policyCode,
@@ -123,6 +132,10 @@ export function persistentPermissionRuleFromDecision(input: {
 }
 
 function matchesPersistentRule(rule: PersistentPermissionRule, request: PermissionRequest): boolean {
+  // Fail closed for legacy cross-session allow records and for old session
+  // records that were persisted before sessionId was part of the schema.
+  if (rule.action === 'allow' && rule.scope === 'always') return false
+  if (rule.scope === 'session' && (!rule.sessionId || rule.sessionId !== request.sessionId)) return false
   if (isHardGate(request.gateKind)) return false
   if (rule.gateKind && rule.gateKind !== request.gateKind) return false
   if (rule.toolName && (request.subject.kind !== 'tool_call' || rule.toolName !== request.subject.toolName)) return false
@@ -179,6 +192,7 @@ function isPersistentPermissionRule(value: unknown): value is PersistentPermissi
     typeof value.reason === 'string' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
+    (value.sessionId === undefined || typeof value.sessionId === 'string') &&
     (value.gateKind === undefined || typeof value.gateKind === 'string') &&
     (value.toolName === undefined || typeof value.toolName === 'string') &&
     (value.policyCode === undefined || typeof value.policyCode === 'string') &&

@@ -5,6 +5,7 @@ export type NormalizedToolErrorKind =
   | 'unknown_tool'
   | 'registry_exception'
   | 'invalid_result'
+  | 'circuit_open'
 
 export interface NormalizedToolError {
   schemaVersion: 'normalized-tool-error/v1'

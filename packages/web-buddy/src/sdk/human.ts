@@ -26,11 +26,13 @@ export interface HumanInfoRequest {
   field: string
   question: string
   options?: string[]
+  currentUrl?: string
   abortSignal?: AbortSignal
 }
 
 export interface HumanInfoResponse {
   answer: string
+  intentPatch?: string
 }
 
 export interface HumanInput {

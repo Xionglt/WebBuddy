@@ -126,6 +126,18 @@
     align-items: center;
     gap: 8px;
   }
+  .poc-entry {
+    padding: 7px 10px;
+    border: 1px solid #b8d1c6;
+    border-radius: 9px;
+    background: #edf5f1;
+    color: #2f6f5e;
+    font-size: 12px;
+    font-weight: 700;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .poc-entry:hover { background: #e4efe9; }
   .token-input {
     width: min(300px, 31vw);
     height: 36px;
@@ -485,7 +497,7 @@
     font: 10px/1.5 var(--mono);
     text-align: center;
   }
-  .approval-list, .risk-list, .span-list { display: flex; flex-direction: column; gap: 8px; }
+  .approval-list, .continuation-list, .risk-list, .span-list { display: flex; flex-direction: column; gap: 8px; }
   .panel-empty {
     padding: 13px;
     border: 1px dashed var(--line-strong);
@@ -502,6 +514,35 @@
   .approval-kind { font-weight: 720; }
   .approval-meta { margin-top: 4px; color: #795015; font: 10px/1.45 var(--mono); overflow-wrap: anywhere; }
   .approval-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 10px; }
+  .continuation-card {
+    padding: 11px;
+    border: 1px solid #b8c8ec;
+    border-radius: 10px;
+    background: var(--accent-soft);
+  }
+  .continuation-prompt { font-weight: 720; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .continuation-meta { margin-top: 4px; color: #395794; font: 10px/1.45 var(--mono); overflow-wrap: anywhere; }
+  .continuation-options { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+  .continuation-option {
+    border: 1px solid #b8c8ec;
+    border-radius: 999px;
+    padding: 4px 8px;
+    background: var(--surface);
+    color: #294d9d;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .continuation-input, .continuation-intent {
+    width: 100%;
+    border: 1px solid #b8c8ec;
+    border-radius: 8px;
+    padding: 8px 9px;
+    background: var(--surface);
+    color: var(--ink);
+  }
+  .continuation-input { margin-top: 9px; }
+  .continuation-intent { min-height: 58px; margin-top: 7px; resize: vertical; font-size: 12px; }
+  .continuation-submit { width: 100%; margin-top: 8px; }
   .detail-grid { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 7px 10px; font-size: 12px; }
   .detail-grid dt { color: var(--muted); }
   .detail-grid dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
@@ -596,6 +637,7 @@
       </div>
     </div>
     <div class="service-connect">
+      <a class="poc-entry" href="/poc/invoice-portal">体验「接手」POC</a>
       <label class="sr-only" for="serviceToken">服务令牌</label>
       <input class="token-input" id="serviceToken" type="password" autocomplete="off" placeholder="输入服务令牌以连接本地 Runtime" />
       <button class="btn secondary" id="connectBtn">连接服务</button>
@@ -660,6 +702,17 @@
   </main>
 
   <aside class="inspect-pane">
+    <section class="inspect-section" data-contract="continuation-inbox">
+      <div class="inspect-title"><h2>需要你补充</h2><span class="count-badge" id="continuationCount">0</span></div>
+      <div class="continuation-list" id="continuationList"><div class="panel-empty">当前没有等待回答的问题。</div></div>
+      <div class="metric-grid" id="continuationMetrics" hidden>
+        <div class="metric"><div class="metric-key">回答率</div><div class="metric-value" id="continuationAnswerRate">-</div></div>
+        <div class="metric"><div class="metric-key">恢复率</div><div class="metric-value" id="continuationResumeRate">-</div></div>
+        <div class="metric"><div class="metric-key">稳定成功率</div><div class="metric-value" id="continuationSuccessRate">-</div></div>
+        <div class="metric"><div class="metric-key">回答 P95</div><div class="metric-value" id="continuationAnswerP95">-</div></div>
+      </div>
+    </section>
+
     <section class="inspect-section" data-contract="approval-inbox">
       <div class="inspect-title"><h2>待人工确认</h2><span class="count-badge" id="approvalCount">0</span></div>
       <div class="approval-list" id="approvalList"><div class="panel-empty">当前没有等待确认的动作。</div></div>
@@ -1198,14 +1251,116 @@ function applyRunState(item) {
 }
 
 async function refreshControlPlane() {
-  const [runs, approvals] = await Promise.all([
+  const [runs, approvals, continuationMetrics] = await Promise.all([
     api('/api/runs?limit=25'),
     api('/api/approvals?limit=25'),
+    api('/api/continuations/metrics'),
   ]);
   renderRunList(runs.items || []);
+  renderContinuationList(runs.items || []);
+  renderContinuationMetrics(continuationMetrics);
   renderApprovalList(approvals.items || []);
   const selected = (runs.items || []).find((item) => item.runId === runId);
   if (selected) applyRunState(selected);
+}
+
+function renderContinuationMetrics(metrics) {
+  const visible = Number(metrics?.requested || 0) > 0;
+  $('continuationMetrics').hidden = !visible;
+  if (!visible) return;
+  $('continuationAnswerRate').textContent = formatRate(metrics.answerRate);
+  $('continuationResumeRate').textContent = formatRate(metrics.resumeRate);
+  $('continuationSuccessRate').textContent = formatRate(metrics.settledSuccessRate);
+  $('continuationAnswerP95').textContent = formatDuration(metrics.answerLatency?.p95Ms || 0);
+}
+
+function formatRate(value) {
+  const number = Number(value || 0);
+  return `${Math.round(number * 100)}%`;
+}
+
+function renderContinuationList(items) {
+  const waiting = items.filter((item) => item.pendingContinuation);
+  $('continuationCount').textContent = String(waiting.length);
+  const root = $('continuationList');
+  root.innerHTML = '';
+  if (!waiting.length) {
+    root.innerHTML = '<div class="panel-empty">当前没有等待回答的问题。</div>';
+    return;
+  }
+  for (const item of waiting) {
+    const continuation = item.pendingContinuation;
+    const card = document.createElement('div');
+    card.className = 'continuation-card';
+    card.innerHTML = '<div class="continuation-prompt"></div><div class="continuation-meta"></div><div class="continuation-options"></div><input class="continuation-input" type="text" /><textarea class="continuation-intent"></textarea><button class="btn primary small continuation-submit" type="button">回答并续跑</button>';
+    card.querySelector('.continuation-prompt').textContent = continuation.question.prompt;
+    card.querySelector('.continuation-meta').textContent = `${continuation.question.field} · ${item.runId} · r${item.revision}/a${item.attempt}`;
+    const answerInput = card.querySelector('.continuation-input');
+    answerInput.placeholder = '输入这个问题的答案';
+    const intentInput = card.querySelector('.continuation-intent');
+    intentInput.placeholder = '可选：补充或纠正执行意图。原任务目标与安全边界不会因此被覆盖。';
+    const options = card.querySelector('.continuation-options');
+    for (const value of continuation.question.options || []) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'continuation-option';
+      option.textContent = value;
+      option.addEventListener('click', () => {
+        answerInput.value = value;
+        answerInput.focus();
+      });
+      options.appendChild(option);
+    }
+    if (!(continuation.question.options || []).length) options.hidden = true;
+    const submit = card.querySelector('.continuation-submit');
+    submit.disabled = continuation.status !== 'pending';
+    if (continuation.status !== 'pending') submit.textContent = '回答已接收，正在恢复';
+    submit.addEventListener('click', async () => {
+      const answer = answerInput.value.trim();
+      const intentPatch = intentInput.value.trim();
+      if (!answer) {
+        answerInput.focus();
+        addEvent({ level: 'warn', phase: 'continuation', message: '请先填写 Agent 所询问的信息。' });
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = '正在恢复';
+      try {
+        const continued = await api(
+          `/api/runs/${encodeURIComponent(item.runId)}/continuations/${encodeURIComponent(continuation.continuationId)}/resolve`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              schemaVersion: 'run-client-continuation/v1',
+              expectedRevision: item.revision,
+              answer,
+              ...(intentPatch ? { intentPatch } : {}),
+              idempotencyKey: `ui-continuation-${crypto.randomUUID()}`,
+            }),
+          },
+        );
+        if (runId === item.runId) {
+          applyRunState(continued);
+          addEvent({
+            level: 'decision',
+            phase: 'continuation',
+            message: '已绑定你的回答；Agent 将先重新观察当前页面，再继续原任务。',
+          });
+          if (!eventStream && ['queued', 'running', 'resuming', 'pausing'].includes(continued.state)) {
+            eventStream = await openEventStream(`/api/events?id=${encodeURIComponent(runId)}`, handleLiveEvent);
+          }
+          if (!traceTimer) traceTimer = setInterval(() => refreshTrace().catch(() => {}), 1400);
+        }
+        await refreshControlPlane();
+      } catch (error) {
+        submit.disabled = false;
+        submit.textContent = '回答并续跑';
+        addEvent({ level: 'error', phase: 'continuation', message: error.message || String(error) });
+      }
+    });
+    root.appendChild(card);
+  }
 }
 
 function renderRunList(items) {

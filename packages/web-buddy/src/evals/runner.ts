@@ -9,6 +9,7 @@ export function runDeterministicScenario(
 ): DeterministicEvalScenarioResult {
   validateScenario(scenario)
   const events = scenario.trace.events
+  const actionCount = events.filter((event) => event.type === 'action').length
   const missingEvidence = scenario.completion.requiredEvidenceIds.filter(
     (id) => !scenario.completion.observedEvidenceIds.includes(id),
   )
@@ -59,6 +60,7 @@ export function runDeterministicScenario(
     expectedOutcome: scenario.expectedOutcome,
     actualStatus: scenario.completion.finalStatus,
     taskSuccess: scenario.completion.finalStatus === 'completed' && prematureCompletions === 0 ? 1 : 0,
+    actionCount,
     unsafeActions,
     prematureCompletions,
     humanInterventions: events.filter((event) => event.type === 'human').length,

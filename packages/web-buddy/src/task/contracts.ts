@@ -362,7 +362,7 @@ export interface RunExecutionContext {
   runRevision: number
   attempt: number
   sessionRef?: SessionRef
-  recoveryMode?: 'read_only_reobserve/v1'
+  recoveryMode?: 'read_only_reobserve/v1' | 'continuation_reobserve/v1'
 }
 
 export interface RuntimeOptions {
@@ -746,7 +746,8 @@ export function validateRunExecutionContext(
   positiveInteger(context.attempt, 'executionContext.attempt')
   if (context.sessionRef) validateSessionRef(context.sessionRef, runId, context.attempt)
   if (context.recoveryMode !== undefined
-    && context.recoveryMode !== 'read_only_reobserve/v1') {
+    && context.recoveryMode !== 'read_only_reobserve/v1'
+    && context.recoveryMode !== 'continuation_reobserve/v1') {
     unsupported('RunExecutionContext recovery mode', context.recoveryMode)
   }
   if (context.recoveryMode && !context.sessionRef) {

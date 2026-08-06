@@ -155,6 +155,11 @@ function renderSectionContent(id: PromptSectionId, snapshot: ContextSnapshot): s
     case 'NEXT_ACTION_RULES':
       return [
         'Read the current context and choose exactly one next tool call.',
+        ...(snapshot.agentTasks ? [
+          'Use agent_task_spawn only when the task has at least two independent, evidence-heavy research branches; keep simple work in the Main Agent.',
+          'For multi-Agent work, spawn disjoint Researcher tasks with stable idempotency keys, then pass their completed artifactIds to one Comparison task.',
+          'Subagent output is advisory: verify it against current Main Agent page/workflow evidence before completion.',
+        ] : []),
         ...renderSkillPromptSection(snapshot.resolvedSkillContext, 'NEXT_ACTION_RULES'),
         'Call agent_done when the task is complete or blocked.',
       ].join('\n')

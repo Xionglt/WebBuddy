@@ -43,7 +43,13 @@ export interface AgentTaskSchedulerOptions {
   materializeLlmResult?: (
     outcome: Extract<AgentTaskRunOutcome, { outcome: 'succeeded' }>,
     task: RunningBackgroundAgentTask,
-  ) => { outputRefs: [ImmutableArtifactRef, ...ImmutableArtifactRef[]]; freshness: ResultFreshnessVerdict }
+  ) => {
+    outputRefs: [ImmutableArtifactRef, ...ImmutableArtifactRef[]]
+    freshness: ResultFreshnessVerdict
+  } | Promise<{
+    outputRefs: [ImmutableArtifactRef, ...ImmutableArtifactRef[]]
+    freshness: ResultFreshnessVerdict
+  }>
 }
 
 export type TaskRunRequestFactory = (
@@ -120,51 +126,71 @@ export class AgentTaskScheduler {
     const requestId = `cancel_${randomUUID()}`
     const now = this.iso()
     if (task.status === 'pending' || task.status === 'blocked') {
-      const committed = await this.store.transact(sessionId, (current) => {
-        const currentTask = requireTask(current, taskId)
-        if (isTerminal(currentTask) || currentTask.status === 'running') {
-          throw schedulerError('INVALID_TRANSITION', `Task ${taskId} changed while cancellation was requested.`)
+      try {
+        const committed = await this.store.transact(sessionId, (current) => {
+          const currentTask = requireTask(current, taskId)
+          if (isTerminal(currentTask) || currentTask.status === 'running') {
+            throw schedulerError('INVALID_TRANSITION', `Task ${taskId} changed while cancellation was requested.`)
+          }
+          const error = contractError(
+            reason === 'session_abort' ? 'SESSION_ABORTED' : 'CANCELLED',
+            `Task ${taskId} was cancelled before it started.`,
+            taskId,
+            now,
+          )
+          const terminal = {
+            ...currentTask,
+            status: 'killed' as const,
+            cancellation: { requestId, requestedAt: now, reason },
+            terminalAt: now,
+            updatedAt: now,
+            lastError: error,
+          } as AgentTask
+          const event = controlEvent(current, terminal, 'task_cancelled_before_run', {
+            requestId,
+            reason,
+          }, now)
+          const notification = failedNotification(current, terminal, event, error, {
+            kind: 'before_run', cancellationRequestId: requestId,
+          }, now)
+          const draft = replaceTask(current, terminal)
+          const outbox = outboxEntry(notification, event)
+          draft.notificationOutbox.push(outbox)
+          return finalizeAgentTaskGraphMutationV2(current, draft, event, now)
+        })
+        this.reconcileOutbox(committed.graph)
+        return true
+      } catch (error) {
+        if (isInvalidTransition(error)) {
+          const latest = (await this.store.load(sessionId))?.tasks.find((candidate) => candidate.id === taskId)
+          if (latest && isTerminal(latest)) return false
+          if (latest?.status === 'running') return this.cancelTask(sessionId, taskId, reason)
         }
-        const error = contractError(
-          reason === 'session_abort' ? 'SESSION_ABORTED' : 'CANCELLED',
-          `Task ${taskId} was cancelled before it started.`,
-          taskId,
-          now,
-        )
-        const terminal = {
-          ...currentTask,
-          status: 'killed' as const,
-          cancellation: { requestId, requestedAt: now, reason },
-          terminalAt: now,
-          updatedAt: now,
-          lastError: error,
-        } as AgentTask
-        const event = controlEvent(current, terminal, 'task_cancelled_before_run', {
-          requestId,
-          reason,
-        }, now)
-        const notification = failedNotification(current, terminal, event, error, {
-          kind: 'before_run', cancellationRequestId: requestId,
-        }, now)
-        const draft = replaceTask(current, terminal)
-        const outbox = outboxEntry(notification, event)
-        draft.notificationOutbox.push(outbox)
-        return finalizeAgentTaskGraphMutationV2(current, draft, event, now)
-      })
-      this.reconcileOutbox(committed.graph)
-      return true
+        throw error
+      }
     }
 
-    await this.store.transact(sessionId, (current) => {
-      const running = requireRunningTask(current, taskId)
-      const event = runEvent(current, running, 'task_cancel_requested', {
-        requestId,
-        requestedAt: now,
-        reason,
-      }, now)
-      const updated = { ...running, cancellation: { requestId, requestedAt: now, reason }, updatedAt: now } as AgentTask
-      return finalizeAgentTaskGraphMutationV2(current, replaceTask(current, updated), event, now)
-    })
+    try {
+      await this.store.transact(sessionId, (current) => {
+        const running = requireRunningTask(current, taskId)
+        const event = runEvent(current, running, 'task_cancel_requested', {
+          requestId,
+          requestedAt: now,
+          reason,
+        }, now)
+        const updated = { ...running, cancellation: { requestId, requestedAt: now, reason }, updatedAt: now } as AgentTask
+        return finalizeAgentTaskGraphMutationV2(current, replaceTask(current, updated), event, now)
+      })
+    } catch (error) {
+      // Completion may win the race after the initial read but before the
+      // cancellation transaction. A terminal task already satisfies the
+      // cancellation fence and must not make a session abort fail.
+      if (isInvalidTransition(error)) {
+        const latest = (await this.store.load(sessionId))?.tasks.find((candidate) => candidate.id === taskId)
+        if (latest && isTerminal(latest)) return false
+      }
+      throw error
+    }
     this.running.get(runKey(sessionId, taskId))?.controller.abort(reason)
     return true
   }
@@ -392,10 +418,13 @@ export class AgentTaskScheduler {
     identity: TaskRunIdentity,
     outcome: Extract<AgentTaskRunOutcome, { outcome: 'succeeded' | 'succeeded_deterministic' }>,
   ): Promise<void> {
+    const snapshot = await this.store.load(sessionId)
+    if (!snapshot) throw schedulerError('GRAPH_NOT_FOUND', `Task graph not found for session ${sessionId}.`)
+    const taskAtMaterialization = requireFencedTask(snapshot, identity)
+    const materialized = await materializeSuccess(outcome, taskAtMaterialization, this.materializeLlmResult)
     const committed = await this.store.transact(sessionId, (current) => {
       const task = requireFencedTask(current, identity)
       const now = this.iso()
-      const materialized = materializeSuccess(outcome, task, this.materializeLlmResult)
       const freshness = assessAsyncTaskResultFreshness(task.actionBinding, current.actionClock)
       const outputs = materialized.outputRefs.map((artifactRef, index): AgentTaskOutput => ({
         schemaVersion: 'agent-task-output/v1',
@@ -698,14 +727,14 @@ function finishAttempt(
   }
 }
 
-function materializeSuccess(
+async function materializeSuccess(
   outcome: Extract<AgentTaskRunOutcome, { outcome: 'succeeded' | 'succeeded_deterministic' }>,
   task: RunningBackgroundAgentTask,
   materializeLlmResult: AgentTaskSchedulerOptions['materializeLlmResult'],
-): {
+): Promise<{
   outputRefs: [ImmutableArtifactRef, ...ImmutableArtifactRef[]]
   freshness: ResultFreshnessVerdict
-} {
+}> {
   if (outcome.outcome === 'succeeded_deterministic') return outcome.result
   const roleMetadata = task.inputs
     .filter((input) => input.kind === 'goal')
@@ -738,7 +767,7 @@ function materializeSuccess(
       `Read-only LLM result for ${task.id} must be persisted as an immutable attempt result before commit.`,
     )
   }
-  const materialized = materializeLlmResult(outcome, task)
+  const materialized = await materializeLlmResult(outcome, task)
   if (roleMetadata && !materialized.outputRefs.some((ref) => ref.artifactKind === roleMetadata.outputArtifactKind)) {
     throw schedulerError(
       'RESULT_SCHEMA_INVALID',
@@ -889,6 +918,11 @@ function isTerminal(task: AgentTask): boolean {
 function isExpectedClaimConflict(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error
     && ['INVALID_TRANSITION', 'DEPENDENCY_UNRESOLVED', 'QUEUE_CAPACITY_EXCEEDED', 'MAX_ATTEMPTS_EXCEEDED', 'SESSION_ABORTED'].includes(String(error.code))
+}
+
+function isInvalidTransition(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && String(error.code) === 'INVALID_TRANSITION'
 }
 
 function schedulerError(code: string, message: string): Error & { code: string } {

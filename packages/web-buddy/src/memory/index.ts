@@ -23,6 +23,7 @@ export type {
 } from './types.js'
 export {
   DEFAULT_MEMORY_WRITE_POLICY,
+  AUTOMATIC_WEB_MEMORY_WRITE_POLICY,
   MEMORY_ENTRY_SCHEMA_VERSION,
   MEMORY_WRITE_DECISION_SCHEMA_VERSION,
   MEMORY_WRITE_REQUEST_SCHEMA_VERSION,
@@ -50,3 +51,5 @@ export type {
 } from './memory-write-policy.js'
 export * from './memory-lifecycle.js'
 export { retrieveLifecycleMemoryContext } from './context-provider.js'
+export * from './web-memory-governance.js'
+export * from './automatic-memory.js'

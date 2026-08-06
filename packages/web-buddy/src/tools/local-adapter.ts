@@ -398,10 +398,12 @@ const localHandlers: Record<string, LocalHandler> = {
       }
     }
 
+    const currentUrl = sessionManager.get(ctx.sessionId)?.page.url()
     const response = await ctx.humanInput.requestInfo({
       field,
       question,
       ...(options?.length ? { options } : {}),
+      ...(currentUrl ? { currentUrl } : {}),
       ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
     })
     const answer = response.answer.trim()
@@ -428,8 +430,17 @@ const localHandlers: Record<string, LocalHandler> = {
       }
     }
     return {
-      observation: `ask_user received answer for "${field}": ${answer}`,
-      data: { userAnswer, reused: false },
+      observation: [
+        `ask_user received answer for "${field}": ${answer}`,
+        response.intentPatch
+          ? `The same user response explicitly changed the task intent: ${response.intentPatch}`
+          : undefined,
+      ].filter(Boolean).join('\n'),
+      data: {
+        userAnswer,
+        reused: false,
+        ...(response.intentPatch ? { intentPatch: response.intentPatch } : {}),
+      },
       pageChanged: false,
     }
   },

@@ -4,6 +4,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { appendJsonLine, FileSessionRecorder, FileSessionStore, restoreSessionState } from '../dist/session/index.js'
+import {
+  answerPendingContinuation,
+  createPendingContinuation,
+  createResumeCapsule,
+} from '../dist/control/index.js'
+import { ActionLedger } from '../dist/task/action-ledger.js'
 
 const root = mkdtempSync(join(tmpdir(), 'mfa-session-restore-'))
 
@@ -199,6 +205,77 @@ try {
     type: 'memory_snapshot',
     memory: { note: 'A versionless legacy v1 record remains migratable.' },
   })
+  const continuationContract = {
+    schemaVersion: 'web-task-contract/v1',
+    contractId: 'restore-continuation-contract',
+    revision: 0,
+    criteria: [{
+      id: 'restore-draft-only',
+      kind: 'action_boundary',
+      description: 'Do not submit the restored task',
+      actionKinds: ['submit'],
+      outcome: 'not_performed',
+    }],
+  }
+  const pendingContinuation = createPendingContinuation({
+    runId: session.runId,
+    runRevision: 0,
+    attempt: 1,
+    sessionId: session.sessionId,
+    goal: session.goal,
+    goalRevision: 0,
+    contract: continuationContract,
+    field: 'contact_email',
+    question: 'Which contact email should be used?',
+    currentUrl: 'https://fixture.example/review',
+    now: '2026-06-30T00:00:09.000Z',
+  })
+  const resumeCapsule = createResumeCapsule(
+    answerPendingContinuation(pendingContinuation, {
+      answer: 'resume@example.com',
+      intentPatch: 'Continue the draft but do not submit it.',
+      answeredAt: '2026-06-30T00:00:10.000Z',
+    }),
+    { runRevision: 1, attempt: 2 },
+    '2026-06-30T00:00:11.000Z',
+  )
+  await recorder.transcript({
+    type: 'user_continuation',
+    continuationId: resumeCapsule.continuationId,
+    questionId: resumeCapsule.answeredQuestion.questionId,
+    field: resumeCapsule.answeredQuestion.field,
+    answer: resumeCapsule.answeredQuestion.answer,
+    intentPatch: resumeCapsule.intentPatch,
+    capsule: resumeCapsule,
+  })
+  await recorder.event({
+    type: 'action_ledger_updated',
+    data: {
+      entry: {
+        schemaVersion: 'action-ledger-entry/v1',
+        sequence: 1,
+        actionId: 'turn_001:submit_call',
+        actionKind: 'submit',
+        toolName: 'browser_click',
+        status: 'proposed',
+        recordedAt: '2026-06-30T00:00:12.000Z',
+      },
+    },
+  })
+  await recorder.event({
+    type: 'action_ledger_updated',
+    data: {
+      entry: {
+        schemaVersion: 'action-ledger-entry/v1',
+        sequence: 2,
+        actionId: 'turn_001:submit_call',
+        actionKind: 'submit',
+        toolName: 'browser_click',
+        status: 'authorized',
+        recordedAt: '2026-06-30T00:00:13.000Z',
+      },
+    },
+  })
 
   const restored = await restoreSessionState({
     store,
@@ -209,7 +286,7 @@ try {
   assert.equal(restored.schemaVersion, 'restored-session-state/v1')
   assert.equal(restored.session.sessionId, session.sessionId)
   assert.equal(restored.session.status, 'blocked')
-  assert.equal(restored.transcriptCount, 15)
+  assert.equal(restored.transcriptCount, 16)
   assert.equal(restored.restoredAt, '2026-06-30T00:01:00.000Z')
   assert.equal(restored.migrationWarnings.length, 0)
   assert.equal(restored.latestWorkflowState?.phase, 'done')
@@ -227,10 +304,28 @@ try {
   assert.deepEqual(restored.blockers, [latestBlocker])
   assert.deepEqual(
     restored.restoredMessages.map((message) => message.role),
-    ['user', 'assistant', 'assistant', 'tool'],
+    ['user', 'assistant', 'assistant', 'tool', 'user'],
   )
   assert.equal(restored.restoredMessages[2].tool_calls?.[0]?.function.name, 'browser_snapshot')
   assert.equal(restored.restoredMessages[3].tool_call_id, 'call_restore_snapshot')
+  assert.match(restored.restoredMessages[4].content, /DURABLE_CONTINUATION_RESUME/)
+  assert.match(restored.restoredMessages[4].content, /current page observation is authoritative/i)
+  assert.equal(restored.latestResumeCapsule?.continuationId, resumeCapsule.continuationId)
+  assert.equal(restored.latestResumeCapsule?.target.runRevision, 1)
+  assert.deepEqual(
+    restored.actionLedgerEntries.map((entry) => entry.status),
+    ['proposed', 'authorized'],
+  )
+  const restoredActionLedger = ActionLedger.restore(restored.actionLedgerEntries)
+  assert.equal(restoredActionLedger.latest('turn_001:submit_call')?.status, 'authorized')
+  assert.deepEqual(restoredActionLedger.outcomes(['submit']), [{
+    actionKind: 'submit',
+    outcome: 'not_performed',
+  }, {
+    actionKind: 'submit',
+    outcome: 'approved',
+    actionId: 'turn_001:submit_call',
+  }])
 
   const restoredFromSessionObject = await restoreSessionState({
     session: blockedSession,
@@ -279,6 +374,35 @@ try {
   assert.equal(fallbackRestored.latestWorkflowEvaluation, undefined)
   assert.deepEqual(fallbackRestored.missingCriteria, [gateFallbackCriterion])
   assert.deepEqual(fallbackRestored.blockers, [gateFallbackBlocker])
+
+  const corruptLedgerSession = await store.create({
+    sessionId: 'restore-corrupt-ledger-session',
+    runId: 'restore-corrupt-ledger-run',
+    source: 'test',
+    goal: 'Reject a corrupt durable action ledger.',
+    mode: 'test',
+    now: '2026-06-30T00:05:00.000Z',
+  })
+  const corruptLedgerRecorder = new FileSessionRecorder(store, corruptLedgerSession)
+  await corruptLedgerRecorder.event({
+    type: 'action_ledger_updated',
+    data: {
+      entry: {
+        schemaVersion: 'action-ledger-entry/v1',
+        sequence: 1,
+        actionId: 'corrupt-action',
+        actionKind: 'submit',
+        toolName: 'browser_click',
+        status: 'forged_performed',
+        recordedAt: '2026-06-30T00:05:01.000Z',
+      },
+    },
+  })
+  await assert.rejects(
+    restoreSessionState({ session: corruptLedgerSession }),
+    /invalid action ledger event/i,
+    'corrupt action history must fail closed instead of being forgotten during resume',
+  )
 
   await appendJsonLine(session.transcriptPath, {
     version: 99,
