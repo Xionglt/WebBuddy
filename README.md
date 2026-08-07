@@ -13,7 +13,7 @@ Web Buddy 是一个运行在本地的通用 Web Agent Runtime。你可以给它�
 
 一句话理解：**Web Buddy 是夹在大模型与真实网页之间的“执行与治理层”。**
 
-[快速开始](#快速开始) · [核心设计](#核心设计) · [安全边界](#安全边界) · [Public SDK](#public-sdk) · [仓库结构](#仓库结构)
+[快速开始](#快速开始) · [核心设计](#核心设计) · [记忆机制](#4-记忆机制) · [安全边界](#安全边界) · [Public SDK](#public-sdk) · [仓库结构](#仓库结构)
 
 ## 它能做什么
 
@@ -228,7 +228,34 @@ Web Buddy 把状态拆开管理，避免用一大段聊天记录同时承担所�
 
 Memory 也不是无限追加的文本。项目为记忆提供 scope、revision、TTL、provenance、冲突、supersede 和 tombstone 生命周期，并在写入前应用敏感信息与权限策略。
 
-### 4. 工具系统：工具不只是一个可调用函数
+### 4. 记忆机制
+
+Web Buddy 会区分“恢复当前任务”和“跨任务复用经验”：Session / Transcript 是本次运行的事实源，用于断点续跑；`MemoryLifecycle` 管理可在后续任务中召回的长期记忆。长期记忆主要分为：
+
+| 类型 | 例子 | 默认有效期 |
+| --- | --- | --- |
+| Preference | “比较结果优先按总价排序” | 180 天 |
+| Constraint | “不要向第三方站点传文件” | 365 天 |
+| Procedure | 某个站点和工作流下已验证的页面操作经验 | 30 天 |
+
+在显式启用自动记忆后，每轮 Agent 交互完成时都会经过一条受控写入链路：
+
+1. 只从用户的明确表达、`ask_user` 回答和成功的白名单只读观测中组装有界证据。
+2. 模型只生成结构化候选记忆，并必须引用原文 `evidenceQuote`；它没有直接写入权。
+3. Runtime 校验引文、来源和置信度，拒绝凭证、联系方式、身份信息、正向授权和提示注入；通过校验的原始引文才会成为记忆内容。
+4. 写入继续经过 ActionLedger 和独立 Policy，使用 `memoryKey` 去重；内容变化时创建新 revision 并 supersede 旧版本。
+
+召回时会再次检查 owner scope、TTL、站点、Workflow 和当前页面的语义指纹；过期、冲突或页面已漂移的 Procedure 不会进入模型上下文。记忆可以收紧行为，但永远不能扩大当前会话的工具权限。自动抽取失败也不会阻断前台任务。
+
+自动记忆默认关闭，可在租户 Runtime 中显式启用：
+
+```bash
+WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
+```
+
+完整的写入、召回、页面指纹、权限继承与可观测设计见 [`packages/web-buddy/docs/memory-system.md`](packages/web-buddy/docs/memory-system.md)。
+
+### 5. 工具系统：工具不只是一个可调用函数
 
 所有工具先进入统一 Catalog，再由 Local Runtime 或 MCP Adapter 暴露。一个工具会声明参数、风险等级、读写属性、资源占用和执行方式。
 
@@ -257,7 +284,7 @@ Memory 也不是无限追加的文本。项目为记忆提供 scope、revision�
 
 浏览器工具覆盖页面打开、结构化 snapshot、表单审计、截图、点击、输入、选择、按键、等待和文件上传；`ask_user`、`plan_form_fill`、`resume_query`、`agent_done` 等任务工具则负责人与任务层的协作。
 
-### 5. Skill 设计：把场景经验变成可组合能力
+### 6. Skill 设计：把场景经验变成可组合能力
 
 Skill 是带 JSON manifest 的 `SKILL.md`。它可以描述：
 
@@ -310,7 +337,7 @@ Skill 只能补充或收紧行为，不能放松 `final_submit`、登录、验�
 
 项目还包含 Skill Candidate 流程，用来从成功运行中提炼候选经验；候选项需要经过投影、验证和审核，不能直接把一次偶然成功升级成永久规则。
 
-### 6. 表单理解：先计划，再填写，再回读
+### 7. 表单理解：先计划，再填写，再回读
 
 表单任务不是“看到 label 就让模型猜值”：
 
@@ -548,6 +575,7 @@ npm run test:compaction-pipeline
 npm run test:skill-system
 npm run test:memory-lifecycle
 npm run test:memory-eval
+npm run test:automatic-memory
 npm run test:capability-disclosure
 npm run test:permission-modes
 npm run test:workflow
@@ -602,6 +630,7 @@ docker compose up agent
 
 ## 延伸阅读
 
+- [`packages/web-buddy/docs/memory-system.md`](packages/web-buddy/docs/memory-system.md)：长期记忆的自动抽取、安全写入、召回治理与评估指标
 - [`packages/web-buddy/README.md`](packages/web-buddy/README.md)：更完整的命令、安全契约与运行产物说明
 - [`packages/web-buddy/src/runtime/README.md`](packages/web-buddy/src/runtime/README.md)：Runtime 目录与实现边界
 - [`packages/web-buddy/src/runtime/local/README.md`](packages/web-buddy/src/runtime/local/README.md)：本地 Agent Loop 的执行链路
