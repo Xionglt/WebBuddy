@@ -156,6 +156,54 @@ try {
   assert(active.some((record) => record.content.statement === '默认使用中英双语回答'))
   assert(active.some((record) => record.content.effect === 'procedure'))
 
+  const aliasCandidate = structuredClone(correctedReport.candidates[0])
+  aliasCandidate.memoryKey = 'reply.locale'
+  aliasCandidate.memory.memoryKey = 'reply.locale'
+  const semanticSkip = await sink.write(aliasCandidate, {
+    llm: conflictModel({
+      action: 'skip',
+      relatedEntryIds: [corrected.entryId],
+      confidence: 0.97,
+    }),
+  })
+  assert.equal(semanticSkip.status, 'deduplicated')
+  assert.equal(semanticSkip.entryId, corrected.entryId)
+
+  const chineseOnlyEvidence = automaticMemoryEvidence({
+    evidenceId: 'turn-4:user-correction',
+    contentId: 'source-user-correction-2',
+    source: 'user_correction',
+    content: '更正：以后默认只使用中文回答。',
+    capturedAt: '2026-08-06T02:00:00.000Z',
+    origin: 'user',
+  })
+  const chineseOnlyReport = await extractAutomaticMemories(turnInput({
+    evidence: [chineseOnlyEvidence],
+    modelCandidates: [{
+      effect: 'preference',
+      memoryKey: 'reply.locale',
+      statement: '用户改为仅使用中文回答。',
+      evidenceId: chineseOnlyEvidence.evidenceId,
+      evidenceQuote: '默认只使用中文回答',
+      confidence: 0.98,
+    }],
+  }))
+  const semanticUpdate = await sink.write(chineseOnlyReport.candidates[0], {
+    llm: conflictModel({
+      action: 'update',
+      relatedEntryIds: [corrected.entryId],
+      confidence: 0.96,
+    }),
+  })
+  assert.equal(semanticUpdate.status, 'written', JSON.stringify(semanticUpdate))
+  assert.deepEqual(semanticUpdate.supersededEntryIds, [corrected.entryId])
+  const afterSemanticUpdate = await lifecycle.service.list({
+    schemaVersion: 'memory-lifecycle-list/v2',
+    scope: { kind: 'user', tenantId: actorScope.tenantId, userId: actorScope.userId },
+  })
+  assert(afterSemanticUpdate.some((record) => record.content.statement === '默认只使用中文回答'))
+  assert(!afterSemanticUpdate.some((record) => record.entryId === corrected.entryId))
+
   const forgedAuthorization = structuredClone(preference.candidates[0])
   forgedAuthorization.memory.effect = 'authorization'
   forgedAuthorization.memory.memoryKey = 'permission.submit'
@@ -184,6 +232,18 @@ function turnInput({ evidence, modelCandidates, currentUrl, page, form }) {
     form,
     assistantContext: 'The Agent completed one bounded turn.',
     evidence,
+  }
+}
+
+function conflictModel(decision) {
+  return {
+    async generateJson(system, user, options) {
+      assert.match(system, /store\|update\|merge\|skip/)
+      assert.equal(options.promptCache, false)
+      const input = JSON.parse(user)
+      assert(input.candidates.some((item) => decision.relatedEntryIds.includes(item.entryId)))
+      return decision
+    },
   }
 }
 

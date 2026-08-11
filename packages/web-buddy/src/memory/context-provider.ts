@@ -1,4 +1,5 @@
 import type { ContentTrust, ContextItem, OwnerScope } from '../task/contracts.js'
+import { createHash } from 'node:crypto'
 import type {
   MemoryLifecycleRecord,
   MemoryRetrievalResult,
@@ -13,6 +14,10 @@ import {
   type WebMemoryGovernanceDecision,
   type WebMemoryGovernanceReason,
 } from './web-memory-governance.js'
+import {
+  projectBrowserScenarioCapsules,
+  type ProjectedBrowserScenarioCapsule,
+} from './browser-scenario-capsule.js'
 
 export interface LifecycleMemoryContextInput {
   service: MemoryLifecycleService
@@ -25,6 +30,7 @@ export interface LifecycleMemoryContextInput {
   currentUrl?: string
   workflow?: string
   pageFingerprint?: PageSemanticFingerprint
+  projectionMode?: 'atomic' | 'scenario'
 }
 
 export interface LifecycleMemoryGovernanceSummary {
@@ -75,14 +81,95 @@ export async function retrieveLifecycleMemoryContextBatch(
         pageFingerprint: input.pageFingerprint,
       }),
     }))
-  const contextItems = governed
-    .filter((item) => item.governance.status !== 'rejected')
-    .map((item) => memoryRecordContextItem(item.record, input, item.governance))
+  const selected = governed.filter((item) => item.governance.status !== 'rejected')
+  const contextItems = input.projectionMode === 'scenario'
+    ? scenarioContextItems(selected, input)
+    : selected.map((item) => memoryRecordContextItem(item.record, input, item.governance))
   return {
     status: 'retrieved',
     retrieval,
     contextItems,
-    governance: governanceSummary(governed.map((item) => item.governance), contextItems.length),
+    governance: governanceSummary(governed.map((item) => item.governance), selected.length),
+  }
+}
+
+function scenarioContextItems(
+  governed: ReadonlyArray<{
+    record: Readonly<MemoryLifecycleRecord>
+    governance: WebMemoryGovernanceDecision
+  }>,
+  input: LifecycleMemoryContextInput,
+): ContextItem[] {
+  const scenarioMemories = governed
+    .filter((item): item is typeof item & { record: Readonly<MemoryLifecycleRecord> & {
+      content: NonNullable<MemoryLifecycleRecord['content']>
+    } } => isEvidenceBoundedWebMemory(item.record.content))
+    .map((item) => ({
+      record: item.record,
+      memory: item.record.content as ReturnType<typeof governedWebMemoryContent>['memory'],
+      governance: item.governance,
+    }))
+  const scenarioIds = new Set(scenarioMemories.map((item) => item.record.entryId))
+  const genericItems = governed
+    .filter((item) => !scenarioIds.has(item.record.entryId))
+    .map((item) => memoryRecordContextItem(item.record, input, item.governance))
+  const capsules = projectBrowserScenarioCapsules(scenarioMemories)
+    .map((capsule) => scenarioCapsuleContextItem(capsule, input))
+  return [...capsules, ...genericItems]
+}
+
+function scenarioCapsuleContextItem(
+  projected: ProjectedBrowserScenarioCapsule,
+  input: Pick<LifecycleMemoryContextInput, 'runId' | 'revision' | 'sessionId'>,
+): ContextItem {
+  const records = [...projected.records]
+  const transformedFrom = records.map((record) => record.contentVersionId)
+  const parentContentIds = [...new Set(records.flatMap((record) => (
+    [record.contentVersionId, ...(record.provenance?.parentContentIds ?? [])]
+  )))]
+  const capturedAt = records.map((record) => record.updatedAt).sort().at(-1)
+    ?? projected.capsule.latestEvidenceAt
+  const digest = createHash('sha256').update(JSON.stringify(projected.capsule)).digest('hex')
+  return {
+    schemaVersion: 'context-item/v1',
+    id: `lifecycle-memory.${projected.capsule.capsuleId}`,
+    kind: 'browser_scenario_memory',
+    content: projected.capsule,
+    origin: 'derived',
+    trust: 'derived_untrusted',
+    instructionAuthority: 'data_only',
+    sensitivity: projected.sensitivity,
+    provenance: {
+      capturedAt,
+      parentContentIds,
+      runId: input.runId,
+      sessionId: input.sessionId,
+      sha256: digest,
+      ...(projected.capsule.applicability.urlOrigin
+        ? { sourceOrigin: projected.capsule.applicability.urlOrigin }
+        : {}),
+    },
+    allowedUses: ['prompt'],
+    freshness: {
+      validity: 'current',
+      revision: input.revision,
+      ...(projected.expiresAt ? { expiresAt: projected.expiresAt } : {}),
+    },
+    retention: {
+      scope: 'session',
+      deleteWithSession: true,
+    },
+    sanitization: {
+      policyId: 'browser-scenario-capsule/v1',
+      status: 'unchanged',
+      redactedFields: [],
+      instructionNeutralized: true,
+      transformedFrom,
+    },
+    integrity: {
+      immutable: true,
+      digestVerified: true,
+    },
   }
 }
 

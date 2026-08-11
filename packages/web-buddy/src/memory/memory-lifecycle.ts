@@ -29,6 +29,7 @@ import {
 } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { rankLocalLexical } from './local-lexical-ranking.js'
 
 export const MEMORY_LIFECYCLE_RECORD_SCHEMA_VERSION = 'memory-lifecycle-record/v2' as const
 export const MEMORY_LIFECYCLE_STORE_SCHEMA_VERSION = 'memory-lifecycle-store/v1' as const
@@ -627,11 +628,7 @@ export class GovernedMemoryRetriever {
     const request = parseRetrieveRequest(value, this.#actorScope)
     const candidates = await this.#store.list(request.scope)
     const candidateMap = new Map(candidates.map((record) => [record.entryId, record]))
-    const keywordScores = new Map<string, number>()
-    for (const record of candidates) {
-      const score = keywordScore(record, request.query)
-      if (score > 0) keywordScores.set(record.entryId, score)
-    }
+    const keywordScores = rankLocalLexical(request.query, candidates)
 
     let mode: MemoryRetrievalResult['mode'] = 'keyword'
     let embeddingScores = new Map<string, number>()
@@ -656,13 +653,20 @@ export class GovernedMemoryRetriever {
       }
     }
 
+    const keywordRanks = rankPositions(keywordScores)
+    const embeddingRanks = rankPositions(embeddingScores)
     const scored = candidates
       .map((record) => {
         const keyword = keywordScores.get(record.entryId) ?? 0
         const embedding = embeddingScores.get(record.entryId) ?? 0
         return {
           record,
-          score: keyword + embedding,
+          score: this.#provider && mode === 'hybrid'
+            ? reciprocalRankFusionScore(
+                keywordRanks.get(record.entryId),
+                embeddingRanks.get(record.entryId),
+              )
+            : keyword,
           reason: keyword > 0 && embedding > 0
             ? 'keyword+embedding' as const
             : embedding > 0
@@ -1380,13 +1384,17 @@ function validateVisibility(value: StoreVisibility): StoreVisibility {
   }
 }
 
-function keywordScore(record: Readonly<MemoryLifecycleRecord>, query: string): number {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
-  if (terms.length === 0) return record.confidence
-  const text = JSON.stringify(record.content).toLowerCase()
-  const matches = terms.filter((term) => text.includes(term)).length
-  if (matches === 0) return 0
-  return matches / terms.length + record.confidence * 0.1
+function rankPositions(scores: ReadonlyMap<string, number>): Map<string, number> {
+  return new Map([...scores.entries()]
+    .filter(([, score]) => score > 0)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([entryId], index) => [entryId, index + 1]))
+}
+
+function reciprocalRankFusionScore(keywordRank?: number, embeddingRank?: number): number {
+  const rankConstant = 60
+  return (keywordRank ? 1 / (rankConstant + keywordRank) : 0)
+    + (embeddingRank ? 1 / (rankConstant + embeddingRank) : 0)
 }
 
 function validateEmbeddingMatches(

@@ -93,20 +93,27 @@ Procedure Memory 即使通过指纹校验也只是 `advisory`，主流程仍需�
 
 相同 `memoryKey + applicability + statement` 不重复写入。如果同一 `memoryKey` 出现了新的原文证据，创建新版本时会携带旧版本的 `entryId + expectedRevision`，通过 CAS 和 `supersedes` 原子替换。并发纠错中的过期 Revision 会返回 Conflict，不会覆盖新记忆。
 
+不同 `memoryKey` 也可能表达同一件事。自动写入会先在相同 `effect + applicability` 中用本地 BM25 选出小候选集，再让当前 Agent 模型只提出 `store / update / merge / skip` 关系。模型返回的 ID 必须来自候选集；低置信度或无效输出降级为 `store`，最终提交仍由 MemoryLifecycle 的 Revision/CAS 保护。
+
 ## 8. 召回与注入
 
 ```text
 MemoryLifecycle Retrieve
   -> Scope / TTL / Tombstone / Superseded 过滤
+  -> 中文字符 n-gram BM25
+  -> 可选 Embedding Provider + RRF
   -> Auth / Secret 过滤
   -> Site / Path / Workflow 校验
   -> Page Fingerprint 校验
   -> eligible / advisory / rejected
-  -> data_only ContextItem
+  -> BrowserScenarioCapsule 结构化投影
+  -> derived_untrusted + data_only ContextItem
   -> Agent Prompt
 ```
 
-长期记忆注入 Prompt 时固定使用 `origin=memory`、`instructionAuthority=data_only`。即使记忆最初来自用户，召回后也不会被当成新的授权指令。
+本地关键词检索使用无依赖 BM25：英文和逻辑 Key 按词及标点切分，中文、日文和韩文使用重叠字符 bigram，不需要本地 Embedding 模型。如果注入 Embedding Provider，词法排名与向量排名通过 RRF 融合，Provider 失败仍会回退到 BM25。
+
+Web Runtime 会把同一 `origin + pathPattern + workflow + pageType` 下的原子记忆投影为 `BrowserScenarioCapsule`。Capsule 只包含已通过治理的 statement、governance 结果和 `atomRefs`，不生成新事实。因为它是多条 Memory 的派生视图，Context 固定使用 `origin=derived`、`trust=derived_untrusted`、`instructionAuthority=data_only`。原子模式仍保留给 SDK 和兼容性测试。
 
 ## 9. 可观测性
 

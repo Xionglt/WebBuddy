@@ -50,6 +50,8 @@ export type {
   PolicyEnforcedMemoryWriter,
 } from './memory-write-policy.js'
 export * from './memory-lifecycle.js'
+export * from './local-lexical-ranking.js'
+export * from './browser-scenario-capsule.js'
 export { retrieveLifecycleMemoryContext } from './context-provider.js'
 export * from './web-memory-governance.js'
 export * from './automatic-memory.js'

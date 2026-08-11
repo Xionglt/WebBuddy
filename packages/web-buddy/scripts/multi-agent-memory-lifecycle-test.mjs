@@ -183,6 +183,22 @@ try {
   assert.equal(touched.lastUsedAt, '2026-07-18T00:00:01.000Z')
   assert.equal(touched.revision, 1)
 
+  const chinese = await restarted.service.create(createInput({
+    writeRequest: directUserWrite('chinese-resume-preference', {
+      kind: 'preference',
+      value: '海外岗位默认使用中文简历',
+    }),
+    confidence: 0.95,
+  }))
+  assert.equal(chinese.status, 'created')
+  const chineseRetrieved = await restarted.service.retrieve({
+    schemaVersion: 'memory-lifecycle-retrieve/v2',
+    scope: userScope,
+    query: '投递时使用中文简历',
+    maxResults: 5,
+  })
+  assert.equal(chineseRetrieved.records[0]?.record.entryId, chinese.record.entryId)
+
   const expiring = await restarted.service.create(createInput({
     writeRequest: directUserWrite('expiring', {
       kind: 'temporary',

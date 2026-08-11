@@ -1212,7 +1212,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         'Automatic long-term Memory was explicitly enabled by the execution host.',
       ))
       try {
-        const result = await sink.write(candidate)
+        const result = await sink.write(candidate, { llm })
         if (result.status === 'written') {
           await recordActionLedgerEntry(actionLedger.perform(actionId, 'Evidence-bounded Memory persisted.'))
           ctx.trace.agentTrace?.recordEvent('memory_updated', {
@@ -1225,6 +1225,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             entryId: result.entryId,
             revision: result.revision,
             supersededEntryId: result.supersededEntryId,
+            supersededEntryIds: result.supersededEntryIds,
           })
           await sessionEvent({
             type: 'memory_updated',
@@ -1238,6 +1239,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
               entryId: result.entryId,
               revision: result.revision,
               supersededEntryId: result.supersededEntryId,
+              supersededEntryIds: result.supersededEntryIds,
             },
           })
         } else if (result.status === 'deduplicated') {

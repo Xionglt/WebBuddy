@@ -552,6 +552,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
               sessionId,
               currentUrl: currentUrl ?? input.startUrl,
               workflow: input.goal.scenario,
+              projectionMode: 'scenario',
               ...(pageFingerprint ? { pageFingerprint } : {}),
             })
           },

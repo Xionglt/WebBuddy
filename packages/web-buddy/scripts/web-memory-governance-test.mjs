@@ -111,6 +111,43 @@ assert.equal(procedureContext.content.governance.canExpandPermissions, false)
 assert.equal(procedureContext.instructionAuthority, 'data_only')
 for (const item of batch.contextItems) assert.doesNotThrow(() => validateContextItem(item))
 
+const scenarioRetrieval = {
+  schemaVersion: 'memory-lifecycle-retrieval-result/v2',
+  mode: 'keyword',
+  records: [
+    ranked(record('scenario-procedure', procedure)),
+    ranked(record('scenario-preference', webMemory('preference', { pageFingerprint: saved }))),
+  ],
+}
+const scenarioBatch = await retrieveLifecycleMemoryContextBatch({
+  service: { async retrieve() { return scenarioRetrieval } },
+  ownerScope: { schemaVersion: 'owner-scope/v1', tenantId: 'tenant-a', userId: 'user-a' },
+  query: 'apply using remembered preferences',
+  runId: 'run-current',
+  revision: 4,
+  sessionId: 'session-current',
+  maxResults: 5,
+  currentUrl: 'https://jobs.example/apply/999',
+  workflow: 'job_application',
+  pageFingerprint: reordered,
+  projectionMode: 'scenario',
+})
+assert.equal(scenarioBatch.status, 'retrieved')
+assert.equal(scenarioBatch.contextItems.length, 1, 'same-scope atoms should share one deterministic scenario capsule')
+const scenarioContext = scenarioBatch.contextItems[0]
+assert.equal(scenarioContext.kind, 'browser_scenario_memory')
+assert.equal(scenarioContext.origin, 'derived')
+assert.equal(scenarioContext.memory, undefined, 'a capsule is a projection, not a new authoritative Memory')
+assert.equal(scenarioContext.content.schemaVersion, 'browser-scenario-capsule/v1')
+assert.equal(scenarioContext.content.preferences.length, 1)
+assert.equal(scenarioContext.content.procedures.length, 1)
+assert.deepEqual(
+  scenarioContext.content.atomRefs.map((item) => item.entryId).sort(),
+  ['scenario-preference', 'scenario-procedure'],
+)
+assert.equal(scenarioContext.instructionAuthority, 'data_only')
+assert.doesNotThrow(() => validateContextItem(scenarioContext))
+
 console.log('web-memory-governance-test: PASS')
 
 function fingerprint({ fields, actions }) {
