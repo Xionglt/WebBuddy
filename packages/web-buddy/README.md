@@ -154,40 +154,6 @@ npm run test:mvp
 | `npm run demo:match` | Read-only Alibaba multi-page list/detail matching as a domain Skill example. | Threshold-gated; does not final-submit. |
 | `npm run alibaba:apply:raw` | Complex recruiting workflow through the same generic Web Buddy runtime. | Requires model and human handoff for login/captcha/final submit. |
 
-The invoice POC also has a crash-recovery reliability track: external actions are
-journaled before execution, reconciled against a read-only business-key probe,
-and require immutable receipts before Completion. On adapted sites, strict mode
-also requires every opaque click to be classified as an external action or
-explicitly `non_external`; an L1-looking click upgraded to an external write is
-re-evaluated at L3, or L4/critical for payment. The adapter factory is an
-owner-scoped service-internal trust boundary, not a public npm callback ABI.
-Ordinary `approve` still stops at a reconciled external-effect boundary. The local Host
-can exercise `approve_and_execute`, but only for a single v2-bound action with
-strict reconciliation, authoritative fresh-run preflight, a durable Session,
-a registered Probe, a reviewable effect preview, an explicit
-`allowExternalActionExecution` capability
-(`submit/payment` also require `allowFinalSubmitExecution`), and an exact
-`approval-binding/v2`; all v2-reconciled external sinks reject
-the old awareness binding and cross-kind approval reuse. Missing preflight keeps
-the request awareness-only; a non-durable Session fails before
-Probe/approval/tool. The owner-scoped Web Control Service currently rejects
-enabling machine final-submit until v3 binds
-the Runtime-owned owner scope into external identity. The trusted service adapter
-requires authoritative preflight before approval for machine execution: an
-already committed business key becomes a zero-click receipt-backed no-op, while
-an ambiguous query fails closed. This suppresses
-sequential duplicate Runs but is not an atomic cross-Run claim; concurrent writers
-still require a shared claim, a single-writer constraint, or downstream idempotency. See
-[`INTERVIEW_EXTERNAL_ACTION_CHEATSHEET.md`](INTERVIEW_EXTERNAL_ACTION_CHEATSHEET.md)
-for the compact interview answer,
-[`INTERVIEWER_SIGNAL_MAP.md`](INTERVIEWER_SIGNAL_MAP.md) for the current official
-job/engineering-signal-to-evidence mapping,
-[`EXTERNAL_ACTION_RECONCILIATION.md`](EXTERNAL_ACTION_RECONCILIATION.md) for the
-implementation/evidence boundary and
-[`REAL_PORTAL_ADAPTER_PILOT.md`](REAL_PORTAL_ADAPTER_PILOT.md) for the query-only
-first production-validation plan. The checked-in results are controlled fixtures,
-not customer-portal success metrics.
-
 ## Scenario Extension: Resume and Matching v2
 
 Resume inputs for CLI/SDK recruiting adapters are `.pdf`, `.json`, and `.txt`. The v2 SDK
@@ -343,7 +309,7 @@ bootstrap snapshot.
 Automatic long-term Memory extraction is an explicit tenant-runtime opt-in:
 
 ```bash
-WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)" WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
+WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
 ```
 
 At each completed Agent turn, the extractor first builds a bounded evidence
@@ -427,7 +393,7 @@ their Context Envelopes and outputs as immutable session artifacts, and remains
 off by default:
 
 ```bash
-WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)" WEB_BUDDY_ASYNC_TASKS_ENABLED=true npm run web
+WEB_BUDDY_ASYNC_TASKS_ENABLED=true npm run web
 ```
 
 The Main Agent remains the only browser writer and must verify every Subagent
@@ -598,8 +564,6 @@ npm run test:job-match-threshold   # threshold stops low matches before apply
 npm run test:permission-modes # safe/review/trusted/autopilot rules
 npm run test:direct-submit-flow    # direct-submit review fixtures
 npm run test:invoice-portal-poc    # offline product POC and approval-boundary flow
-npm run test:action-reconciliation # crash matrix, durability directions, and false-terminal eval
-npm run test:invoice-runtime-single # preflight, exact execution approval, receipt, and fresh-Run no-op
 npm run test:risk-timeline    # risk-decisions artifact and counters
 npm run test:e2e-auto-apply   # localhost sandbox auto-apply
 npm run test:mvp              # full MVP regression entry

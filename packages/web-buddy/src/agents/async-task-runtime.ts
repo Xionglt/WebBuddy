@@ -126,7 +126,6 @@ export interface AsyncTaskRuntimeOptions {
   defaultTimeoutMs?: number
   defaultLeaseDurationMs?: number
   maxWaitMs?: number
-  maxRepeatedNeverRetryFailures?: number
   runnerLimits?: Partial<RunnerLimits>
   initialActionSeq?: number
   now?: () => Date
@@ -276,7 +275,6 @@ export class AsyncTaskRuntime {
   private readonly defaultTimeoutMs: number
   private readonly defaultLeaseDurationMs: number
   private readonly maxWaitMs: number
-  private readonly maxRepeatedNeverRetryFailures: number
   private readonly runnerLimits: RunnerLimits
   private readonly initialActionSeq: number
   private readonly now: () => Date
@@ -305,10 +303,6 @@ export class AsyncTaskRuntime {
     this.defaultTimeoutMs = positiveInteger(options.defaultTimeoutMs ?? 120_000, 'defaultTimeoutMs')
     this.defaultLeaseDurationMs = positiveInteger(options.defaultLeaseDurationMs ?? 150_000, 'defaultLeaseDurationMs')
     this.maxWaitMs = nonNegativeInteger(options.maxWaitMs ?? 15_000, 'maxWaitMs')
-    this.maxRepeatedNeverRetryFailures = positiveInteger(
-      options.maxRepeatedNeverRetryFailures ?? 2,
-      'maxRepeatedNeverRetryFailures',
-    )
     this.initialActionSeq = nonNegativeInteger(options.initialActionSeq ?? 0, 'initialActionSeq')
     this.now = options.now ?? (() => new Date())
     this.onBackgroundError = options.onBackgroundError
@@ -381,8 +375,6 @@ export class AsyncTaskRuntime {
       leaseDurationMs: this.defaultLeaseDurationMs,
       now: normalized.now,
       })
-
-      this.assertNeverRetryCircuitClosed(graph, task)
 
       const preflight = resolveAgentTaskSpawnV2(graph, task)
       if (preflight.outcome !== 'created') return preflight
@@ -880,26 +872,6 @@ export class AsyncTaskRuntime {
       throw runtimeError('POLICY_VIOLATION', `Background task kind ${String(kind)} is not enabled for this runtime.`)
     }
     return kind
-  }
-
-  private assertNeverRetryCircuitClosed(graph: AgentTaskGraphV2, candidate: AgentTask): void {
-    const candidateRole = builtInRoleBindingForTask(candidate)?.role.id
-    if (!candidateRole) return
-    const failureCounts = new Map<string, number>()
-    for (const task of graph.tasks) {
-      if (task.status !== 'failed' || task.lastError?.retryDisposition !== 'never_retry') continue
-      if (builtInRoleBindingForTask(task)?.role.id !== candidateRole) continue
-      const fingerprint = `${task.lastError.category}:${task.lastError.code}`
-      failureCounts.set(fingerprint, (failureCounts.get(fingerprint) ?? 0) + 1)
-    }
-    const openFailure = [...failureCounts.entries()]
-      .find(([, count]) => count >= this.maxRepeatedNeverRetryFailures)
-    if (!openFailure) return
-    const [fingerprint, count] = openFailure
-    throw runtimeError(
-      'POLICY_VIOLATION',
-      `Session failure circuit is open for built-in role ${candidateRole}: ${fingerprint} repeated ${count} time(s) with never_retry. Inspect evidence or change the task before spawning another worker.`,
-    )
   }
 
   private assertOwnedArtifactRef(ref: ImmutableArtifactRef): void {

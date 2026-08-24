@@ -5,11 +5,7 @@ import {
   type ResumeCapsuleV1,
 } from '../continuation/contracts.js'
 import type { KernelEvent } from '../kernel/kernel-events.js'
-import { ActionLedger, type ActionLedgerEntry } from '../task/action-ledger.js'
-import { validateExternalActionReceiptStorageBinding } from '../task/action-reconciliation-artifact.js'
-import { unresolvedActionEntries, type ExternalActionReconciliationVerdict } from '../task/action-reconciliation.js'
-import { validateArtifactRef, type ArtifactRef } from '../task/contracts.js'
-import type { ToolResultArtifactRef } from '../tools/tool-result-store.js'
+import type { ActionLedgerEntry } from '../task/action-ledger.js'
 import type { CompletionGateDecision } from '../workflow/completion-gate.js'
 import type {
   WorkflowBlocker,
@@ -40,10 +36,6 @@ export interface RestoredSessionState {
   asyncTaskPromptAttachments: TaskNotificationPromptAttachmentV1[]
   latestResumeCapsule?: ResumeCapsuleV1
   actionLedgerEntries: ActionLedgerEntry[]
-  unresolvedActions: ActionLedgerEntry[]
-  externalActionReceiptArtifacts: ArtifactRef[]
-  externalActionReceiptStorageRefs: ToolResultArtifactRef[]
-  externalActionReconciliationVerdicts: ExternalActionReconciliationVerdict[]
 }
 
 export type RestoreSessionStateInput =
@@ -118,8 +110,6 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
     }
   }
 
-  const actionLedgerEntries = actionLedgerEntriesFrom(events)
-  const externalActionReceipts = externalActionReceiptsFrom(events, session.runId, session.sessionId)
   return {
     schemaVersion: 'restored-session-state/v1',
     session: { ...session },
@@ -142,11 +132,7 @@ export async function restoreSessionState(input: RestoreSessionStateInput): Prom
       [],
     asyncTaskPromptAttachments,
     ...(latestResumeCapsule ? { latestResumeCapsule } : {}),
-    actionLedgerEntries,
-    unresolvedActions: unresolvedActionEntries(actionLedgerEntries),
-    externalActionReceiptArtifacts: externalActionReceipts.artifacts,
-    externalActionReceiptStorageRefs: externalActionReceipts.storageRefs,
-    externalActionReconciliationVerdicts: externalActionReceipts.verdicts,
+    actionLedgerEntries: actionLedgerEntriesFrom(events),
   }
 }
 
@@ -234,185 +220,7 @@ function actionLedgerEntriesFrom(events: readonly KernelEvent[]): ActionLedgerEn
     }
     entries.push(structuredClone(entry))
   }
-  // Never expose unresolvedActions or receipt bindings from a merely
-  // syntactically valid but impossible/forged state history.
-  ActionLedger.restore(entries)
   return entries
-}
-
-function externalActionReceiptsFrom(
-  events: readonly KernelEvent[],
-  runId: string,
-  sessionId: string,
-): {
-  artifacts: ArtifactRef[]
-  storageRefs: ToolResultArtifactRef[]
-  verdicts: ExternalActionReconciliationVerdict[]
-} {
-  const artifacts = new Map<string, ArtifactRef>()
-  const storageRefs = new Map<string, ToolResultArtifactRef>()
-  const verdicts = new Map<string, ExternalActionReconciliationVerdict>()
-  const previousActionEntries = new Map<string, ActionLedgerEntry>()
-  for (const event of events) {
-    if (event.type !== 'action_ledger_updated') continue
-    const entry = event.data?.entry
-    const receiptArtifact = event.data?.receiptArtifact
-    const receiptStorageRef = event.data?.receiptStorageRef
-    const reconciliation = event.data?.reconciliation
-    const priorEntry = isActionLedgerEntry(entry)
-      ? previousActionEntries.get(entry.actionId)
-      : undefined
-    if (isActionLedgerEntry(entry)) {
-      previousActionEntries.set(entry.actionId, structuredClone(entry))
-    }
-    if (isActionLedgerEntry(entry)
-      && entry.status === 'committed'
-      && entry.externalBinding !== undefined) {
-      if (receiptArtifact === undefined) {
-        throw new Error(
-          `Committed external action ${entry.actionId} is missing its authoritative receipt artifact.`,
-        )
-      }
-      if (!isCommittedReconciliationForEntry(reconciliation, entry, priorEntry)) {
-        throw new Error(
-          `Committed external action ${entry.actionId} is missing a matching reconciliation verdict.`,
-        )
-      }
-    }
-    if (receiptStorageRef !== undefined && receiptArtifact === undefined) {
-      throw new Error('External action receipt storage cannot exist without its public artifact reference.')
-    }
-    if (receiptArtifact === undefined) continue
-    if (!isActionLedgerEntry(entry) || entry.status !== 'committed') {
-      throw new Error('External action receipt must be bound to a committed ledger event.')
-    }
-    const rawArtifact = receiptArtifact
-    if (!isRecord(rawArtifact)
-      || !isRecord(rawArtifact.binding)
-      || !Number.isSafeInteger(rawArtifact.binding.revision)) {
-      throw new Error('Durable session contains an invalid external action receipt artifact.')
-    }
-    const artifact = rawArtifact as unknown as ArtifactRef
-    validateArtifactRef(artifact, runId, Number(rawArtifact.binding.revision))
-    if (artifact.kind !== 'external_action_receipt'
-      || artifact.payloadSchemaVersion !== 'external-action-receipt/v1'
-      || artifact.producer.id !== 'external-action-reconciliation'
-      || artifact.producer.version !== '1'
-      || artifact.origin !== 'tool'
-      || artifact.trust !== 'trusted_runtime'
-      || artifact.requiresMainWorkflowVerification
-      || !artifact.authoritativeCompletionEvidence
-      || artifact.binding.actionSeq !== entry.sequence
-      || artifact.binding.externalBusinessKey !== entry.externalBinding?.businessKey
-      || artifact.parentEvidenceIds.length !== 0
-      || artifact.parentArtifactIds.length !== 0) {
-      throw new Error('Durable session contains an invalid external action receipt artifact.')
-    }
-    const rawStorageRef = receiptStorageRef
-    if (!isToolResultArtifactRef(rawStorageRef)) {
-      throw new Error('Durable session contains an invalid external action receipt storage reference.')
-    }
-    validateExternalActionReceiptStorageBinding(artifact, rawStorageRef, sessionId, entry)
-    const existing = artifacts.get(artifact.id)
-    if (existing && JSON.stringify(existing) !== JSON.stringify(artifact)) {
-      throw new Error(`Durable session contains conflicting external action receipt ${artifact.id}.`)
-    }
-    const existingStorageRef = storageRefs.get(artifact.id)
-    if (existingStorageRef && JSON.stringify(existingStorageRef) !== JSON.stringify(rawStorageRef)) {
-      throw new Error(`Durable session contains conflicting external action receipt storage ${artifact.id}.`)
-    }
-    if (!isCommittedReconciliationForEntry(reconciliation, entry, priorEntry)) {
-      throw new Error(`External action receipt ${artifact.id} has no matching committed verdict.`)
-    }
-    const verdict = reconciliation as ExternalActionReconciliationVerdict
-    const existingVerdict = verdicts.get(artifact.id)
-    if (existingVerdict && JSON.stringify(existingVerdict) !== JSON.stringify(verdict)) {
-      throw new Error(`Durable session contains conflicting external action verdict ${artifact.id}.`)
-    }
-    artifacts.set(artifact.id, structuredClone(artifact))
-    storageRefs.set(artifact.id, structuredClone(rawStorageRef))
-    verdicts.set(artifact.id, structuredClone(verdict))
-  }
-  return {
-    artifacts: [...artifacts.values()],
-    storageRefs: [...storageRefs.values()],
-    verdicts: [...verdicts.values()],
-  }
-}
-
-function isCommittedReconciliationForEntry(
-  value: unknown,
-  entry: ActionLedgerEntry,
-  priorEntry: ActionLedgerEntry | undefined,
-): boolean {
-  const allowedKeys = new Set([
-    'schemaVersion',
-    'actionId',
-    'businessKey',
-    'state',
-    'observedAt',
-    'verifier',
-    'independentlyObserved',
-    'evidenceIds',
-    'externalReference',
-    'observedEffectDigest',
-    'retrySafe',
-    'summary',
-  ])
-  if (!isRecord(value)
-    || Object.keys(value).some((key) => !allowedKeys.has(key))
-    || value.schemaVersion !== 'external-action-reconciliation/v1'
-    || value.actionId !== entry.actionId
-    || value.businessKey !== entry.externalBinding?.businessKey
-    || value.state !== 'committed'
-    || value.verifier !== entry.externalBinding?.probeId
-    || value.independentlyObserved !== true
-    || typeof value.observedAt !== 'string'
-    || !Number.isFinite(Date.parse(value.observedAt))
-    || new Date(Date.parse(value.observedAt)).toISOString() !== value.observedAt
-    || !priorEntry
-    || priorEntry.actionId !== entry.actionId
-    || Date.parse(value.observedAt) < Date.parse(priorEntry.recordedAt)
-    || Date.parse(value.observedAt) > Date.now() + 5 * 60_000
-    || typeof value.externalReference !== 'string'
-    || value.externalReference.trim() === ''
-    || value.externalReference !== value.externalReference.trim()
-    || value.retrySafe !== undefined
-    || typeof value.summary !== 'string'
-    || value.summary.trim() === ''
-    || !Array.isArray(value.evidenceIds)
-    || value.evidenceIds.length === 0
-    || value.evidenceIds.some((id) => (
-      typeof id !== 'string' || id.trim() === '' || id !== id.trim()
-    ))
-    || new Set(value.evidenceIds).size !== value.evidenceIds.length) {
-    return false
-  }
-  if (entry.externalBinding?.schemaVersion === 'external-action-binding/v2') {
-    return value.observedEffectDigest === entry.externalBinding.effectDigest
-  }
-  return value.observedEffectDigest === undefined
-    || (typeof value.observedEffectDigest === 'string'
-      && /^[a-f0-9]{64}$/i.test(value.observedEffectDigest))
-}
-
-function isToolResultArtifactRef(value: unknown): value is ToolResultArtifactRef {
-  if (!isRecord(value) || value.schemaVersion !== 'tool-result-artifact-ref/v1') return false
-  return typeof value.artifactId === 'string'
-    && typeof value.runId === 'string'
-    && typeof value.sessionId === 'string'
-    && typeof value.toolCallId === 'string'
-    && typeof value.toolName === 'string'
-    && typeof value.kind === 'string'
-    && typeof value.uri === 'string'
-    && value.uri.length > 0
-    && typeof value.mediaType === 'string'
-    && Number.isSafeInteger(value.bytes)
-    && typeof value.sha256 === 'string'
-    && typeof value.createdAt === 'string'
-    && isRecord(value.retention)
-    && typeof value.retention.scope === 'string'
-    && typeof value.sensitivity === 'string'
 }
 
 function isActionLedgerEntry(value: unknown): value is ActionLedgerEntry {
@@ -429,32 +237,6 @@ function isActionLedgerEntry(value: unknown): value is ActionLedgerEntry {
     && ACTION_LEDGER_STATUSES.has(value.status)
     && typeof value.recordedAt === 'string'
     && Number.isFinite(Date.parse(value.recordedAt))
-    && (value.externalBinding === undefined || (
-      isRecord(value.externalBinding)
-      && (value.externalBinding.schemaVersion === 'external-action-binding/v1'
-        || value.externalBinding.schemaVersion === 'external-action-binding/v2')
-      && typeof value.externalBinding.businessKey === 'string'
-      && value.externalBinding.businessKey.length > 0
-      && typeof value.externalBinding.probeId === 'string'
-      && value.externalBinding.probeId.length > 0
-      && (value.externalBinding.schemaVersion === 'external-action-binding/v1'
-        || (typeof value.externalBinding.effectDigest === 'string'
-          && /^[a-f0-9]{64}$/i.test(value.externalBinding.effectDigest)))
-      && Object.keys(value.externalBinding).length
-        === (value.externalBinding.schemaVersion === 'external-action-binding/v1' ? 3 : 4)
-    ))
-    && (value.actionDecision === undefined || (
-      isRecord(value.actionDecision)
-      && value.actionDecision.schemaVersion === 'action-decision-ref/v1'
-      && (value.actionDecision.source === 'task_policy' || value.actionDecision.source === 'human_gate')
-      && typeof value.actionDecision.decisionRef === 'string'
-      && value.actionDecision.decisionRef.trim().length > 0
-      && (value.actionDecision.actionBindingSha256 === undefined
-        || (typeof value.actionDecision.actionBindingSha256 === 'string'
-          && /^[a-f0-9]{64}$/i.test(value.actionDecision.actionBindingSha256)))
-      && Object.keys(value.actionDecision).length
-        === (value.actionDecision.actionBindingSha256 === undefined ? 3 : 4)
-    ))
 }
 
 const ACTION_LEDGER_KINDS = new Set([
@@ -471,12 +253,7 @@ const ACTION_LEDGER_KINDS = new Set([
 const ACTION_LEDGER_STATUSES = new Set([
   'proposed',
   'authorized',
-  'executing',
-  'executed',
   'denied',
-  'committed',
-  'not_committed',
-  'ambiguous',
   'performed',
   'failed',
   'skipped',

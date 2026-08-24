@@ -144,115 +144,6 @@ try {
   await runServiceA.start(cancellingRunId, 'start-cancelling-c4')
   await runServiceA.requestCancel(cancellingRunId, 'request-cancel-c4')
 
-  const approvalDeliveryRunId = 'recovery-approval-delivery-gap'
-  const approvalDeliverySession = await sessions.create({
-    sessionId: 'approval-delivery-session-recovery-c4',
-    runId: approvalDeliveryRunId,
-    source: 'web',
-    goal: 'Submit one invoice only after exact approval.',
-    mode: 'raw',
-  })
-  const approvalDeliverySessionRef = {
-    schemaVersion: 'session-ref/v1',
-    provider: 'file-session-store',
-    id: approvalDeliverySession.sessionId,
-    runId: approvalDeliveryRunId,
-    attempt: 1,
-  }
-  await runServiceA.create(snapshot(approvalDeliveryRunId, false, approvalDeliverySessionRef), {
-    idempotencyKey: 'create-approval-delivery-gap-c4',
-  })
-  await runServiceA.start(approvalDeliveryRunId, 'start-approval-delivery-gap-c4')
-  const approvalDeliveryAction = {
-    ...actionBinding,
-    runId: approvalDeliveryRunId,
-    sessionRef: approvalDeliverySessionRef,
-    actionId: 'approval-delivery-submit-c4',
-    externalBusinessKey: 'opaque:recovery-c4:invoice:delivery-gap',
-    externalEffectDigest: 'e'.repeat(64),
-    externalProbeId: 'invoice-query/v1',
-    externalActionKind: 'submit',
-    externalEffectPreview: '{"invoiceId":"delivery-gap","operation":"submit_invoice"}',
-    actionSeq: 9,
-  }
-  const approvalDeliveryId = 'approval-delivery-gap-c4'
-  await approvalServiceA.enqueue({
-    approvalId: approvalDeliveryId,
-    runId: approvalDeliveryRunId,
-    runRevision: 0,
-    attempt: 1,
-    status: 'pending',
-    actionBinding: approvalDeliveryAction,
-    allowedDecisions: ['approved', 'approved_and_execute', 'denied'],
-    sessionRef: approvalDeliverySessionRef,
-    requestedAt: new Date().toISOString(),
-    expiresAt: '2030-01-01T00:00:00.000Z',
-  }, 'enqueue-approval-delivery-gap-c4')
-  await runServiceA.setPendingApproval(
-    approvalDeliveryRunId,
-    approvalDeliveryId,
-    true,
-    'attach-approval-delivery-gap-c4',
-  )
-  await runServiceA.transition(approvalDeliveryRunId, {
-    to: 'blocked_on_human',
-    idempotencyKey: 'block-approval-delivery-gap-c4',
-    reason: 'Waiting for exact final-submit approval.',
-  })
-  await approvalServiceA.resolve({
-    approvalId: approvalDeliveryId,
-    expectedRecordRevision: 0,
-    expectation: {
-      runId: approvalDeliveryRunId,
-      runRevision: 0,
-      attempt: 1,
-      sessionId: approvalDeliverySession.sessionId,
-      actionId: approvalDeliveryAction.actionId,
-      actionBindingSha256: (await approvalServiceA.get(approvalDeliveryId)).actionBindingSha256,
-      sourceOrigin: approvalDeliveryAction.sourceOrigin,
-      destinationOrigin: approvalDeliveryAction.destinationOrigin,
-    },
-    decision: 'approved_and_execute',
-    idempotencyKey: 'resolve-approval-delivery-gap-c4',
-    nonce: 'nonce-approval-delivery-gap-c4',
-    expiresAt: '2030-01-01T00:00:00.000Z',
-  })
-
-  const pendingWaitRunId = 'recovery-pending-human-wait'
-  await runServiceA.create(snapshot(pendingWaitRunId, false), {
-    idempotencyKey: 'create-pending-human-wait-c4',
-  })
-  await runServiceA.start(pendingWaitRunId, 'start-pending-human-wait-c4')
-  const pendingWaitApprovalId = 'pending-human-wait-c4'
-  const { sessionRef: _oldSessionRef, ...pendingWaitActionBase } = actionBinding
-  await approvalServiceA.enqueue({
-    approvalId: pendingWaitApprovalId,
-    runId: pendingWaitRunId,
-    runRevision: 0,
-    attempt: 1,
-    status: 'pending',
-    actionBinding: {
-      ...pendingWaitActionBase,
-      runId: pendingWaitRunId,
-      actionId: 'pending-human-wait-action-c4',
-      actionSeq: 10,
-    },
-    allowedDecisions: ['approved', 'denied'],
-    requestedAt: new Date().toISOString(),
-    expiresAt: '2030-01-01T00:00:00.000Z',
-  }, 'enqueue-pending-human-wait-c4')
-  await runServiceA.setPendingApproval(
-    pendingWaitRunId,
-    pendingWaitApprovalId,
-    true,
-    'attach-pending-human-wait-c4',
-  )
-  await runServiceA.transition(pendingWaitRunId, {
-    to: 'blocked_on_human',
-    idempotencyKey: 'block-pending-human-wait-c4',
-    reason: 'A still-pending approval remains a valid wait.',
-  })
-
   // Simulate a fresh process by constructing entirely new Store/Service instances.
   const fileRunStoreB = new FileRunStore({ rootDir: controlRoot })
   const runServiceB = new RunService(fileRunStoreB)
@@ -261,7 +152,7 @@ try {
     canRestoreSession: async (record) => Boolean(record.sessionRef && await sessions.get(record.sessionRef.id)),
   })
   const decisions = await recovery.recoverStartupRuns()
-  assert.equal(decisions.length, 6)
+  assert.equal(decisions.length, 5)
   assert.equal((await runServiceB.get(safeRunId))?.state, 'recoverable')
   assert.equal((await runServiceB.get(unsafeRunId))?.state, 'failed')
   assert.equal((await runServiceB.get(missingSessionRunId))?.state, 'failed')
@@ -271,29 +162,6 @@ try {
     'one unknown session version fails only its own run',
   )
   assert.equal((await runServiceB.get(cancellingRunId))?.state, 'failed')
-  const approvalDeliveryRun = await runServiceB.get(approvalDeliveryRunId)
-  assert.equal(approvalDeliveryRun?.state, 'failed')
-  assert.deepEqual(approvalDeliveryRun?.pendingApprovalIds, [])
-  assert.match(approvalDeliveryRun?.reason ?? '', /delivery to the live Agent Loop cannot be proven/i)
-  assert.equal(
-    (await approvalServiceB.get(approvalDeliveryId))?.resolution?.decision,
-    'approved_and_execute',
-    'the durable user decision remains auditable but is never replayed into a new attempt',
-  )
-  assert.equal(
-    (await runServiceB.events(approvalDeliveryRunId)).items.at(-1)?.data?.replayedAction,
-    false,
-    'startup recovery must not turn a durable decision into an implicit external replay',
-  )
-  assert.equal(
-    (await runServiceB.get(pendingWaitRunId))?.state,
-    'blocked_on_human',
-    'an unresolved durable approval remains a valid human wait across restart',
-  )
-  assert.equal(
-    (await approvalServiceB.get(pendingWaitApprovalId))?.status,
-    'pending',
-  )
   assert.equal(
     (await approvalServiceB.get('old-approval-c4'))?.status,
     'cancelled',

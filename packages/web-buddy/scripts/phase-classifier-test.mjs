@@ -69,37 +69,6 @@ assert.equal(
 
 assert.equal(
   classifyObservationPhase({
-    page: page({
-      url: 'https://playwright.dev/docs/auth',
-      title: 'Authentication | Playwright',
-      pageType: 'list',
-      formCount: 0,
-      inputCount: 0,
-      facts: {
-        hasAgreementCheckbox: false,
-        agreementChecked: false,
-        hasApplicationQuotaDialog: false,
-        hasRealUploadInput: false,
-        uploadCandidateCount: 36,
-        submitLikeButtons: [{ tag: 'a', text: 'NextAuto-waiting', visible: true }],
-        likelyApplyEntryButtons: [],
-        likelyFinalSubmitButtons: [],
-        visibleBlockingDialog: { present: false },
-      },
-    }),
-    form: form({
-      submitCandidates: [
-        { tag: 'a', text: 'Application testing guide', risk: 'L3', visible: true },
-        { tag: 'button', text: 'Search documentation', risk: 'L1', visible: true },
-      ],
-    }),
-  }),
-  'in_target_flow',
-  'documentation links containing application are not final-submit boundaries',
-)
-
-assert.equal(
-  classifyObservationPhase({
     page: page({ pageType: 'form' }),
     form: form({
       fields: [field(0, 'Email', '', true)],

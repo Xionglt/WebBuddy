@@ -11,7 +11,7 @@ import {
   RunService,
 } from '../dist/control/index.js'
 import { controlRecordDigest } from '../dist/control/store-contracts.js'
-import { digestCanonicalJson, snapshotWebTaskInput } from '../dist/task/contracts.js'
+import { snapshotWebTaskInput } from '../dist/task/contracts.js'
 
 const rootDir = await mkdtemp(join(tmpdir(), 'web-buddy-durable-gate-'))
 try {
@@ -74,7 +74,7 @@ try {
     },
     actionId: 'submit-tool-c4',
     toolName: 'browser_click',
-    argsSha256: digestCanonicalJson({ ref: 'submit' }),
+    argsSha256: 'd'.repeat(64),
     sourceContentIds: ['page-current-c4'],
     sourceSensitiveClasses: [],
     sourceOrigin: 'https://fixture.example',
@@ -102,10 +102,6 @@ try {
         },
         riskLevel: 'critical',
         currentUrl: 'https://fixture.example/review',
-        context: {
-          sinkActionId: actionBinding.actionId,
-          sinkActionBindingSha256: digestCanonicalJson(actionBinding),
-        },
         policy: {
           schemaVersion: 'policy-decision/v1',
           action: 'gate',
@@ -169,130 +165,6 @@ try {
   assert.equal(resumed?.runRevision, 0, 'live approval continuation stays in the same fenced attempt')
 
   assert.equal(await gate.resolveLive(approvalId, 'approved'), false, 'approval cannot resume the live turn twice')
-
-  const executionApprovalId = 'approval-durable-gate-execute-c4'
-  const executionActionBinding = {
-    ...actionBinding,
-    actionId: 'submit-tool-execute-c4',
-    externalBusinessKey: 'portal:tenant-c4:invoice:EXECUTE-1',
-    externalEffectDigest: 'e'.repeat(64),
-    externalProbeId: 'invoice-query/v1',
-    externalActionKind: 'submit',
-    externalEffectPreview: '{"invoiceId":"EXECUTE-1","operation":"submit_invoice"}',
-    actionSeq: 8,
-  }
-  const executionPermission = {
-      request: {
-        schemaVersion: 'permission-request/v1',
-        requestId: 'permission-durable-gate-execute-c4',
-        runId,
-        sessionId: 'session-durable-gate-c4',
-        step: 8,
-        requestedAt: new Date().toISOString(),
-        subject: {
-          kind: 'tool_call',
-          toolCallId: executionActionBinding.actionId,
-          toolName: 'browser_click',
-          args: { ref: 'submit' },
-        },
-        riskLevel: 'critical',
-        currentUrl: 'https://fixture.example/review',
-        context: {
-          sinkActionId: executionActionBinding.actionId,
-          sinkActionBindingSha256: digestCanonicalJson(executionActionBinding),
-        },
-        policy: {
-          schemaVersion: 'policy-decision/v1',
-          action: 'gate',
-          policyCode: 'final_submit',
-          ruleId: 'final_submit.v1',
-          reason: 'Machine execution requires a distinct exact authorization.',
-          auditTags: [],
-        },
-      },
-      decision: { action: 'ask' },
-      approval: {
-        schemaVersion: 'approval-request/v1',
-        id: executionApprovalId,
-        approvalId: executionApprovalId,
-        runId,
-        sessionId: 'session-durable-gate-c4',
-        status: 'pending',
-        gateKind: 'final_submit',
-        title: 'Execution authorization required',
-        message: 'Approve and execute this exact submit?',
-        reason: 'Machine execution requires a distinct exact authorization.',
-        allowedDecisions: ['approve', 'approve_and_execute', 'decline'],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      },
-      actionBinding: executionActionBinding,
-    }
-  await assert.rejects(
-    gate.confirmPermission(
-      'final_submit',
-      'Reject a binding for a foreign contract.',
-      { url: 'https://fixture.example/review' },
-      {
-        ...executionPermission,
-        actionBinding: {
-          ...executionActionBinding,
-          contractId: 'foreign-contract',
-        },
-      },
-    ),
-    /DURABLE_HUMAN_GATE_BINDING_MISMATCH/,
-    'the durable gate must reject an ActionBinding outside the exact task contract',
-  )
-  await assert.rejects(
-    gate.confirmPermission(
-      'final_submit',
-      'Reject an envelope for a foreign run.',
-      { url: 'https://fixture.example/review' },
-      {
-        ...executionPermission,
-        request: { ...executionPermission.request, runId: 'foreign-run' },
-      },
-    ),
-    /DURABLE_HUMAN_GATE_BINDING_MISMATCH/,
-    'the durable gate must reject a permission envelope outside the current run/session',
-  )
-  const executionDecisionPromise = gate.confirmPermission(
-    'final_submit',
-    'Approve and execute this exact submit?',
-    { url: 'https://fixture.example/review' },
-    executionPermission,
-  )
-  await until(async () => (await runs.get(runId))?.state === 'blocked_on_human')
-  const durableExecutionApproval = await approvals.get(executionApprovalId)
-  assert.deepEqual(
-    durableExecutionApproval?.allowedDecisions,
-    ['approved', 'approved_and_execute', 'denied'],
-  )
-  const resolvedExecution = await approvals.resolve({
-    approvalId: executionApprovalId,
-    expectedRecordRevision: 0,
-    expectation: {
-      runId,
-      runRevision: 0,
-      attempt: 1,
-      sessionId: 'session-durable-gate-c4',
-      actionId: executionActionBinding.actionId,
-      actionBindingSha256: controlRecordDigest(executionActionBinding),
-      sourceOrigin: executionActionBinding.sourceOrigin,
-      destinationOrigin: executionActionBinding.destinationOrigin,
-    },
-    decision: 'approved_and_execute',
-    idempotencyKey: 'resolve-durable-gate-execute-c4',
-    nonce: 'nonce-durable-gate-execute-c4',
-    expiresAt,
-  })
-  assert.equal(resolvedExecution.status, 'approved')
-  assert.equal(resolvedExecution.resolution?.schemaVersion, 'approval-binding/v2')
-  assert.equal(resolvedExecution.resolution?.decision, 'approved_and_execute')
-  assert.equal(await gate.resolveLive(executionApprovalId, 'approved_and_execute'), true)
-  assert.equal(await executionDecisionPromise, 'approve_and_execute')
-  assert.equal((await runs.get(runId))?.state, 'running')
 
   const informationPromise = gate.requestInfo({
     field: 'contact_email',

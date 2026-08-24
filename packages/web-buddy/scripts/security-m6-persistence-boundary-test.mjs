@@ -16,11 +16,6 @@ process.env.AGENT_TRACE_MODE = 'full'
 try {
   const sanitize = (value) => replaceExact(value, secret, replacement)
 
-  assert.throws(
-    () => new TraceRecorder(join(root, 'trace-output'), { runId: '../trace-escape' }),
-    /UNSAFE_STORAGE_IDENTITY/,
-  )
-
   const artifactStore = new FileToolResultStore({
     rootDir: join(root, 'artifacts'),
     sanitize,
@@ -80,15 +75,6 @@ try {
     rootDir: join(root, 'sessions'),
     sanitize,
   })
-  await assert.rejects(
-    sessionStore.create({
-      sessionId: '../session-escape',
-      runId: 'm6-persistence',
-      source: 'test',
-      goal: 'must not escape',
-    }),
-    /UNSAFE_STORAGE_IDENTITY/,
-  )
   const session = await sessionStore.create({
     sessionId: 'm6-persistence-session',
     runId: 'm6-persistence',

@@ -56,19 +56,6 @@ try {
   assert.equal(pageState.facts.visibleBlockingDialog.kind, 'quota')
   assert.equal(detectPageType(pageState), 'form')
   assert.equal(detectPageType({ title: 'Security check', textSummary: 'Please verify you are human before continuing.' }), 'captcha')
-  assert.equal(detectPageType({
-    url: 'https://playwright.dev/docs/auth',
-    title: 'Authentication | Playwright',
-    textSummary: 'Learn how authentication and sign in examples work.',
-    linkCount: 20,
-  }), 'list')
-  assert.equal(detectPageType({
-    url: 'https://example.test/account',
-    title: 'Account',
-    textSummary: 'Please sign in with your email and password.',
-    formCount: 1,
-    inputCount: 2,
-  }), 'login')
 
   const formState = buildFormState({
     url: snapshot.url,

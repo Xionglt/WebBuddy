@@ -18,7 +18,6 @@ export interface WorkflowTransitionInput {
   gateKind?: GateKind
   gateDecision?: GateDecision
   agentDoneBlocked?: boolean
-  verifiedFinalSubmitCompletion?: boolean
   now?: string
 }
 
@@ -26,6 +25,9 @@ export interface WorkflowTransitionResult {
   state: WorkflowState
   changed: boolean
 }
+
+const LOGIN_TEXT = /login|log in|sign in|signin|sso|auth|password|密码登录|短信登录|账号登录|统一认证|单点登录|请登录|登录后|登陆后|登入后/i
+const CAPTCHA_TEXT = /captcha|human verification|verify you are human|人机验证|验证码|安全验证|滑块验证/i
 
 export function transitionWorkflowState(input: WorkflowTransitionInput): WorkflowTransitionResult {
   const now = input.now ?? new Date().toISOString()
@@ -75,15 +77,13 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule {
     }
   }
 
-  const directSubmit = input.verifiedFinalSubmitCompletion
-    ? undefined
-    : inspectDirectSubmitWorkflowState({
+  const directSubmit = inspectDirectSubmitWorkflowState({
     form: input.form,
     page: input.page,
     currentUrl: input.currentUrl,
-      })
+  })
   const blockers = blockersFor(input, directSubmit?.detected === true)
-  const rawPhase = classifyObservationPhase({
+  const phase = classifyObservationPhase({
     page: input.page,
     form: input.form,
     blockers,
@@ -91,9 +91,6 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule {
     permissionFacts: input.gateKind ? [{ gateKind: input.gateKind, decision: input.gateDecision }] : undefined,
     summary: input.toolResult?.observation,
   })
-  const phase = input.verifiedFinalSubmitCompletion && rawPhase === 'final_submit_boundary'
-    ? 'in_target_flow'
-    : rawPhase
 
   if (phase === 'external_blocker') {
     const blockerGateKind = blockers.find((blocker) => externalGateKind(blocker.gateKind))?.gateKind
@@ -148,7 +145,13 @@ function inferWorkflowRule(input: WorkflowTransitionInput): WorkflowRule {
 
 function blockersFor(input: WorkflowTransitionInput, directSubmitDetected: boolean): ObservationPhaseBlocker[] {
   const blockers: ObservationPhaseBlocker[] = []
-  if (input.gateKind && !isApprovingDecision(input.gateDecision)) {
+  const pageText = [input.page?.title, input.page?.textSummary].filter(Boolean).join('\n')
+  if (CAPTCHA_TEXT.test(pageText)) {
+    blockers.push({ gateKind: 'captcha', kind: 'external_blocker', message: 'Human verification required before continuing.' })
+  } else if (LOGIN_TEXT.test(pageText)) {
+    blockers.push({ gateKind: 'login', kind: 'external_blocker', message: 'Human login required before continuing.' })
+  }
+  if (input.gateKind && input.gateDecision !== 'approve') {
     blockers.push({
       gateKind: input.gateKind,
       message: input.policyDecision?.reason,
@@ -161,7 +164,7 @@ function blockersFor(input: WorkflowTransitionInput, directSubmitDetected: boole
       message: 'Direct-submit review reached final submit boundary.',
     })
   }
-  if (input.gateDecision && !isApprovingDecision(input.gateDecision)) {
+  if (input.gateDecision && input.gateDecision !== 'approve') {
     blockers.push({
       gateKind: input.gateKind,
       message: `Gate returned ${input.gateDecision}.`,
@@ -169,10 +172,6 @@ function blockersFor(input: WorkflowTransitionInput, directSubmitDetected: boole
     })
   }
   return blockers
-}
-
-function isApprovingDecision(decision: GateDecision | undefined): boolean {
-  return decision === 'approve' || decision === 'approve_and_execute'
 }
 
 function buildState(

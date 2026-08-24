@@ -197,10 +197,6 @@ const ICON: Record<string, string> = {
 
 async function run(mode: AgentMode, f: Flags, startUrl?: string) {
   const config = loadConfigWithFlags(f)
-  const headerExtra = {
-    ...(startUrl ? { target: startUrl } : {}),
-    ...(mode === 'raw' && (f.taskType ?? 'explore') === 'explore' ? { resume: 'not used' } : {}),
-  }
 
   printHeader(
     mode === 'raw' ? 'raw browser agent'
@@ -211,7 +207,7 @@ async function run(mode: AgentMode, f: Flags, startUrl?: string) {
             : mode === 'demo-research' ? 'offline research demo'
               : 'offline demo form',
     config, mode,
-    headerExtra,
+    startUrl ? { target: startUrl } : undefined,
   )
 
   const result = await runJobApplicationAgent({

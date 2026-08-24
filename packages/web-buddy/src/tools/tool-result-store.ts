@@ -1,11 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises'
-import { isAbsolute, join, parse, resolve, sep } from 'node:path'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { isAbsolute, join, resolve } from 'node:path'
 import {
   sanitizeForPersistence,
   type PersistenceSanitizer,
 } from '../security/redaction.js'
-import { assertSafeStorageIdentity } from '../security/storage-identity.js'
 
 export type ToolResultArtifactKind =
   | 'page_snapshot'
@@ -82,16 +81,7 @@ export interface ToolResultStore {
   exists(ref: ToolResultArtifactRef): Promise<boolean>
 }
 
-/**
- * Store capability required when a durable event will subsequently claim that
- * an artifact exists. The promise may resolve only after the file contents and
- * new directory entry have crossed a durability barrier.
- */
-export interface DurableToolResultStore extends ToolResultStore {
-  writeDurably(input: ToolResultStoreWriteInput): Promise<ToolResultArtifactRef>
-}
-
-export class FileToolResultStore implements DurableToolResultStore {
+export class FileToolResultStore implements ToolResultStore {
   private readonly rootDir: string
   private readonly now: () => Date
   private readonly sanitize?: PersistenceSanitizer
@@ -107,19 +97,6 @@ export class FileToolResultStore implements DurableToolResultStore {
   }
 
   async write(input: ToolResultStoreWriteInput): Promise<ToolResultArtifactRef> {
-    return this.writeInternal(input, false)
-  }
-
-  async writeDurably(input: ToolResultStoreWriteInput): Promise<ToolResultArtifactRef> {
-    return this.writeInternal(input, true)
-  }
-
-  private async writeInternal(
-    input: ToolResultStoreWriteInput,
-    durable: boolean,
-  ): Promise<ToolResultArtifactRef> {
-    assertSafeStorageIdentity(input.sessionId, 'artifact sessionId')
-    assertSafeStorageIdentity(input.runId, 'artifact runId')
     const sensitivity = input.sensitivity ?? 'internal'
     if (sensitivity === 'secret') {
       throw new Error('SECRET_ARTIFACT_REJECTED: ordinary tool-result storage cannot persist secret content.')
@@ -169,11 +146,8 @@ export class FileToolResultStore implements DurableToolResultStore {
       ...(safeMetadata ? { metadata: safeMetadata } : {}),
     }
 
-    if (durable) await mkdirDurably(dir)
-    else await mkdir(dir, { recursive: true })
-    const serialized = `${JSON.stringify(envelope, null, 2)}\n`
-    if (durable) await writeNewFileDurably(uri, dir, serialized)
-    else await writeFile(uri, serialized, 'utf8')
+    await mkdir(dir, { recursive: true })
+    await writeFile(uri, `${JSON.stringify(envelope, null, 2)}\n`, 'utf8')
     return ref
   }
 
@@ -211,62 +185,6 @@ export class FileToolResultStore implements DurableToolResultStore {
       throw new Error(`Tool result artifact path escapes store root: ${ref.uri}`)
     }
     return path
-  }
-}
-
-async function writeNewFileDurably(path: string, directoryPath: string, value: string): Promise<void> {
-  // Artifact ids are unique, so a partially written file can only be an
-  // unreachable orphan. `wx` also prevents an unexpected overwrite.
-  const handle = await open(path, 'wx', 0o600)
-  try {
-    await handle.writeFile(value, 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  // fsyncing the file is insufficient for a newly created directory entry.
-  // Do not let a later durable ledger event reference a name the filesystem
-  // has not itself made durable yet.
-  const directory = await open(directoryPath, 'r')
-  try {
-    await directory.sync()
-  } finally {
-    await directory.close()
-  }
-}
-
-/**
- * Creates each missing directory one level at a time and fsyncs its parent.
- * Fsyncing only the final artifact directory is not enough when recursive
- * mkdir created previously absent session/run ancestors in the same attempt.
- */
-async function mkdirDurably(directoryPath: string): Promise<void> {
-  const absolute = resolve(directoryPath)
-  const root = parse(absolute).root
-  const parts = absolute.slice(root.length).split(sep).filter(Boolean)
-  let parent = root
-  for (const part of parts) {
-    const child = join(parent, part)
-    let created = false
-    try {
-      await mkdir(child)
-      created = true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const info = await stat(child)
-      if (!info.isDirectory()) throw error
-    }
-    if (created) await syncDirectory(parent)
-    parent = child
-  }
-}
-
-async function syncDirectory(directoryPath: string): Promise<void> {
-  const directory = await open(directoryPath, 'r')
-  try {
-    await directory.sync()
-  } finally {
-    await directory.close()
   }
 }
 

@@ -9,28 +9,13 @@ const initial = createInitialWorkflowState(now)
 const login = transitionWorkflowState({
   previous: initial,
   currentUrl: 'https://example.test/sso/login',
-  page: page({ pageType: 'login', title: 'SSO 登录', textSummary: 'Please sign in to continue.' }),
+  page: page({ title: 'SSO 登录', textSummary: 'Please sign in to continue.' }),
   now,
 })
 assert.equal(login.changed, true)
 assert.equal(login.state.phase, 'external_blocker')
 assert.equal(login.state.humanHandoffRequired, true)
 assert.match(login.state.blocker, /login/i)
-
-const authenticationDocs = transitionWorkflowState({
-  previous: initial,
-  currentUrl: 'https://playwright.dev/docs/auth',
-  page: page({
-    url: 'https://playwright.dev/docs/auth',
-    title: 'Authentication | Playwright',
-    textSummary: 'Authentication documentation with examples for signed-in browser contexts.',
-    pageType: 'list',
-    linkCount: 24,
-  }),
-  now,
-})
-assert.equal(authenticationDocs.state.phase, 'in_target_flow')
-assert.equal(authenticationDocs.state.humanHandoffRequired, undefined)
 
 const captcha = transitionWorkflowState({
   previous: initial,
@@ -96,33 +81,6 @@ const directSubmitReview = transitionWorkflowState({
 assert.equal(directSubmitReview.state.phase, 'final_submit_boundary')
 assert.equal(directSubmitReview.state.humanHandoffRequired, true)
 assert.match(directSubmitReview.state.blocker, /final submit/i)
-
-const executionDecisionWithoutVerifiedOutcome = transitionWorkflowState({
-  previous: directSubmitReview.state,
-  currentUrl: 'https://example.test/apply/direct',
-  page: page({ title: 'Direct apply', textSummary: '确认投递' }),
-  gateKind: 'final_submit',
-  gateDecision: 'approve_and_execute',
-  now,
-})
-assert.equal(
-  executionDecisionWithoutVerifiedOutcome.state.phase,
-  'final_submit_boundary',
-  'an execution decision alone is not completion evidence',
-)
-
-const verifiedFinalSubmit = transitionWorkflowState({
-  previous: directSubmitReview.state,
-  currentUrl: 'https://example.test/apply/direct',
-  page: page({ title: 'Direct apply', textSummary: '确认投递' }),
-  gateKind: 'final_submit',
-  gateDecision: 'approve_and_execute',
-  verifiedFinalSubmitCompletion: true,
-  now,
-})
-assert.equal(verifiedFinalSubmit.state.phase, 'in_target_flow')
-assert.equal(verifiedFinalSubmit.state.humanHandoffRequired, undefined)
-assert.equal(verifiedFinalSubmit.state.blocker, undefined)
 
 const applicationEntryNotice = transitionWorkflowState({
   previous: entering.state,

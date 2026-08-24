@@ -375,10 +375,7 @@ function id(value: unknown, label: string): string {
 
 function timestamp(value: unknown, label: string): string {
   const result = id(value, label)
-  const parsed = Date.parse(result)
-  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== result) {
-    invalid(`${label} must be a canonical UTC timestamp.`)
-  }
+  if (!Number.isFinite(Date.parse(result))) invalid(`${label} must be a timestamp.`)
   return result
 }
 

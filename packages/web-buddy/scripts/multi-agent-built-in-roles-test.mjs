@@ -174,43 +174,14 @@ try {
   )
   assert.equal((await deniedRuntime.snapshot()).tasks.length, 0)
 
-  const circuitRuntime = createRuntime({
-    rootDir: join(root, 'circuit-runtime'),
-    envelopeRequests: [],
-    failRunner: true,
-  })
-  await circuitRuntime.initialize()
-  for (const index of [1, 2]) {
-    const resolution = await circuitRuntime.spawnBuiltInRole({
-      taskId: `circuit-researcher-${index}`,
-      roleId: 'researcher',
-      title: `Invalid structured output ${index}`,
-      goal: 'Exercise the never-retry session circuit.',
-      idempotencyKey: `circuit-researcher:${index}`,
-    })
-    assert.equal(resolution.outcome, 'created')
-    assert.equal((await waitUntilTerminal(circuitRuntime, resolution.task.id)).status, 'failed')
-  }
-  await assert.rejects(
-    circuitRuntime.spawnBuiltInRole({
-      roleId: 'researcher',
-      title: 'Third identical failure class',
-      goal: 'This worker must not start.',
-      idempotencyKey: 'circuit-researcher:3',
-    }),
-    (error) => error?.code === 'POLICY_VIOLATION' && /failure circuit is open/i.test(error.message),
-  )
-  assert.equal((await circuitRuntime.snapshot()).tasks.length, 2)
-
   await runtime.abortSession()
   await deniedRuntime.abortSession()
-  await circuitRuntime.abortSession()
   console.log('multi-agent-built-in-roles-test: PASS')
 } finally {
   await rm(root, { recursive: true, force: true })
 }
 
-function createRuntime({ rootDir, envelopeRequests, mutateEnvelope = (value) => value, failRunner = false }) {
+function createRuntime({ rootDir, envelopeRequests, mutateEnvelope = (value) => value }) {
   const store = new FileTaskGraphStore({ rootDir })
   const notifications = new TaskNotificationQueue()
   const runner = {
@@ -223,19 +194,6 @@ function createRuntime({ rootDir, envelopeRequests, mutateEnvelope = (value) => 
     async run(request) {
       const role = request.contextEnvelope.builtInRole
       assert(role)
-      if (failRunner) {
-        return {
-          schemaVersion: 'agent-task-run-outcome/v1',
-          outcome: 'failed',
-          error: {
-            schemaVersion: 'agent-task-runner-error/v1',
-            code: 'OUTPUT_SCHEMA_INVALID',
-            category: 'validation',
-            retryDisposition: 'never_retry',
-            message: 'Structured role output did not match the required schema.',
-          },
-        }
-      }
       return {
         schemaVersion: 'agent-task-run-outcome/v1',
         outcome: 'succeeded',

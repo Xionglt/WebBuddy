@@ -1,4 +1,4 @@
-import { appendFile, open, readFile } from 'node:fs/promises'
+import { appendFile, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 
 export function createTranscriptEntryId(prefix = 'entry'): string {
@@ -9,43 +9,13 @@ export async function appendJsonLine(path: string, value: unknown): Promise<void
   await appendFile(path, `${JSON.stringify(value)}\n`, 'utf8')
 }
 
-/** Append and fsync an event that must survive before an external effect starts. */
-export async function appendJsonLineDurably(path: string, value: unknown): Promise<void> {
-  const handle = await open(path, 'a')
-  try {
-    await handle.write(`${JSON.stringify(value)}\n`)
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-}
-
 export async function readJsonLines<T = unknown>(path: string): Promise<T[]> {
   const text = await readFile(path, 'utf8')
-  const values: T[] = []
-  for (const [index, rawLine] of text.split('\n').entries()) {
-    const line = rawLine.trim()
-    if (!line) continue
-    try {
-      values.push(JSON.parse(line) as T)
-    } catch (cause) {
-      throw new JsonLinesCorruptionError(path, index + 1, cause)
-    }
-  }
-  return values
-}
-
-export class JsonLinesCorruptionError extends Error {
-  readonly code = 'SESSION_JSONL_CORRUPT' as const
-
-  constructor(
-    readonly path: string,
-    readonly lineNumber: number,
-    cause: unknown,
-  ) {
-    super(`SESSION_JSONL_CORRUPT: invalid JSON in ${path} at line ${lineNumber}.`, { cause })
-    this.name = 'JsonLinesCorruptionError'
-  }
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as T)
 }
 
 export function compactToolResult(result: unknown): unknown {

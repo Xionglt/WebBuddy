@@ -92,8 +92,6 @@ export interface WorkflowEngineInput {
   fillLedgerSummary?: FillLedgerSummary
   requiresCurrentResumeUpload?: boolean
   currentResumeUploaded?: boolean
-  /** Trusted Runtime fact: exact final-action business keys and immutable receipts satisfy their Contract subset. */
-  verifiedFinalSubmitCompletion?: boolean
   now?: string
 }
 
@@ -180,7 +178,6 @@ export class WorkflowEngine {
       gateKind: observationFacts.gateKind,
       gateDecision: observationFacts.gateDecision,
       agentDoneBlocked: observationFacts.agentDoneBlocked,
-      verifiedFinalSubmitCompletion: input.verifiedFinalSubmitCompletion,
       now,
     })
 
@@ -188,7 +185,7 @@ export class WorkflowEngine {
     const transitionedState = withRequiredHandoffState(transition.state, input.previous, observationFacts, this.definition, now)
     const preliminaryBlockers = handoffAndWorkflowBlockers(transitionedState, observationFacts, this.definition)
     const taskCompletionVerdict = taskCompletionVerdictFor(input, transitionedState, evidence, now)
-    const rawObservationPhase = classifyObservationPhase({
+    const observationPhase = classifyObservationPhase({
       page: input.page,
       form: input.form,
       blockers: preliminaryBlockers,
@@ -198,9 +195,6 @@ export class WorkflowEngine {
       externalBlockerVisible: transitionedState.phase === 'external_blocker',
       summary: input.summary ?? observationFacts.latestAction?.summary ?? observationFacts.toolResult?.observation,
     })
-    const observationPhase = input.verifiedFinalSubmitCompletion && rawObservationPhase === 'final_submit_boundary'
-      ? 'in_target_flow'
-      : rawObservationPhase
     const classifiedState = withObservationPhase(
       transitionStatePhase(transitionedState, input.previous, observationPhase, now),
       observationPhase,
@@ -296,7 +290,6 @@ function contextualPermissionFactsFor(input: WorkflowEngineInput): WorkflowPermi
 }
 
 function shouldIgnoreStaleFinalSubmitFacts(input: WorkflowEngineInput, facts: RuntimeFacts): boolean {
-  if (input.verifiedFinalSubmitCompletion) return true
   if (!hasCurrentObservation(input)) return false
   if (currentObservationHasFinalSubmitSurface(input)) return false
   return (
@@ -812,10 +805,7 @@ function gateKindValue(value: unknown): GateKind | undefined {
 }
 
 function gateDecisionValue(value: unknown): GateDecision | undefined {
-  if (value === 'approve'
-    || value === 'approve_and_execute'
-    || value === 'decline'
-    || value === 'takeover') return value
+  if (value === 'approve' || value === 'decline' || value === 'takeover') return value
   return undefined
 }
 

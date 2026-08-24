@@ -6,7 +6,6 @@ import { readJsonLines } from '../session/transcript.js'
 import type { AgentConfig } from '../sdk/config.js'
 import type { TraceRecorder } from '../sdk/trace.js'
 import type { ContextItem, TaskContract } from '../task/contracts.js'
-import { FileToolResultStore, type ToolResultArtifactRef } from '../tools/tool-result-store.js'
 import {
   CONTRACT_READ_ONLY_ARTIFACT_TOOL_NAMES,
   FileImmutableArtifactReader,
@@ -15,7 +14,6 @@ import type {
   ImmutableArtifactRef,
   JsonValue,
   ReadOnlyArtifactToolName,
-  RunnerLimits,
   SanitizedTextProjectionV1,
   SensitiveDisclosureGrantRefV1,
 } from './async-task-contracts.js'
@@ -89,11 +87,6 @@ export async function createLocalAsyncTaskRuntime(
     resolveSessionDir: () => join(session.outputDir, 'async-task-state'),
   })
   const notifications = new TaskNotificationQueue()
-  const toolResultReader = input.trace
-    ? new FileToolResultStore({
-        rootDir: join(input.trace.agentTrace?.dir ?? input.trace.dir, 'artifacts', 'tool-results'),
-      })
-    : undefined
   const runner = new ReadOnlyLlmSubagentRunner({
     llm: input.llm,
     artifactReader: new FileImmutableArtifactReader(session.outputDir),
@@ -104,14 +97,6 @@ export async function createLocalAsyncTaskRuntime(
   const registry = new RunnerRegistry([runner])
   const allowedRoles = new Set(input.allowedBuiltInRoles ?? DEFAULT_LOCAL_ROLES)
   const asyncConfig = input.config.agent.asyncTasks
-  const runnerLimits: RunnerLimits = {
-    maxTurns: asyncConfig?.maxTurns ?? 6,
-    maxToolCalls: asyncConfig?.maxToolCalls ?? 16,
-    maxInputTokens: asyncConfig?.maxInputTokens ?? 12_000,
-    maxOutputTokens: asyncConfig?.maxOutputTokens ?? 4_000,
-    perRequestTimeoutMs: asyncConfig?.perRequestTimeoutMs ?? 60_000,
-    overallTimeoutMs: asyncConfig?.overallTimeoutMs ?? 180_000,
-  }
 
   return new AsyncTaskRuntime({
     sessionId: session.sessionId,
@@ -121,10 +106,16 @@ export async function createLocalAsyncTaskRuntime(
     allowedTaskKinds: LOCAL_ASYNC_TASK_KINDS,
     maxQueuedTasks: asyncConfig?.maxQueuedTasks ?? 32,
     maxWaitMs: asyncConfig?.notificationWaitMs ?? 15_000,
-    defaultTimeoutMs: runnerLimits.overallTimeoutMs,
-    defaultLeaseDurationMs: runnerLimits.overallTimeoutMs + 30_000,
-    maxRepeatedNeverRetryFailures: asyncConfig?.maxRepeatedNeverRetryFailures ?? 2,
-    runnerLimits,
+    defaultTimeoutMs: 120_000,
+    defaultLeaseDurationMs: 150_000,
+    runnerLimits: {
+      maxTurns: 6,
+      maxToolCalls: 16,
+      maxInputTokens: 8_000,
+      maxOutputTokens: 2_000,
+      perRequestTimeoutMs: 30_000,
+      overallTimeoutMs: 120_000,
+    },
     scheduler: (bindings) => new AgentTaskScheduler({
       store: taskStore,
       notifications,
@@ -178,8 +169,6 @@ export async function createLocalAsyncTaskRuntime(
         artifactStore,
         fallbackGoal: input.goal,
         session: input.session,
-        toolResultReader,
-        runnerLimits,
       })
     },
     mainVerificationProvider: async (graph) => {
@@ -282,34 +271,20 @@ async function createLocalContextEnvelope(input: {
   artifactStore: SessionArtifactStore
   fallbackGoal: string
   session: SessionRecorder
-  toolResultReader?: FileToolResultStore
-  runnerLimits: RunnerLimits
 }) {
   const { request, artifactStore } = input
   const metadata = taskRoleMetadata(request)
   const objectiveText = metadata?.goal ?? taskGoal(request) ?? input.fallbackGoal
-  const observationBridge = await materializeRecentObservations(
-    artifactStore,
-    input.session,
-    request.task.actionBinding,
-    input.toolResultReader,
-  )
+  await materializeRecentObservations(artifactStore, input.session, request.task.actionBinding)
   const allRecords = await artifactStore.listRecords()
-  const rawRequestedIds = new Set(metadata?.requestedArtifactIds ?? [])
-  const requestedIds = new Set([...rawRequestedIds].map((id) => observationBridge.sourceArtifactIds.get(id) ?? id))
-  const retainedIds = requestedIds.size > 0
-    ? requestedIds
-    : new Set(observationBridge.observationArtifactIds.slice(-3))
-  const records = rawRequestedIds.size === 0
+  const requestedIds = new Set(metadata?.requestedArtifactIds ?? [])
+  const records = requestedIds.size === 0
     ? allRecords.filter(isContextReadableRecord)
     : allRecords.filter((record) => (
         record.ref.artifactId.startsWith('main-task-seed_')
         || requestedIds.has(record.ref.artifactId)
       ))
-  const missingRequestedIds = [...rawRequestedIds].filter((id) => {
-    const resolved = observationBridge.sourceArtifactIds.get(id) ?? id
-    return !allRecords.some((record) => record.ref.artifactId === resolved)
-  })
+  const missingRequestedIds = [...requestedIds].filter((id) => !allRecords.some((record) => record.ref.artifactId === id))
   if (missingRequestedIds.length > 0) {
     throw artifactNotReady(`Requested artifact(s) are not available: ${missingRequestedIds.join(', ')}`)
   }
@@ -325,7 +300,7 @@ async function createLocalContextEnvelope(input: {
   const candidates = records.map((record) => catalogCandidate(
     record,
     request,
-    retainedIds.has(record.ref.artifactId),
+    requestedIds.has(record.ref.artifactId),
   ))
   const catalog = roleScopedCatalog(request, candidates)
   const createdAt = new Date().toISOString()
@@ -347,9 +322,9 @@ async function createLocalContextEnvelope(input: {
     relevanceText: `${request.task.title} ${objectiveText}`,
     sensitiveDisclosureGrants: grants,
     tokenBudget: {
-      maxInputTokens: input.runnerLimits.maxInputTokens,
+      maxInputTokens: 8_000,
       fixedEnvelopeTokens: 500,
-      reservedOutputTokens: input.runnerLimits.maxOutputTokens,
+      reservedOutputTokens: 2_000,
     },
   })
   const artifactRef = await artifactStore.writeJson({
@@ -367,11 +342,7 @@ async function materializeRecentObservations(
   store: SessionArtifactStore,
   session: SessionRecorder,
   actionBinding: AsyncTaskContextEnvelopeRequest['task']['actionBinding'],
-  toolResultReader?: FileToolResultStore,
-): Promise<{
-  sourceArtifactIds: Map<string, string>
-  observationArtifactIds: string[]
-}> {
+): Promise<void> {
   const entries = await readJsonLines<TranscriptEntry>(session.session.transcriptPath)
   const observations = entries
     .filter((entry): entry is Extract<TranscriptEntry, { type: 'tool_result' }> => (
@@ -381,12 +352,8 @@ async function materializeRecentObservations(
     ))
     .slice(-8)
 
-  const sourceArtifactIds = new Map<string, string>()
-  const observationArtifactIds: string[] = []
-
   for (const entry of observations) {
-    const importedArtifacts = await importToolResultArtifacts(entry, session, toolResultReader)
-    const ref = await store.writeJson({
+    await store.writeJson({
       artifactKind: 'runner_result',
       value: toJsonValue({
         schemaVersion: 'main-tool-observation-artifact/v1',
@@ -396,62 +363,13 @@ async function materializeRecentObservations(
         capturedActionBinding: actionBinding,
         result: entry.result ?? null,
         artifacts: entry.artifacts ?? [],
-        ...(importedArtifacts.length > 0 ? { importedArtifacts } : {}),
       }),
       actionBinding,
       summary: observationSummary(entry),
       sensitivity: 'sensitive',
       artifactIdPrefix: `observation-${entry.name}-${entry.toolCallId}`,
     })
-    observationArtifactIds.push(ref.artifactId)
-    for (const artifact of entry.artifacts ?? []) {
-      if (isOwnedReadOnlyToolArtifact(artifact, entry, session)) {
-        sourceArtifactIds.set(artifact.artifactId, ref.artifactId)
-      }
-    }
   }
-  return { sourceArtifactIds, observationArtifactIds }
-}
-
-async function importToolResultArtifacts(
-  entry: Extract<TranscriptEntry, { type: 'tool_result' }>,
-  session: SessionRecorder,
-  reader?: FileToolResultStore,
-): Promise<JsonValue[]> {
-  if (!reader) return []
-  const imported: JsonValue[] = []
-  for (const artifact of entry.artifacts ?? []) {
-    if (!isOwnedReadOnlyToolArtifact(artifact, entry, session)) continue
-    try {
-      const envelope = await reader.read(artifact)
-      imported.push(toJsonValue({
-        sourceArtifactId: artifact.artifactId,
-        kind: artifact.kind,
-        mediaType: artifact.mediaType,
-        summary: artifact.summary ?? observationSummary(entry),
-        content: envelope.content,
-        ...(envelope.metadata ? { metadata: envelope.metadata } : {}),
-      }))
-    } catch {
-      // The compact transcript observation remains usable. A missing or corrupt
-      // external artifact is never trusted or promoted into the Subagent store.
-    }
-  }
-  return imported
-}
-
-function isOwnedReadOnlyToolArtifact(
-  artifact: ToolResultArtifactRef,
-  entry: Extract<TranscriptEntry, { type: 'tool_result' }>,
-  session: SessionRecorder,
-): boolean {
-  return artifact.schemaVersion === 'tool-result-artifact-ref/v1'
-    && artifact.runId === session.session.runId
-    && artifact.sessionId === session.session.sessionId
-    && artifact.toolCallId === entry.toolCallId
-    && artifact.toolName === entry.name
-    && artifact.sensitivity !== 'secret'
-    && READ_ONLY_OBSERVATION_TOOLS.has(artifact.toolName)
 }
 
 function roleScopedCatalog(
@@ -651,11 +569,8 @@ function artifactNotReady(message: string): Error & { code: string } {
 }
 
 const READ_ONLY_OBSERVATION_TOOLS = new Set([
-  'browser_open',
   'browser_snapshot',
   'browser_form_snapshot',
-  'browser_form_audit',
   'browser_screenshot',
   'browser_inspect_options',
-  'browser_wait',
 ])

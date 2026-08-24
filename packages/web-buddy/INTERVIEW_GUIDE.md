@@ -4,17 +4,6 @@
 >
 > 核心口诀：**本地 Web Agent → 跑稳 → 拆开 → 记住 → 管住。**
 
-> 2026-08-12 最高优先级场景：先讲“发票门户已提交、本地确认号写回前崩溃”，再按需展开
-> durable action journal、业务键对账、`indeterminate` Completion Gate 和安全重试边界。被追问
-> 机器最终提交时，明确区分旧 `approve` 知晓与 `approval-binding/v2 + approve_and_execute`
-> 本地单动作执行授权；owner-scoped Service 在 v3 owner binding 前会拒绝机器提交。不要把夹具
-> 说成真实门户、跨租户机器写或 BatchApprovalBinding 已上线。
-> 面试前先看一页口述卡
-> [`INTERVIEW_EXTERNAL_ACTION_CHEATSHEET.md`](INTERVIEW_EXTERNAL_ACTION_CHEATSHEET.md)；完整追问树见
-> [`INTERVIEW_EXTERNAL_ACTION_STORY.md`](INTERVIEW_EXTERNAL_ACTION_STORY.md)，协议细节见
-> [`EXTERNAL_ACTION_RECONCILIATION.md`](EXTERNAL_ACTION_RECONCILIATION.md)，岗位/工程信号映射见
-> [`INTERVIEWER_SIGNAL_MAP.md`](INTERVIEWER_SIGNAL_MAP.md)。
-
 ---
 
 ## 快速导航

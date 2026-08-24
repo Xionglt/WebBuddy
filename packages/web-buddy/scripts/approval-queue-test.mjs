@@ -59,37 +59,6 @@ assert.equal(queue.get(approval.id).id, approval.id)
 approval.status = 'approved'
 assert.equal(queue.get(approval.id).status, 'pending', 'returned approvals should not mutate queue state')
 
-const restrictedQueue = new ApprovalQueue()
-const awarenessOnly = restrictedQueue.enqueue({
-  id: 'appr-awareness-only',
-  runId: 'run-1',
-  sessionId: 'session-1',
-  reason: 'This final-submit gate only offers awareness or decline.',
-  gateKind: 'final_submit',
-  allowedDecisions: ['approve', 'decline'],
-})
-assert.throws(
-  () => restrictedQueue.resolve(awarenessOnly.id, 'approve_and_execute'),
-  (error) => error instanceof ApprovalQueueError && error.code === 'invalid_resolution',
-  'a gate implementation cannot resolve a decision the authoritative request did not offer',
-)
-assert.equal(restrictedQueue.get(awarenessOnly.id).status, 'pending')
-assert.throws(
-  () => restrictedQueue.resolve(awarenessOnly.id, 'approved'),
-  (error) => error instanceof ApprovalQueueError && error.code === 'invalid_resolution',
-  'a caller cannot bypass decision allowlisting with a bare approved status',
-)
-assert.equal(restrictedQueue.get(awarenessOnly.id).status, 'pending')
-assert.throws(
-  () => restrictedQueue.resolve(awarenessOnly.id, {
-    status: 'denied',
-    decision: 'approve',
-  }),
-  (error) => error instanceof ApprovalQueueError && error.code === 'invalid_resolution',
-  'terminal status and semantic decision must agree',
-)
-assert.equal(restrictedQueue.get(awarenessOnly.id).status, 'pending')
-
 const duplicate = queue.enqueue({
   id: 'appr-turn-1-call-1',
   runId: 'run-1',

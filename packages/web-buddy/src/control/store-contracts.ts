@@ -5,15 +5,7 @@ import {
   type PendingContinuationV1,
   type ResumeCapsuleV1,
 } from '../continuation/contracts.js'
-import {
-  WebTaskContractError,
-  validateActionBinding,
-  validateArtifactRef,
-  validateCheckpointRef as validateTaskCheckpointRef,
-  validateSessionRef as validateTaskSessionRef,
-  validateWebTaskInputSnapshot,
-} from '../task/contracts.js'
-import { redactSensitiveData } from '../security/redaction.js'
+import { WebTaskContractError, validateWebTaskInputSnapshot } from '../task/contracts.js'
 import type {
   ActionBinding,
   ApprovalBinding,
@@ -199,7 +191,6 @@ export interface RunStore {
 }
 
 export type DurableApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled'
-export type DurableApprovalDecision = ApprovalBinding['decision']
 
 export interface ApprovalTerminalMetadata {
   status: Exclude<DurableApprovalStatus, 'pending'>
@@ -218,7 +209,7 @@ export interface ApprovalRecord {
   status: DurableApprovalStatus
   actionBinding: ActionBinding
   actionBindingSha256: string
-  allowedDecisions: DurableApprovalDecision[]
+  allowedDecisions: Array<'approved' | 'denied'>
   ownerScope?: OwnerScope
   sessionRef?: SessionRef
   resolution?: ApprovalBinding
@@ -336,29 +327,6 @@ export function decodeApprovalRecord(
 
 export function validateRunRecord(record: RunRecord): void {
   if (record.schemaVersion !== RUN_RECORD_SCHEMA_VERSION) unsupported('RunRecord', record.schemaVersion)
-  exactKeys(record as unknown as Record<string, unknown>, [
-    'schemaVersion',
-    'runId',
-    'recordRevision',
-    'runRevision',
-    'attempt',
-    'state',
-    'inputSnapshot',
-    'inputDigest',
-    'ownerScope',
-    'sessionRef',
-    'checkpointRef',
-    'lastSafeBoundary',
-    'artifactRefs',
-    'resourceRefs',
-    'pendingApprovalIds',
-    'pendingContinuation',
-    'lastResumeCapsule',
-    'nextEventSequence',
-    'createdAt',
-    'updatedAt',
-    'reason',
-  ], 'RunRecord')
   nonEmpty(record.runId, 'runId')
   integer(record.recordRevision, 'recordRevision')
   integer(record.runRevision, 'runRevision')
@@ -379,9 +347,6 @@ export function validateRunRecord(record: RunRecord): void {
   if (record.inputDigest !== record.inputSnapshot.sha256 || !SHA256.test(record.inputDigest)) invalid('inputDigest must match inputSnapshot.sha256.')
   if (record.runRevision < record.inputSnapshot.revision) invalid('runRevision cannot precede the frozen input revision.')
   validateOwnerScope(record.ownerScope)
-  if (!sameOptionalJson(record.ownerScope, record.inputSnapshot.ownerScope)) {
-    binding('Run ownerScope does not match the immutable inputSnapshot ownerScope.')
-  }
   validateSessionRef(record.sessionRef, record.runId, record.attempt)
   validateCheckpointRef(record.checkpointRef)
   if (record.lastSafeBoundary) validateSafeBoundary(record.lastSafeBoundary, record)
@@ -426,38 +391,15 @@ export function validateRunRecord(record: RunRecord): void {
   unique(record.artifactRefs.map((item) => item.id), 'artifactRefs.id')
   unique(record.resourceRefs.map((item) => item.id), 'resourceRefs.id')
   for (const artifact of record.artifactRefs) {
-    try {
-      validateArtifactRef(artifact, record.runId, record.inputSnapshot.revision)
-    } catch (error) {
-      if (error instanceof WebTaskContractError && error.code === 'BINDING_MISMATCH') {
-        binding(`Artifact ${artifact.id} is not bound to this run and immutable task revision.`)
-      }
-      invalid(`Artifact ${artifact.id} is invalid: ${errorMessage(error)}`)
-    }
-    if (!sameOptionalJson(artifact.ownerScope, record.ownerScope)) {
-      binding(`Artifact ${artifact.id} owner scope does not match the Run.`)
-    }
-    if (artifact.binding.sessionRef) {
-      validateSessionRef(artifact.binding.sessionRef, record.runId)
-      if (artifact.binding.sessionRef.attempt > record.attempt) {
-        binding(`Artifact ${artifact.id} cannot target a future Run attempt.`)
-      }
-      if (artifact.binding.sessionRef.attempt === record.attempt
-        && (!record.sessionRef
-          || !sameOptionalJson(artifact.binding.sessionRef, record.sessionRef))) {
-        binding(`Artifact ${artifact.id} for the current attempt does not match the Run's durable session.`)
-      }
+    if (artifact.schemaVersion !== 'artifact-ref/v1') unsupported('ArtifactRef', artifact.schemaVersion)
+    if (artifact.binding.runId !== record.runId
+      || artifact.binding.revision !== record.inputSnapshot.revision) {
+      binding(`Artifact ${artifact.id} is not bound to this run and immutable task revision.`)
     }
   }
   for (const resource of record.resourceRefs) {
     if (resource.schemaVersion !== 'control-resource-ref/v1') unsupported('OpaqueResourceRef', resource.schemaVersion)
-    exactKeys(resource as unknown as Record<string, unknown>, [
-      'schemaVersion', 'id', 'kind', 'locator',
-    ], 'OpaqueResourceRef')
     nonEmpty(resource.id, 'resourceRef.id')
-    if (!['trace', 'task_graph', 'notification_outbox', 'other'].includes(resource.kind)) {
-      invalid(`Unsupported resourceRef.kind: ${String(resource.kind)}`)
-    }
     nonEmpty(resource.locator, 'resourceRef.locator')
     if (isAbsoluteLocator(resource.locator)) invalid('resourceRef.locator must be opaque.')
   }
@@ -521,26 +463,6 @@ export function validateRunMutation(current: RunRecord, mutation: RunStoreMutati
 
 export function validateApprovalRecord(record: ApprovalRecord): void {
   if (record.schemaVersion !== APPROVAL_RECORD_SCHEMA_VERSION) unsupported('ApprovalRecord', record.schemaVersion)
-  exactKeys(record as unknown as Record<string, unknown>, [
-    'schemaVersion',
-    'approvalId',
-    'runId',
-    'recordRevision',
-    'runRevision',
-    'attempt',
-    'status',
-    'actionBinding',
-    'actionBindingSha256',
-    'allowedDecisions',
-    'ownerScope',
-    'sessionRef',
-    'resolution',
-    'terminal',
-    'nextEventSequence',
-    'requestedAt',
-    'updatedAt',
-    'expiresAt',
-  ], 'ApprovalRecord')
   nonEmpty(record.approvalId, 'approvalId')
   nonEmpty(record.runId, 'runId')
   integer(record.recordRevision, 'recordRevision')
@@ -549,21 +471,12 @@ export function validateApprovalRecord(record: ApprovalRecord): void {
   if (!APPROVAL_STATES.has(record.status)) invalid(`Unsupported approval status: ${String(record.status)}`)
   if (record.actionBinding?.schemaVersion !== 'action-binding/v1') invalid('actionBinding must be action-binding/v1.')
   if (record.actionBinding.runId !== record.runId) binding('actionBinding.runId does not match approval runId.')
-  try {
-    validateActionBinding(
-      record.actionBinding,
-      record.runId,
-      record.actionBinding.contractRevision,
-    )
-  } catch (error) {
-    invalid(`actionBinding is invalid: ${error instanceof Error ? error.message : String(error)}`)
-  }
   if (controlRecordDigest(record.actionBinding) !== record.actionBindingSha256) {
     binding('actionBindingSha256 does not match the canonical action binding.')
   }
   validateOwnerScope(record.ownerScope)
   validateSessionRef(record.sessionRef, record.runId, record.attempt)
-  if (!sameOptionalJson(record.sessionRef, record.actionBinding.sessionRef)) {
+  if (record.sessionRef && record.actionBinding.sessionRef?.id !== record.sessionRef.id) {
     binding('Approval sessionRef does not match actionBinding.sessionRef.')
   }
   arrays(['allowedDecisions', record.allowedDecisions])
@@ -572,32 +485,12 @@ export function validateApprovalRecord(record: ApprovalRecord): void {
     if (!APPROVAL_DECISIONS.has(decision)) invalid(`Unsupported approval decision: ${String(decision)}`)
   }
   unique(record.allowedDecisions, 'allowedDecisions')
-  if (record.allowedDecisions.includes('approved_and_execute')) {
-    const action = record.actionBinding
-    if (!action.externalBusinessKey
-      || !action.externalEffectDigest
-      || !action.externalProbeId
-      || !['upload', 'send', 'publish', 'submit', 'payment'].includes(action.externalActionKind ?? '')
-      || !action.externalEffectPreview) {
-      invalid('approved_and_execute requires an external semantic kind, complete external identity and review preview.')
-    }
-    let review: unknown
-    try {
-      review = JSON.parse(action.externalEffectPreview)
-    } catch {
-      invalid('approved_and_execute effect preview must be valid JSON.')
-    }
-    if (redactSensitiveData(review).changed) {
-      invalid('approved_and_execute effect preview must not contain secret-bearing material.')
-    }
-  }
   if (record.status === 'pending' && (record.resolution || record.terminal)) {
     invalid('Pending approval cannot contain terminal resolution metadata.')
   }
   if (record.status === 'approved' || record.status === 'denied') {
     validateApprovalBindingRecord(record.resolution)
-    const resolutionStatus = record.resolution?.decision === 'denied' ? 'denied' : 'approved'
-    if (!record.resolution || resolutionStatus !== record.status) {
+    if (!record.resolution || record.resolution.decision !== record.status) {
       invalid('Resolved approval must contain a matching ApprovalBinding decision.')
     }
     if (record.resolution.approvalId !== record.approvalId
@@ -612,9 +505,6 @@ export function validateApprovalRecord(record: ApprovalRecord): void {
     invalid('Terminal approval must contain matching terminal metadata.')
   }
   if (record.terminal) {
-    exactKeys(record.terminal as unknown as Record<string, unknown>, [
-      'status', 'source', 'occurredAt', 'reason',
-    ], 'ApprovalTerminalMetadata')
     if (!APPROVAL_TERMINAL_SOURCES.has(record.terminal.source)) {
       invalid(`Unsupported approval terminal source: ${String(record.terminal.source)}`)
     }
@@ -721,8 +611,7 @@ export function validateApprovalResolve(
     || expected.destinationOrigin !== action.destinationOrigin) {
     binding('Approval resolution does not match the exact run/session/action/origin binding.')
   }
-  if ((command.resolution.schemaVersion !== 'approval-binding/v1'
-    && command.resolution.schemaVersion !== 'approval-binding/v2')
+  if (command.resolution.schemaVersion !== 'approval-binding/v1'
     || command.resolution.approvalId !== record.approvalId
     || command.resolution.actionBindingSha256 !== record.actionBindingSha256) {
     binding('Approval resolution binding does not match the durable request.')
@@ -748,21 +637,6 @@ export function controlRecordDigest(value: unknown): string {
 
 function validateRunEvent(event: RunStoreEvent): void {
   if (event.schemaVersion !== RUN_EVENT_SCHEMA_VERSION) unsupported('RunStoreEvent', event.schemaVersion)
-  exactKeys(event as unknown as Record<string, unknown>, [
-    'schemaVersion',
-    'eventId',
-    'eventSequence',
-    'eventType',
-    'runId',
-    'recordRevisionBefore',
-    'recordRevisionAfter',
-    'runRevision',
-    'attempt',
-    'occurredAt',
-    'idempotencyKey',
-    'ownerScope',
-    'data',
-  ], 'RunStoreEvent')
   if (!RUN_EVENT_TYPES.has(event.eventType)) invalid(`Unsupported run event type: ${String(event.eventType)}`)
   nonEmpty(event.eventId, 'eventId')
   integer(event.eventSequence, 'eventSequence')
@@ -778,23 +652,6 @@ function validateRunEvent(event: RunStoreEvent): void {
 
 function validateApprovalEvent(event: ApprovalStoreEvent): void {
   if (event.schemaVersion !== APPROVAL_EVENT_SCHEMA_VERSION) unsupported('ApprovalStoreEvent', event.schemaVersion)
-  exactKeys(event as unknown as Record<string, unknown>, [
-    'schemaVersion',
-    'eventId',
-    'eventSequence',
-    'eventType',
-    'approvalId',
-    'runId',
-    'recordRevisionBefore',
-    'recordRevisionAfter',
-    'runRevision',
-    'attempt',
-    'actionId',
-    'occurredAt',
-    'idempotencyKey',
-    'ownerScope',
-    'data',
-  ], 'ApprovalStoreEvent')
   if (!APPROVAL_EVENT_TYPES.has(event.eventType)) {
     invalid(`Unsupported approval event type: ${String(event.eventType)}`)
   }
@@ -815,6 +672,7 @@ function validateRunEventBinding(record: RunRecord, event: RunStoreEvent, idempo
     || event.recordRevisionAfter !== record.recordRevision
     || event.runRevision !== record.runRevision
     || event.attempt !== record.attempt
+    || event.attempt !== record.attempt
     || event.idempotencyKey !== idempotencyKey
     || !sameOptionalJson(event.ownerScope, record.ownerScope)) {
     binding('Run event does not match its record/idempotency/scope fence.')
@@ -831,7 +689,6 @@ function validateApprovalEventBinding(
     || event.actionId !== record.actionBinding.actionId
     || event.recordRevisionAfter !== record.recordRevision
     || event.runRevision !== record.runRevision
-    || event.attempt !== record.attempt
     || event.idempotencyKey !== idempotencyKey
     || !sameOptionalJson(event.ownerScope, record.ownerScope)) {
     binding('Approval event does not match its record/idempotency/scope fence.')
@@ -870,10 +727,6 @@ function decodeVersioned<T extends { schemaVersion: string }>(
 function validateOwnerScope(scope: OwnerScope | undefined): void {
   if (!scope) return
   if (scope.schemaVersion !== 'owner-scope/v1') unsupported('OwnerScope', scope.schemaVersion)
-  const allowedKeys = new Set(['schemaVersion', 'tenantId', 'userId', 'projectId'])
-  if (Object.keys(scope).some((key) => !allowedKeys.has(key))) {
-    invalid('ownerScope contains an unsupported field.')
-  }
   if (!scope.tenantId && !scope.userId && !scope.projectId) {
     invalid('ownerScope must identify at least one tenant, user or project; omit it for local default scope.')
   }
@@ -882,43 +735,16 @@ function validateOwnerScope(scope: OwnerScope | undefined): void {
   }
 }
 
-function exactKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  kind: string,
-): void {
-  const allowedKeys = new Set(allowed)
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
-    invalid(`${kind} contains an unsupported field.`)
-  }
-}
-
 function validateApprovalBindingRecord(bindingValue: ApprovalBinding | undefined): void {
-  if (!bindingValue
-    || (bindingValue.schemaVersion !== 'approval-binding/v1'
-      && bindingValue.schemaVersion !== 'approval-binding/v2')) {
-    invalid('resolution must be approval-binding/v1 or approval-binding/v2.')
+  if (!bindingValue || bindingValue.schemaVersion !== 'approval-binding/v1') {
+    invalid('resolution must be approval-binding/v1.')
   }
-  exactKeys(bindingValue as unknown as Record<string, unknown>, [
-    'schemaVersion',
-    'approvalId',
-    'actionBindingSha256',
-    'decision',
-    'issuedAt',
-    'expiresAt',
-    'nonce',
-    'consumedAt',
-  ], 'ApprovalBinding')
   nonEmpty(bindingValue.approvalId, 'resolution.approvalId')
   if (!SHA256.test(bindingValue.actionBindingSha256)) {
     invalid('resolution.actionBindingSha256 must be a SHA-256 hex digest.')
   }
   if (!APPROVAL_DECISIONS.has(bindingValue.decision)) {
     invalid(`Unsupported approval resolution decision: ${String(bindingValue.decision)}`)
-  }
-  if (bindingValue.decision === 'approved_and_execute'
-    && bindingValue.schemaVersion !== 'approval-binding/v2') {
-    invalid('approved_and_execute requires approval-binding/v2.')
   }
   isoUtc(bindingValue.issuedAt, 'resolution.issuedAt')
   isoUtc(bindingValue.expiresAt, 'resolution.expiresAt')
@@ -929,37 +755,24 @@ function validateApprovalBindingRecord(bindingValue: ApprovalBinding | undefined
   if (bindingValue.consumedAt !== undefined) isoUtc(bindingValue.consumedAt, 'resolution.consumedAt')
 }
 
-function validateSessionRef(ref: SessionRef | undefined, runId: string, attempt?: number): void {
+function validateSessionRef(ref: SessionRef | undefined, runId: string, attempt: number): void {
   if (!ref) return
-  try {
-    validateTaskSessionRef(ref, runId, attempt)
-  } catch (error) {
-    translateTaskContractError('SessionRef', error)
-  }
+  if (ref.schemaVersion !== 'session-ref/v1') unsupported('SessionRef', ref.schemaVersion)
+  if (ref.runId !== runId || ref.attempt !== attempt) binding('sessionRef does not match run/attempt.')
+  nonEmpty(ref.provider, 'sessionRef.provider')
+  nonEmpty(ref.id, 'sessionRef.id')
+  validateCheckpointRef(ref.checkpointRef)
 }
 
 function validateCheckpointRef(ref: CheckpointRef | undefined): void {
   if (!ref) return
-  try {
-    validateTaskCheckpointRef(ref)
-  } catch (error) {
-    translateTaskContractError('CheckpointRef', error)
-  }
+  if (ref.schemaVersion !== 'checkpoint-ref/v1') unsupported('CheckpointRef', ref.schemaVersion)
+  nonEmpty(ref.provider, 'checkpointRef.provider')
+  nonEmpty(ref.id, 'checkpointRef.id')
 }
 
 function validateSafeBoundary(boundary: SafeTurnBoundaryRef, record: RunRecord): void {
   if (boundary.schemaVersion !== 'safe-turn-boundary-ref/v1') unsupported('SafeTurnBoundaryRef', boundary.schemaVersion)
-  exactKeys(boundary as unknown as Record<string, unknown>, [
-    'schemaVersion',
-    'runId',
-    'runRevision',
-    'attempt',
-    'turnId',
-    'actionSeq',
-    'observedAt',
-    'sessionRef',
-    'checkpointRef',
-  ], 'SafeTurnBoundaryRef')
   if (boundary.runId !== record.runId
     || boundary.runRevision !== record.runRevision
     || boundary.attempt !== record.attempt) {
@@ -970,24 +783,6 @@ function validateSafeBoundary(boundary: SafeTurnBoundaryRef, record: RunRecord):
   isoUtc(boundary.observedAt, 'lastSafeBoundary.observedAt')
   validateSessionRef(boundary.sessionRef, record.runId, record.attempt)
   validateCheckpointRef(boundary.checkpointRef)
-  if (boundary.sessionRef
-    && (!record.sessionRef || !sameOptionalJson(boundary.sessionRef, record.sessionRef))) {
-    binding('Safe turn boundary session does not match the Run current durable session.')
-  }
-  if (boundary.checkpointRef
-    && (!record.checkpointRef || !sameOptionalJson(boundary.checkpointRef, record.checkpointRef))) {
-    binding('Safe turn boundary checkpoint does not match the Run current checkpoint.')
-  }
-}
-
-function translateTaskContractError(kind: string, error: unknown): never {
-  if (error instanceof WebTaskContractError) {
-    if (error.code === 'BINDING_MISMATCH') binding(error.message)
-    if (error.code === 'UNSUPPORTED_SCHEMA_VERSION') {
-      throw new ControlStoreError('UNSUPPORTED_SCHEMA_VERSION', `${kind} is invalid: ${error.message}`)
-    }
-  }
-  invalid(`${kind} is invalid: ${errorMessage(error)}`)
 }
 
 function jsonObject(input: unknown, kind: string): JsonObject {
@@ -1121,11 +916,7 @@ const APPROVAL_STATES = new Set<DurableApprovalStatus>([
   'expired',
   'cancelled',
 ])
-const APPROVAL_DECISIONS = new Set<ApprovalBinding['decision']>([
-  'approved',
-  'approved_and_execute',
-  'denied',
-])
+const APPROVAL_DECISIONS = new Set<ApprovalBinding['decision']>(['approved', 'denied'])
 const APPROVAL_TERMINAL_SOURCES = new Set<ApprovalTerminalMetadata['source']>(['user', 'system', 'timeout'])
 const RUN_EVENT_TYPES = new Set<RunStoreEventType>([
   'run_created',

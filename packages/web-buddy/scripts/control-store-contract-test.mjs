@@ -101,50 +101,6 @@ validateRunCreate({
 })
 assert.deepEqual(decodeRunRecord(JSON.parse(JSON.stringify(run))), run, 'run record must JSON round-trip')
 assert.equal(decodeRunRecord(JSON.parse(JSON.stringify(run))).ownerScope.tenantId, 'future-tenant')
-assertStoreError(
-  () => decodeRunRecord({
-    ...run,
-    ownerScope: { ...ownerScope, tenantId: 'storage-tenant-differs-from-runtime' },
-  }),
-  'BINDING_MISMATCH',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...run,
-    ownerScope: { ...ownerScope, hiddenTenantAlias: 'other-tenant' },
-  }),
-  'INVALID_RECORD',
-)
-assertStoreError(
-  () => decodeRunRecord({ ...run, hiddenControlField: 'must-not-survive-decode' }),
-  'INVALID_RECORD',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...run,
-    sessionRef: { ...sessionRef, hiddenTenantAlias: 'other-tenant' },
-  }),
-  'INVALID_RECORD',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...run,
-    sessionRef: { ...sessionRef, id: '../session-path-escape' },
-  }),
-  'INVALID_RECORD',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...run,
-    resourceRefs: [{
-      schemaVersion: 'control-resource-ref/v1',
-      id: 'opaque-resource-invalid-kind',
-      kind: 'credential_shadow',
-      locator: 'opaque:resource-invalid-kind',
-    }],
-  }),
-  'INVALID_RECORD',
-)
 
 const localRun = structuredClone(run)
 const localRunCreated = structuredClone(runCreated)
@@ -234,105 +190,8 @@ assertStoreError(
     ...running,
     artifactRefs: [{
       ...taskBoundArtifact,
-      ownerScope: { ...ownerScope, tenantId: 'artifact-from-other-tenant' },
-    }],
-  }),
-  'BINDING_MISMATCH',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...running,
-    lastSafeBoundary: {
-      schemaVersion: 'safe-turn-boundary-ref/v1',
-      runId,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-      turnId: 'turn-hidden-field',
-      actionSeq: 1,
-      observedAt: running.updatedAt,
-      sessionRef,
-      hiddenEpochAlias: 99,
-    },
-  }),
-  'INVALID_RECORD',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...running,
-    artifactRefs: [{
-      ...taskBoundArtifact,
       binding: { runId, revision: running.runRevision },
     }],
-  }),
-  'BINDING_MISMATCH',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...running,
-    artifactRefs: [{
-      ...taskBoundArtifact,
-      binding: {
-        runId,
-        revision: inputSnapshot.revision,
-        sessionRef: { ...sessionRef, id: 'session-other-same-attempt' },
-      },
-    }],
-  }),
-  'BINDING_MISMATCH',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...running,
-    artifactRefs: [{
-      ...taskBoundArtifact,
-      binding: {
-        runId,
-        revision: inputSnapshot.revision,
-        sessionRef: { ...sessionRef, attempt: 2 },
-      },
-    }],
-  }),
-  'BINDING_MISMATCH',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...running,
-    lastSafeBoundary: {
-      schemaVersion: 'safe-turn-boundary-ref/v1',
-      runId,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-      turnId: 'turn-foreign-session',
-      actionSeq: 1,
-      observedAt: running.updatedAt,
-      sessionRef: { ...sessionRef, id: 'session-other-same-attempt' },
-    },
-  }),
-  'BINDING_MISMATCH',
-)
-assertStoreError(
-  () => decodeRunRecord({
-    ...running,
-    checkpointRef: {
-      schemaVersion: 'checkpoint-ref/v1',
-      provider: 'file-session-store',
-      id: 'checkpoint-current',
-    },
-    lastSafeBoundary: {
-      schemaVersion: 'safe-turn-boundary-ref/v1',
-      runId,
-      runRevision: running.runRevision,
-      attempt: running.attempt,
-      turnId: 'turn-foreign-checkpoint',
-      actionSeq: 1,
-      observedAt: running.updatedAt,
-      sessionRef,
-      checkpointRef: {
-        schemaVersion: 'checkpoint-ref/v1',
-        provider: 'file-session-store',
-        id: 'checkpoint-other',
-      },
-    },
   }),
   'BINDING_MISMATCH',
 )
@@ -470,46 +329,14 @@ validateApprovalCreate({
   event: approvalEnqueued,
   options: { idempotencyKey: approvalEnqueued.idempotencyKey },
 })
-assertStoreError(
-  () => validateApprovalCreate({
-    record: approval,
-    event: { ...approvalEnqueued, attempt: 2 },
-    options: { idempotencyKey: approvalEnqueued.idempotencyKey },
-  }),
-  'BINDING_MISMATCH',
-)
 assert.deepEqual(
   decodeApprovalRecord(JSON.parse(JSON.stringify(approval))),
   approval,
   'approval record must JSON round-trip',
 )
 assertStoreError(
-  () => decodeApprovalRecord({ ...approval, hiddenApprovalAuthority: true }),
-  'INVALID_RECORD',
-)
-assertStoreError(
-  () => validateApprovalCreate({
-    record: approval,
-    event: { ...approvalEnqueued, hiddenApprovalAuthority: true },
-    options: { idempotencyKey: approvalEnqueued.idempotencyKey },
-  }),
-  'INVALID_RECORD',
-)
-assertStoreError(
   () => decodeApprovalRecord({ ...approval, schemaVersion: 'control-approval-record/future' }),
   'UNSUPPORTED_SCHEMA_VERSION',
-)
-const foreignAttemptActionBinding = {
-  ...actionBinding,
-  sessionRef: { ...sessionRef, attempt: 2 },
-}
-assertStoreError(
-  () => decodeApprovalRecord({
-    ...approval,
-    actionBinding: foreignAttemptActionBinding,
-    actionBindingSha256: controlRecordDigest(foreignAttemptActionBinding),
-  }),
-  'BINDING_MISMATCH',
 )
 
 const resolution = {
@@ -540,18 +367,6 @@ validateApprovalResolve(approval, {
   resolution,
   resolvedAt: '2026-07-17T01:01:00.000Z',
 })
-assertStoreError(
-  () => validateApprovalResolve(approval, {
-    approvalId,
-    ownerScope,
-    expectedRecordRevision: 0,
-    idempotencyKey: 'resolve-approval-hidden-binding-field',
-    expectation: exactExpectation,
-    resolution: { ...resolution, hiddenExecutionAuthority: true },
-    resolvedAt: '2026-07-17T01:01:00.000Z',
-  }),
-  'INVALID_RECORD',
-)
 assertStoreError(
   () => validateApprovalResolve(approval, {
     approvalId,

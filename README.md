@@ -250,7 +250,7 @@ Web Buddy 会区分“恢复当前任务”和“跨任务复用经验”：Sess
 自动记忆默认关闭，可在租户 Runtime 中显式启用：
 
 ```bash
-WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)" WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
+WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED=true npm run web
 ```
 
 完整的写入、召回、页面指纹、权限继承与可观测设计见 [`packages/web-buddy/docs/memory-system.md`](packages/web-buddy/docs/memory-system.md)。
@@ -474,7 +474,7 @@ npm run demo:research        # 离线研究 Demo
 npm run fill -- <url>        # 通用表单填写，需要模型
 npm run login -- <url>       # 人工登录并保存 Playwright 登录态
 npm run demo:match           # 招聘岗位只读匹配示例
-WEB_BUDDY_API_TOKEN="$(openssl rand -hex 32)" npm run web  # 启动 Web UI
+npm run web                  # 启动 Web UI
 npm run report:safety        # 生成安全报告
 ```
 

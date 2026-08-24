@@ -136,31 +136,6 @@ assert(directSubmitReview.blockers.some((blocker) => blocker.kind === 'human_han
 assert(directSubmitReview.matchedCriteria.some((criterion) => criterion.id === 'final-submit-boundary-requires-page-form-and-policy-evidence'))
 assert(directSubmitReview.evidenceIds.includes('ev-form-direct-submit'))
 
-const verifiedDirectSubmit = engine.evaluate({
-  previous: directSubmitReview.state,
-  currentUrl: 'https://example.test/apply/direct',
-  page: page({
-    url: 'https://example.test/apply/direct',
-    title: 'Direct apply',
-    textSummary: '我已阅读并同意申请工作需知。确认投递',
-  }),
-  form: directSubmitForm,
-  policyFacts: [{ action: 'gate', riskLevel: 'critical', reason: 'final submit', gateKind: 'final_submit' }],
-  permissionFacts: [{ gateKind: 'final_submit', decision: 'approve_and_execute' }],
-  approvalFacts: [{ gateKind: 'final_submit', status: 'approved', decision: 'approve_and_execute' }],
-  verifiedFinalSubmitCompletion: true,
-  evidenceSnapshot: snapshot([
-    evidence('ev-page-verified-submit', 'page', 'The exact submit page was re-observed.', 'in_target_flow'),
-    evidence('ev-tool-verified-submit', 'tool_result', 'Independent receipt confirmed the submit.', 'in_target_flow'),
-  ]),
-  now,
-})
-assert.equal(verifiedDirectSubmit.state.phase, 'in_target_flow')
-assert.equal(verifiedDirectSubmit.state.observationPhase, 'in_target_flow')
-assert.equal(verifiedDirectSubmit.state.humanHandoffRequired, undefined)
-assert.equal(verifiedDirectSubmit.state.blocker, undefined)
-assert(!verifiedDirectSubmit.blockers.some((blocker) => blocker.gateKind === 'final_submit'))
-
 const finalDeclined = engine.evaluate({
   previous: ready.state,
   approvalFacts: [{ gateKind: 'final_submit', status: 'denied', decision: 'decline' }],

@@ -19,32 +19,15 @@ try {
     goal: 'Research two candidate products and compare their evidence.',
   })
   const recorder = new FileSessionRecorder(sessionStore, session)
-  const sourceArtifactId = 'main-browser-page-artifact'
   await recorder.transcriptDurably({
     type: 'tool_result',
-    toolCallId: 'open-current',
-    name: 'browser_open',
+    toolCallId: 'snapshot-current',
+    name: 'browser_snapshot',
     ok: true,
     result: {
       observation: 'Candidate A has verified sales evidence; Candidate B has incomplete evidence.',
-      pageChanged: true,
+      pageChanged: false,
     },
-    artifacts: [{
-      schemaVersion: 'tool-result-artifact-ref/v1',
-      artifactId: sourceArtifactId,
-      runId: session.runId,
-      sessionId: session.sessionId,
-      toolCallId: 'open-current',
-      toolName: 'browser_open',
-      kind: 'page_snapshot',
-      uri: join(root, 'unavailable-source-artifact.json'),
-      mediaType: 'application/json',
-      bytes: 1,
-      sha256: '0'.repeat(64),
-      createdAt: '2026-08-14T00:00:00.000Z',
-      retention: { scope: 'run', deleteWithSession: true },
-      sensitivity: 'internal',
-    }],
   })
   const config = loadConfig({
     trace: { outDir: join(root, 'output') },
@@ -55,7 +38,6 @@ try {
         maxConcurrentReadOnlyLlmTasks: 2,
         maxConcurrentDeterministicTasks: 1,
         notificationWaitMs: 1_000,
-        maxOutputTokens: 3_500,
       },
     },
   })
@@ -71,12 +53,10 @@ try {
     roleId: 'researcher',
     title: 'Research candidate evidence',
     goal: 'Extract source-linked facts and uncertainties.',
-    requestedArtifactIds: [sourceArtifactId],
     idempotencyKey: 'research:candidates:v1',
     actionBinding: { kind: 'browser_action', sourceActionSeq: 0 },
   })
   assert.equal(research.outcome, 'created')
-  assert.equal(runtime.getContextEnvelopeBinding(research.task.id)?.envelope.tokenBudget.reservedOutputTokens, 3_500)
   const researchResult = await waitForResult(runtime, research.task.id)
   assert.equal(researchResult.status, 'completed')
   const researchRef = researchResult.outputRefs.find((ref) => ref.artifactKind === 'research_report')
@@ -114,7 +94,7 @@ try {
   assert.match(manifestText, /"artifactKind":"comparison_report"/)
   assert.match(manifestText, /"artifactKind":"context_envelope"/)
   assert.match(manifestText, /"artifactKind":"task_graph_checkpoint"/)
-  assert.match(manifestText, /observation-browser_open-open-current/)
+  assert.match(manifestText, /observation-browser_snapshot-snapshot-current/)
 } finally {
   await rm(root, { recursive: true, force: true })
 }
@@ -125,9 +105,8 @@ console.log(JSON.stringify({
   assertions: [
     'default local factory assembles a durable read-only runtime',
     'Researcher and Comparison materialize immutable role artifacts',
-    'generic browser artifactIds resolve to isolated session artifacts',
-    'recent browser_open observations become automatically readable immutable inputs',
-    'Subagent output budget is configurable through async task config',
+    'artifactIds provide an explicit stage handoff',
+    'recent read-only Main Agent observations become isolated immutable inputs',
     'disabled rollout roles fail closed',
     'Context Envelopes and graph checkpoints persist under the session',
   ],

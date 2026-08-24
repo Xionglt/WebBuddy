@@ -68,26 +68,6 @@ assert.equal(evaluateCompletionContract({
   actions: ledger.outcomes(['send']),
 }).completed, false)
 
-const ambiguousSubmit = new ActionLedger(() => new Date('2026-07-21T00:00:00.000Z'))
-ambiguousSubmit.propose({ actionId: 'submit-in-doubt', actionKind: 'submit', toolName: 'browser_click' })
-ambiguousSubmit.authorize('submit-in-doubt')
-assert.deepEqual(ambiguousSubmit.outcomes(['submit']), [{
-  actionKind: 'submit', outcome: 'approved', actionId: 'submit-in-doubt', localExecutionAttempted: false,
-}, {
-  actionKind: 'submit', outcome: 'indeterminate', actionId: 'submit-in-doubt', localExecutionAttempted: false,
-}])
-assert.equal(evaluateCompletionContract({
-  contract: {
-    schemaVersion: 'web-task-contract/v1', contractId: 'ambiguous-submit-contract', revision: 0,
-    criteria: [{
-      kind: 'action_boundary', id: 'no-submit', description: 'submit must not happen',
-      actionKinds: ['submit'], outcome: 'not_performed',
-    }],
-  },
-  runId: 'runtime-assembly-run', revision: 0, evidence: [], artifacts: [],
-  actions: ambiguousSubmit.outcomes(['submit']),
-}).completed, false, 'an authorized action with unknown external outcome must never prove not_performed')
-
 const root = await mkdtemp(join(tmpdir(), 'web-buddy-runtime-assembly-'))
 try {
   const store = new FileToolResultStore({ rootDir: root })

@@ -122,42 +122,6 @@ try {
   assert.equal((await service.requestCancel(cancelId, 'cancel-before-start-c3')).state, 'cancelled')
   assert.equal((await service.requestCancel(cancelId, 'cancel-before-start-c3-replay')).state, 'cancelled')
 
-  const concurrentResumeId = 'run-service-concurrent-resume-c3'
-  await service.create(snapshotWebTaskInput({
-    ...snapshot,
-    schemaVersion: 'web-task-input/v1',
-    runId: concurrentResumeId,
-  }), { idempotencyKey: 'create-concurrent-resume-c3' })
-  await service.start(concurrentResumeId, 'start-concurrent-resume-c3')
-  await service.requestPause(concurrentResumeId, 'pause-concurrent-resume-c3')
-  const concurrentPaused = await service.acknowledgePause(concurrentResumeId, {
-    schemaVersion: 'safe-turn-boundary-ref/v1',
-    runId: concurrentResumeId,
-    runRevision: 0,
-    attempt: 1,
-    turnId: 'turn-concurrent-resume',
-    actionSeq: 1,
-    observedAt: new Date().toISOString(),
-  }, 'ack-concurrent-resume-c3')
-  const resumeExpectation = {
-    expectedRecordRevision: concurrentPaused.recordRevision,
-    expectedRunRevision: concurrentPaused.runRevision,
-    expectedAttempt: concurrentPaused.attempt,
-  }
-  const concurrentResumes = await Promise.allSettled([
-    service.resume(concurrentResumeId, 'concurrent-resume-a-c3', undefined, resumeExpectation),
-    service.resume(concurrentResumeId, 'concurrent-resume-b-c3', undefined, resumeExpectation),
-  ])
-  assert.equal(
-    concurrentResumes.filter((result) => result.status === 'fulfilled').length,
-    1,
-    'exactly one concurrent resume command must acquire the next attempt',
-  )
-  const concurrentlyResumed = await service.get(concurrentResumeId)
-  assert.equal(concurrentlyResumed.state, 'resuming')
-  assert.equal(concurrentlyResumed.runRevision, 1)
-  assert.equal(concurrentlyResumed.attempt, 2, 'concurrent resume must not increment the attempt twice')
-
   const approvalStore = new FileApprovalStore({ rootDir })
   const approvals = new ApprovalService(approvalStore)
   const actionBinding = {

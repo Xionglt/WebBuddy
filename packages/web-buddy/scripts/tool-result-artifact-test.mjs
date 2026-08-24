@@ -60,7 +60,7 @@ try {
       inherentRisk: 'L1',
       async run() {
         return {
-          observation: `Governmental Advisory Committee Secretariat\n${'A'.repeat(24_000)}`,
+          observation: `large observation\n${'A'.repeat(24_000)}`,
           pageChanged: false,
           data: { rows: Array.from({ length: 200 }, (_, index) => ({ index, value: `row-${index}` })) },
         }
@@ -89,7 +89,6 @@ try {
   assert.equal(artifact.kind, 'generic_json')
   assert.equal(artifact.toolName, 'large_result')
   assert.equal(artifact.toolCallId, 'large-result-call')
-  assert.equal(artifact.sensitivity, 'internal', 'ordinary words such as Secretariat must not be classified as secrets')
   assert.equal(typeof artifact.sha256, 'string')
   assert(existsSync(artifact.uri), 'large tool_result artifact should exist')
   assert(

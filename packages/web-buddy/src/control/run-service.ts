@@ -775,23 +775,22 @@ export class ApprovalService {
     ownerScope?: OwnerScope
     expectedRecordRevision: number
     expectation: ApprovalResolutionExpectation
-    decision: ApprovalBinding['decision']
+    decision: 'approved' | 'denied'
     idempotencyKey: string
     nonce: string
     expiresAt: string
     resolvedAt?: string
   }): Promise<ApprovalRecord> {
     const resolvedAt = input.resolvedAt ?? new Date().toISOString()
-    const resolutionBase = {
+    const resolution: ApprovalBinding = {
+      schemaVersion: 'approval-binding/v1',
       approvalId: input.approvalId,
       actionBindingSha256: input.expectation.actionBindingSha256,
+      decision: input.decision,
       issuedAt: resolvedAt,
       expiresAt: input.expiresAt,
       nonce: input.nonce,
     }
-    const resolution: ApprovalBinding = input.decision === 'approved_and_execute'
-      ? { ...resolutionBase, schemaVersion: 'approval-binding/v2', decision: input.decision }
-      : { ...resolutionBase, schemaVersion: 'approval-binding/v1', decision: input.decision }
     const committed = await this.store.resolveOnce({
       approvalId: input.approvalId,
       ...(input.ownerScope ? { ownerScope: input.ownerScope } : {}),

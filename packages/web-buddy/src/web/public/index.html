@@ -314,16 +314,6 @@
     background: var(--surface-subtle);
     border-bottom: 1px solid var(--line);
   }
-  .origin-row {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 9px 14px;
-    border-top: 1px solid var(--line);
-    background: var(--surface-subtle);
-  }
-  .origin-row label { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
-  .origin-input { min-width: 0; flex: 1; border: 0; background: transparent; color: var(--ink); font: 11px/1.5 var(--mono); }
   .browser-dots { display: flex; gap: 5px; }
   .browser-dots span { width: 7px; height: 7px; border-radius: 50%; background: #c8d0dc; }
   .browser-dots span:nth-child(2) { background: #aeb9c9; }
@@ -368,7 +358,6 @@
     border-top: 1px solid var(--line);
     background: #fbfcfe;
   }
-  .run-options-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
   .run-options { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
   .run-options input { accent-color: var(--accent); }
   .safety-note {
@@ -428,35 +417,6 @@
   }
 
   .timeline { min-height: 230px; padding: 4px 0 24px; }
-  .task-cards {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 9px;
-    padding: 2px 0 16px;
-  }
-  .task-card {
-    min-width: 0;
-    padding: 12px;
-    border: 1px solid var(--line);
-    border-radius: 11px;
-    background: var(--surface);
-  }
-  .task-card.running, .task-card.pending, .task-card.blocked { border-color: #b8c8ec; background: #f8faff; }
-  .task-card.completed { border-color: #b8d8d4; background: #f6fbfa; }
-  .task-card.failed, .task-card.killed { border-color: #ecc0bd; background: #fffafa; }
-  .task-card-head { display: flex; align-items: center; gap: 7px; }
-  .task-role { color: var(--accent); font: 700 10px/1.4 var(--mono); text-transform: uppercase; }
-  .task-state {
-    margin-left: auto;
-    padding: 2px 6px;
-    border-radius: 999px;
-    background: var(--rail);
-    color: var(--muted);
-    font-size: 10px;
-  }
-  .task-card-title { margin-top: 7px; font-size: 12px; font-weight: 720; overflow-wrap: anywhere; }
-  .task-card-meta, .task-card-error { margin-top: 5px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-  .task-card-error { color: var(--red); }
   .timeline-empty {
     padding: 42px 16px;
     border: 1px dashed var(--line-strong);
@@ -521,7 +481,6 @@
     align-items: center;
     margin-bottom: 11px;
   }
-  .inspect-title.subsection-title { margin-top: 14px; }
   .inspect-title h2 {
     margin: 0;
     font-size: 11px;
@@ -538,8 +497,7 @@
     font: 10px/1.5 var(--mono);
     text-align: center;
   }
-  .approval-list, .continuation-list, .risk-list, .span-list,
-  .member-list, .collaboration-task-list, .artifact-list { display: flex; flex-direction: column; gap: 8px; }
+  .approval-list, .continuation-list, .risk-list, .span-list { display: flex; flex-direction: column; gap: 8px; }
   .panel-empty {
     padding: 13px;
     border: 1px dashed var(--line-strong);
@@ -547,41 +505,6 @@
     color: var(--muted);
     font-size: 12px;
   }
-  .member-row {
-    display: grid;
-    grid-template-columns: 28px minmax(0, 1fr) auto;
-    gap: 9px;
-    align-items: center;
-  }
-  .member-avatar {
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    border: 1px solid var(--line-strong);
-    border-radius: 9px;
-    background: var(--surface-subtle);
-    color: var(--accent);
-    font: 750 10px/1 var(--mono);
-  }
-  .member-name { font-size: 12px; font-weight: 700; }
-  .member-meta { color: var(--muted); font-size: 10px; }
-  .member-presence { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
-  .member-presence.working { background: var(--accent); }
-  .member-presence.done { background: var(--teal); }
-  .member-presence.failed { background: var(--red); }
-  .sidebar-task, .artifact-card {
-    padding: 9px 10px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--surface-subtle);
-  }
-  .sidebar-task-head, .artifact-head { display: flex; align-items: center; gap: 7px; }
-  .sidebar-task-title, .artifact-kind { min-width: 0; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
-  .sidebar-task-state { margin-left: auto; color: var(--muted); font-size: 10px; }
-  .artifact-kind { color: var(--accent); font-family: var(--mono); }
-  .artifact-size { margin-left: auto; color: var(--faint); font: 9px/1.4 var(--mono); }
-  .artifact-summary { margin-top: 5px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
   .approval-card {
     padding: 11px;
     border: 1px solid #e7c78e;
@@ -693,7 +616,6 @@
     .workspace-heading h1 { font-size: 28px; }
     .composer-footer { align-items: flex-start; }
     .activity-head { flex-wrap: wrap; padding: 10px 0; }
-    .task-cards { grid-template-columns: 1fr; }
     .activity-spacer { display: none; }
     .inspect-pane { display: block; }
     .run-id { order: 3; flex-basis: 100%; max-width: none; }
@@ -749,25 +671,18 @@
           <label class="sr-only" for="url">目标网址</label>
           <input class="url-input" id="url" inputmode="url" autocomplete="url" placeholder="https://example.com" />
         </div>
-        <div class="origin-row">
-          <label for="allowedOrigins">允许来源</label>
-          <input class="origin-input" id="allowedOrigins" placeholder="可选：https://docs.example.com, https://github.com" />
-        </div>
         <div class="goal-wrap">
           <label class="field-label" for="prompt">任务目标 <span>写清结果、限制条件和停止边界</span></label>
           <textarea class="goal-input" id="prompt" placeholder="例如：阅读当前网站的产品与定价页面，比较三个方案，给出适合 20 人团队的建议，并附上页面证据。不要创建订单或提交付款。"></textarea>
         </div>
         <div class="composer-footer">
-          <div class="run-options-group">
-            <label class="run-options"><input type="checkbox" id="researchTeam" checked /> 启用只读研究团队</label>
-            <label class="run-options"><input type="checkbox" id="headless" checked /> 在后台运行浏览器</label>
-          </div>
+          <label class="run-options"><input type="checkbox" id="headless" checked /> 在后台运行浏览器</label>
           <button class="btn primary" id="runBtn" disabled>开始任务</button>
         </div>
       </section>
       <div class="safety-note">
         <span class="safety-icon" aria-hidden="true">i</span>
-        <span id="safetyNoteText">研究模式仅允许指定来源内导航；写入、发送、支付与提交一律拒绝。</span>
+        <span>登录、验证码、文件上传、发送、支付和最终提交等敏感动作会按策略暂停，等待人工确认。</span>
       </div>
 
       <section class="activity">
@@ -779,7 +694,6 @@
           <button class="btn ghost small" id="refreshBtn" disabled>刷新轨迹</button>
           <button class="btn danger small" id="stopBtn" disabled>停止任务</button>
         </div>
-        <div class="task-cards" id="taskCards" hidden></div>
         <div class="timeline" id="timeline">
           <div class="timeline-empty"><strong>任务尚未开始</strong>填写目标网址和任务目标，然后启动 Agent。</div>
         </div>
@@ -788,18 +702,6 @@
   </main>
 
   <aside class="inspect-pane">
-    <section class="inspect-section" data-contract="collaboration-state">
-      <div class="inspect-title"><h2>协作成员</h2><span class="count-badge" id="memberCount">1</span></div>
-      <div class="member-list" id="memberList"><div class="panel-empty">启动研究任务后会显示 Main Agent 与子 Agent。</div></div>
-      <div class="inspect-title subsection-title"><h2>子任务</h2><span class="count-badge" id="collaborationTaskCount">0</span></div>
-      <div class="collaboration-task-list" id="collaborationTaskList"><div class="panel-empty">尚未拆分子任务。</div></div>
-    </section>
-
-    <section class="inspect-section" data-contract="collaboration-artifacts">
-      <div class="inspect-title"><h2>交付产物</h2><span class="count-badge" id="collaborationArtifactCount">0</span></div>
-      <div class="artifact-list" id="collaborationArtifactList"><div class="panel-empty">Researcher 或 Comparison 产出的 Artifact 会出现在这里。</div></div>
-    </section>
-
     <section class="inspect-section" data-contract="continuation-inbox">
       <div class="inspect-title"><h2>需要你补充</h2><span class="count-badge" id="continuationCount">0</span></div>
       <div class="continuation-list" id="continuationList"><div class="panel-empty">当前没有等待回答的问题。</div></div>
@@ -883,24 +785,6 @@ const STATUS_LABELS = {
   cancelled: '已停止',
   cancelling: '停止中',
 };
-const TASK_STATUS_LABELS = {
-  pending: '等待中',
-  blocked: '等待依赖',
-  running: '处理中',
-  completed: '已完成',
-  failed: '失败',
-  killed: '已终止',
-};
-const ROLE_LABELS = {
-  'main-agent': 'Main Agent',
-  planner: 'Planner',
-  researcher: 'Researcher',
-  comparison: 'Comparison',
-  'form-planner': 'Form Planner',
-  'safety-reviewer': 'Safety Reviewer',
-  verification: 'Verification',
-  worker: 'Worker',
-};
 const PHASE_LABELS = {
   think: '思考',
   risk: '风险',
@@ -922,7 +806,6 @@ let activeAttempt = 0;
 let eventStream = null;
 let traceTimer = null;
 let riskTimelineKeys = new Set();
-let collaborationActivityKeys = new Set();
 
 function statusLabel(value) {
   return STATUS_LABELS[value] || value || '未知';
@@ -953,16 +836,8 @@ function setRunControls(running) {
   $('stopBtn').disabled = !running || !runId;
   $('refreshBtn').disabled = !connected || !runId;
   $('url').disabled = running;
-  $('allowedOrigins').disabled = running;
   $('prompt').disabled = running;
   $('headless').disabled = running;
-  $('researchTeam').disabled = running || $('researchTeam').dataset.available === 'false';
-}
-
-function updateSafetyNote() {
-  $('safetyNoteText').textContent = $('researchTeam').checked
-    ? '研究模式仅允许指定来源内导航；写入、发送、支付与提交一律拒绝。'
-    : '登录、验证码、文件上传、发送、支付和最终提交等敏感动作会按策略暂停，等待人工确认。';
 }
 
 function updateRunMeta(item = {}) {
@@ -996,11 +871,7 @@ async function connectService() {
     const config = await api('/api/config');
     connected = true;
     $('modelInfo').textContent = `${config.provider || 'provider'} / ${config.name || 'model'}`;
-    const teamAvailable = config.asyncTasksEnabled === true;
-    $('researchTeam').dataset.available = String(teamAvailable);
-    $('researchTeam').checked = teamAvailable;
-    updateSafetyNote();
-    $('credentialInfo').textContent = `${config.credentialConfigured ? '服务端凭据已配置' : '服务端尚未配置模型凭据'} · ${teamAvailable ? '只读研究团队已启用' : '只读研究团队未启用'}`;
+    $('credentialInfo').textContent = config.credentialConfigured ? '服务端凭据已配置' : '服务端尚未配置模型凭据';
     await refreshControlPlane();
     setConnectionState('connected', '已连接');
     $('connectBtn').textContent = '重新连接';
@@ -1032,32 +903,27 @@ async function sha256Hex(value) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function buildGenericSnapshot(startUrl, instruction, headless, researchTeam, allowedNavigationOrigins) {
+async function buildGenericSnapshot(startUrl, instruction, headless) {
   const revision = 0;
   const sensitiveRule = {
     id: 'web-console-sensitive-actions',
     actionKinds: SENSITIVE_ACTIONS,
-    decision: researchTeam ? 'deny' : 'ask',
+    decision: 'ask',
     requireApprovalBinding: true,
   };
-  const navigationRule = {
-    id: 'web-console-read-only-navigation',
-    actionKinds: ['navigate'],
-    decision: 'allow',
-    destinationOrigins: allowedNavigationOrigins,
-    requireApprovalBinding: false,
-  };
-  const rules = researchTeam ? [navigationRule, sensitiveRule] : [sensitiveRule];
-  const criteria = researchTeam
-    ? [{
-        id: 'current-page-evidence',
-        kind: 'evidence_present',
-        description: 'The read-only research team must preserve current Main runtime page evidence.',
-        evidenceKinds: ['page'],
-        minCount: 1,
-        allowedAuthorities: ['main_runtime'],
-      }]
-    : [
+  const unsigned = {
+    schemaVersion: 'web-task-input-snapshot/v1',
+    inputSchemaVersion: 'web-task-input/v1',
+    goal: {
+      instruction,
+      scenario: 'generic-web-agent',
+      metadata: { headless },
+    },
+    contract: {
+      schemaVersion: 'web-task-contract/v1',
+      contractId: 'web-console.generic.v1',
+      revision,
+      criteria: [
         {
           id: 'current-page-evidence',
           kind: 'evidence_present',
@@ -1073,39 +939,16 @@ async function buildGenericSnapshot(startUrl, instruction, headless, researchTea
           actionKinds: ['submit'],
           outcome: 'not_performed',
         },
-      ];
-  const unsigned = {
-    schemaVersion: 'web-task-input-snapshot/v1',
-    inputSchemaVersion: 'web-task-input/v1',
-    goal: {
-      instruction,
-      scenario: researchTeam ? 'research' : 'generic-web-agent',
-      metadata: { headless, collaborationMode: researchTeam ? 'read_only_team' : 'single_agent' },
-    },
-    contract: {
-      schemaVersion: 'web-task-contract/v1',
-      contractId: researchTeam ? 'web-console.research.v1' : 'web-console.generic.v1',
-      revision,
-      criteria,
-      ...(researchTeam ? {
-        requiredEvidence: [{
-          id: 'research-source-evidence',
-          kinds: ['page'],
-          minCount: 1,
-          allowedAuthorities: ['main_runtime'],
-          origins: ['web'],
-          independentlyObserved: true,
-        }],
-      } : {}),
-      sensitiveActions: rules,
+      ],
+      sensitiveActions: [sensitiveRule],
     },
     startUrl,
     contextItems: [],
     contextProviders: [],
     policy: {
       schemaVersion: 'task-policy/v1',
-      defaultSensitiveAction: researchTeam ? 'deny' : 'ask',
-      rules,
+      defaultSensitiveAction: 'ask',
+      rules: [sensitiveRule],
     },
     runId: `ui-${crypto.randomUUID()}`,
     revision,
@@ -1121,15 +964,7 @@ function validateRunInput() {
   try {
     const parsed = new URL(rawUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) return { error: '目标网址只支持 HTTP 或 HTTPS。' };
-    const origins = [parsed.origin];
-    for (const value of $('allowedOrigins').value.split(',').map((item) => item.trim()).filter(Boolean)) {
-      const origin = new URL(value);
-      if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== value) {
-        return { error: `允许来源必须是精确 origin，例如 https://docs.example.com：${value}` };
-      }
-      origins.push(origin.origin);
-    }
-    return { url: parsed.toString(), prompt, origins: [...new Set(origins)] };
+    return { url: parsed.toString(), prompt };
   } catch {
     return { error: '目标网址格式不正确，例如 https://example.com。' };
   }
@@ -1141,11 +976,9 @@ function resetRunView() {
   activeRunRevision = 0;
   activeAttempt = 0;
   riskTimelineKeys = new Set();
-  collaborationActivityKeys = new Set();
   updateRunMeta();
   $('spanCount').textContent = '0';
   $('timeline').innerHTML = '<div class="timeline-empty"><strong>正在启动 Agent</strong>建立安全会话并打开目标网页。</div>';
-  renderCollaboration(null);
   renderMetrics(null);
   renderRiskDecisions(null);
   renderSpans([]);
@@ -1256,13 +1089,7 @@ async function startRun() {
   setStatus('running');
   setRunControls(true);
   try {
-    const input = await buildGenericSnapshot(
-      values.url,
-      values.prompt,
-      $('headless').checked,
-      $('researchTeam').checked,
-      values.origins,
-    );
+    const input = await buildGenericSnapshot(values.url, values.prompt, $('headless').checked);
     const started = await api('/api/runs', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1306,141 +1133,13 @@ async function stopRun() {
 
 async function refreshTrace() {
   if (!runId) return;
-  const [trace, collaboration] = await Promise.all([
-    api(`/api/runs/${encodeURIComponent(runId)}/trace`),
-    api(`/api/runs/${encodeURIComponent(runId)}/collaboration`).catch(() => null),
-  ]);
+  const trace = await api(`/api/runs/${encodeURIComponent(runId)}/trace`);
   updateRunMeta(trace);
   $('spanCount').textContent = String(trace.spans?.length || 0);
   renderMetrics(trace.metrics || null);
   renderRiskDecisions(trace.riskDecisions || null);
   appendRiskTimeline(trace.riskDecisions?.decisions || []);
   renderSpans(trace.spans || []);
-  renderCollaboration(collaboration);
-}
-
-function renderCollaboration(value) {
-  const members = Array.isArray(value?.members) ? value.members : [];
-  const tasks = Array.isArray(value?.tasks) ? value.tasks : [];
-  const artifacts = Array.isArray(value?.artifacts) ? value.artifacts : [];
-  $('memberCount').textContent = String(members.length || 1);
-  $('collaborationTaskCount').textContent = String(tasks.length);
-  $('collaborationArtifactCount').textContent = String(artifacts.length);
-  renderMembers(members);
-  renderCollaborationTasks(tasks);
-  renderCollaborationArtifacts(artifacts);
-  renderInlineTaskCards(tasks);
-
-  const taskById = new Map(tasks.map((task) => [task.id, task]));
-  for (const activity of (value?.activities || []).slice(-16)) {
-    if (!activity?.id || collaborationActivityKeys.has(activity.id)) continue;
-    collaborationActivityKeys.add(activity.id);
-    const task = taskById.get(activity.taskId);
-    addEvent({
-      ts: activity.occurredAt,
-      level: activity.level === 'working' ? 'think' : activity.level,
-      phase: roleLabel(activity.roleId),
-      message: [activity.label, task?.title].filter(Boolean).join(' · '),
-    });
-  }
-}
-
-function renderMembers(members) {
-  const root = $('memberList');
-  root.innerHTML = '';
-  if (!members.length) {
-    root.innerHTML = '<div class="panel-empty">启动研究任务后会显示 Main Agent 与子 Agent。</div>';
-    return;
-  }
-  for (const member of members) {
-    const row = document.createElement('div');
-    row.className = 'member-row';
-    row.innerHTML = '<div class="member-avatar"></div><div><div class="member-name"></div><div class="member-meta"></div></div><span class="member-presence"></span>';
-    const label = member.label || roleLabel(member.roleId);
-    row.querySelector('.member-avatar').textContent = initials(label);
-    row.querySelector('.member-name').textContent = label;
-    row.querySelector('.member-meta').textContent = `${member.taskCount || 0} 个任务 · ${memberStatusLabel(member.status)}`;
-    row.querySelector('.member-presence').className = `member-presence ${member.status || ''}`.trim();
-    root.appendChild(row);
-  }
-}
-
-function renderCollaborationTasks(tasks) {
-  const root = $('collaborationTaskList');
-  root.innerHTML = '';
-  if (!tasks.length) {
-    root.innerHTML = '<div class="panel-empty">尚未拆分子任务。</div>';
-    return;
-  }
-  for (const task of tasks.slice(0, 10)) {
-    const row = document.createElement('div');
-    row.className = 'sidebar-task';
-    row.innerHTML = '<div class="sidebar-task-head"><span class="sidebar-task-title"></span><span class="sidebar-task-state"></span></div>';
-    row.querySelector('.sidebar-task-title').textContent = `${roleLabel(task.roleId)} · ${task.title}`;
-    row.querySelector('.sidebar-task-state').textContent = TASK_STATUS_LABELS[task.status] || task.status;
-    root.appendChild(row);
-  }
-}
-
-function renderInlineTaskCards(tasks) {
-  const root = $('taskCards');
-  root.innerHTML = '';
-  root.hidden = tasks.length === 0;
-  for (const task of tasks.slice(0, 6)) {
-    const card = document.createElement('article');
-    card.className = `task-card ${task.status || ''}`.trim();
-    card.innerHTML = '<div class="task-card-head"><span class="task-role"></span><span class="task-state"></span></div><div class="task-card-title"></div><div class="task-card-meta"></div><div class="task-card-error" hidden></div>';
-    card.querySelector('.task-role').textContent = roleLabel(task.roleId);
-    card.querySelector('.task-state').textContent = TASK_STATUS_LABELS[task.status] || task.status;
-    card.querySelector('.task-card-title').textContent = task.title;
-    card.querySelector('.task-card-meta').textContent = `attempt ${task.attempt}/${task.maxAttempts} · ${task.outputCount || 0} artifacts${task.requiredForCompletion ? ' · required' : ''}`;
-    const error = card.querySelector('.task-card-error');
-    if (task.error) {
-      error.hidden = false;
-      error.textContent = `${task.error.code} · ${task.error.message}`;
-    }
-    root.appendChild(card);
-  }
-}
-
-function renderCollaborationArtifacts(artifacts) {
-  const root = $('collaborationArtifactList');
-  root.innerHTML = '';
-  if (!artifacts.length) {
-    root.innerHTML = '<div class="panel-empty">Researcher 或 Comparison 产出的 Artifact 会出现在这里。</div>';
-    return;
-  }
-  for (const artifact of artifacts.slice(0, 10)) {
-    const card = document.createElement('div');
-    card.className = 'artifact-card';
-    card.innerHTML = '<div class="artifact-head"><span class="artifact-kind"></span><span class="artifact-size"></span></div><div class="artifact-summary"></div>';
-    card.querySelector('.artifact-kind').textContent = artifactKindLabel(artifact.artifactKind);
-    card.querySelector('.artifact-size').textContent = formatBytes(artifact.byteLength);
-    card.querySelector('.artifact-summary').textContent = artifact.summary;
-    root.appendChild(card);
-  }
-}
-
-function roleLabel(roleId) {
-  return ROLE_LABELS[roleId] || roleId || 'Agent';
-}
-
-function memberStatusLabel(status) {
-  return ({ idle: '空闲', working: '工作中', done: '已完成', failed: '需要检查' })[status] || status || '空闲';
-}
-
-function initials(label) {
-  return String(label || 'A').split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
-}
-
-function artifactKindLabel(kind) {
-  return ({ research_report: 'Research Report', comparison_report: 'Comparison Report', runner_result: 'Page Evidence' })[kind] || kind || 'Artifact';
-}
-
-function formatBytes(value) {
-  const bytes = Number(value || 0);
-  if (bytes < 1024) return `${bytes} B`;
-  return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
 }
 
 function renderMetrics(metrics) {
@@ -1696,7 +1395,6 @@ async function selectRun(selectedRunId) {
   ]);
   runId = detail.runId;
   riskTimelineKeys = new Set();
-  collaborationActivityKeys = new Set();
   applyRunState(detail);
   $('timeline').innerHTML = '';
   for (const event of history.items || []) {
@@ -1730,31 +1428,13 @@ function renderApprovalList(items) {
     const card = document.createElement('div');
     card.className = 'approval-card';
     card.innerHTML = '<div class="approval-kind"></div><div class="approval-meta"></div><div class="approval-actions"></div>';
-    card.querySelector('.approval-kind').textContent = item.action?.externalActionKind
-      ? `外部动作：${item.action.externalActionKind}`
-      : gateLabel(item.action?.kind) || item.action?.kind || '敏感动作';
-    card.querySelector('.approval-meta').textContent = [
-      item.runId,
-      item.action?.destinationOrigin,
-      item.action?.externalBusinessKey,
-      item.action?.externalProbeId ? `probe ${item.action.externalProbeId}` : '',
-      item.action?.externalEffectPreview ? `effect ${item.action.externalEffectPreview}` : '',
-      item.action?.externalEffectDigest ? `effect ${item.action.externalEffectDigest.slice(0, 12)}…` : '',
-    ].filter(Boolean).join(' · ');
+    card.querySelector('.approval-kind').textContent = gateLabel(item.action?.kind) || item.action?.kind || '敏感动作';
+    card.querySelector('.approval-meta').textContent = `${item.runId}${item.action?.destinationOrigin ? ` · ${item.action.destinationOrigin}` : ''}`;
     const actions = card.querySelector('.approval-actions');
-    const allowedDecisions = Array.isArray(item.allowedDecisions)
-      ? item.allowedDecisions
-      : ['approved', 'denied'];
-    for (const decision of allowedDecisions) {
+    for (const decision of ['approved', 'denied']) {
       const button = document.createElement('button');
-      button.className = `btn small ${decision === 'denied' ? 'danger' : 'primary'}`;
-      button.textContent = decision === 'approved_and_execute'
-        ? '确认并执行'
-        : decision === 'approved'
-          ? allowedDecisions.includes('approved_and_execute')
-            ? '仅确认知晓'
-            : '允许一次'
-          : '拒绝';
+      button.className = `btn small ${decision === 'approved' ? 'primary' : 'danger'}`;
+      button.textContent = decision === 'approved' ? '允许一次' : '拒绝';
       button.addEventListener('click', async () => {
         button.disabled = true;
         try {
@@ -1769,15 +1449,9 @@ function renderApprovalList(items) {
             }),
           });
           addEvent({
-            level: decision === 'denied' ? 'warn' : 'decision',
+            level: decision === 'approved' ? 'decision' : 'warn',
             phase: 'approval',
-            message: decision === 'approved_and_execute'
-              ? '已对当前精确绑定的动作授权机器执行一次。'
-              : decision === 'approved'
-                ? allowedDecisions.includes('approved_and_execute')
-                  ? '已确认知晓边界；不会因此执行这个外部副作用。'
-                  : '已允许这一次敏感动作。'
-                : '已拒绝这一次敏感动作。',
+            message: decision === 'approved' ? '已允许这一次敏感动作。' : '已拒绝这一次敏感动作。',
           });
           await refreshControlPlane();
         } catch (error) {
@@ -1819,7 +1493,6 @@ $('serviceToken').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') $('connectBtn').click();
 });
 $('runBtn').addEventListener('click', startRun);
-$('researchTeam').addEventListener('change', updateSafetyNote);
 $('stopBtn').addEventListener('click', stopRun);
 $('refreshBtn').addEventListener('click', () => refreshTrace().catch((error) => {
   addEvent({ level: 'error', phase: 'trace', message: error.message || String(error) });
@@ -1836,7 +1509,6 @@ $('artifactLink').addEventListener('click', (event) => {
 setInterval(() => {
   if (connected) refreshControlPlane().catch(() => {});
 }, 5000);
-updateSafetyNote();
 </script>
 </body>
 </html>

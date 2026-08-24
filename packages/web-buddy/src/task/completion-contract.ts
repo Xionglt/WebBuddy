@@ -42,7 +42,7 @@ const AUTHORITATIVE = new Set<EvidenceAuthority>(['main_runtime', 'user'])
 export function evaluateCompletionContract(input: EvaluateCompletionContractInput): CompletionContractEvaluation {
   const now = input.now ?? new Date()
   const evidence = uniqueRefs(input.evidence).filter((item) => evidenceIsCurrentAndVerified(item, input.runId, input.revision, now))
-  const artifacts = uniqueRefs(input.artifacts).filter((item) => artifactIsUsable(item, input.runId, input.revision, now))
+  const artifacts = uniqueRefs(input.artifacts).filter((item) => artifactIsUsable(item, input.runId, input.revision))
   const criteria = [
     ...input.contract.criteria.map((criterion) => evaluateCriterion(criterion, evidence, artifacts, input.formState, input.actions ?? [], now)),
     ...(input.contract.requiredEvidence ?? []).map((requirement) => evaluateEvidenceRequirement(requirement, evidence, now)),
@@ -67,25 +67,12 @@ export function evidenceIsCurrentAndVerified(evidence: EvidenceRef, runId: strin
   if (evidence.binding.runId !== runId || evidence.binding.revision !== revision) return false
   const createdAt = Date.parse(evidence.createdAt)
   if (!Number.isFinite(createdAt) || createdAt > now.getTime()) return false
-  if (evidence.expiresAt !== undefined) {
-    const expiresAt = Date.parse(evidence.expiresAt)
-    if (!Number.isFinite(expiresAt) || expiresAt <= now.getTime()) return false
-  }
-  if (evidence.freshness.expiresAt !== undefined) {
-    const freshnessExpiresAt = Date.parse(evidence.freshness.expiresAt)
-    if (!Number.isFinite(freshnessExpiresAt) || freshnessExpiresAt <= now.getTime()) return false
-  }
+  if (evidence.expiresAt && Date.parse(evidence.expiresAt) <= now.getTime()) return false
   return true
 }
 
-function artifactIsUsable(artifact: ArtifactRef, runId: string, revision: number, now: Date): boolean {
+function artifactIsUsable(artifact: ArtifactRef, runId: string, revision: number): boolean {
   if (!artifact.immutable || artifact.binding.runId !== runId || artifact.binding.revision !== revision) return false
-  const createdAt = Date.parse(artifact.createdAt)
-  if (!Number.isFinite(createdAt) || createdAt > now.getTime()) return false
-  if (artifact.retention.expiresAt !== undefined) {
-    const retentionExpiresAt = Date.parse(artifact.retention.expiresAt)
-    if (!Number.isFinite(retentionExpiresAt) || retentionExpiresAt <= now.getTime()) return false
-  }
   if (artifact.redaction.status === 'rejected') return false
   if (artifact.scanner.status === 'quarantined' || artifact.scanner.status === 'rejected') return false
   if (artifact.requiresMainWorkflowVerification || artifact.authoritativeCompletionEvidence === false) {
@@ -112,14 +99,7 @@ function evaluateCriterion(
   }
   if (criterion.kind === 'artifact_present') {
     const matches = artifacts.filter((item) => criterion.artifactKinds.includes(item.kind) && (!criterion.schemaVersions?.length || criterion.schemaVersions.includes(item.payloadSchemaVersion)))
-    const missingBusinessKeys = criterion.businessKeys?.filter((businessKey) => (
-      !matches.some((item) => item.binding.externalBusinessKey === businessKey)
-    )) ?? []
-    const passed = matches.length >= criterion.minCount && missingBusinessKeys.length === 0
-    const reason = missingBusinessKeys.length
-      ? `Found ${matches.length}/${criterion.minCount} required artifact(s); missing business keys: ${missingBusinessKeys.join(', ')}.`
-      : `Found ${matches.length}/${criterion.minCount} required artifact(s).`
-    return evaluated(criterion.id, passed, reason, [], matches.map((item) => item.id))
+    return evaluated(criterion.id, matches.length >= criterion.minCount, `Found ${matches.length}/${criterion.minCount} required artifact(s).`, [], matches.map((item) => item.id))
   }
   if (criterion.kind === 'form_state') {
     const passed = Boolean(
@@ -135,34 +115,8 @@ function evaluateCriterion(
     const matches = evidence.filter((item) => item.authority === 'user' && item.kind === `user_confirmation:${criterion.confirmationKind}` && (!criterion.actionId || item.actionBinding?.actionId === criterion.actionId))
     return evaluated(criterion.id, matches.length > 0, matches.length ? 'Required human confirmation is present.' : 'Required human confirmation is missing.', matches.map((item) => item.id), [])
   }
-  const passed = actionBoundarySatisfied(criterion, actions)
+  const passed = criterion.actionKinds.every((kind) => actions.some((action) => action.actionKind === kind && action.outcome === criterion.outcome))
   return evaluated(criterion.id, passed, passed ? `Required ${criterion.outcome} action boundary is satisfied.` : `Action boundary requires ${criterion.actionKinds.join(', ')}=${criterion.outcome}.`, [], [])
-}
-
-function actionBoundarySatisfied(
-  criterion: Extract<CompletionCriterion, { kind: 'action_boundary' }>,
-  actions: readonly ActionOutcome[],
-): boolean {
-  if (criterion.businessKeys?.length) {
-    return criterion.actionKinds.every((kind) => criterion.businessKeys!.every((businessKey) => {
-      const matches = actions.filter((action) => (
-        action.actionKind === kind && action.businessKey === businessKey
-      ))
-      if (criterion.outcome === 'approved') {
-        return matches.some((action) => action.outcome === 'approved')
-      }
-      const terminal = matches.filter((action) => action.outcome !== 'approved')
-      return terminal.length > 0 && terminal.every((action) => action.outcome === criterion.outcome)
-    }))
-  }
-  return criterion.actionKinds.every((kind) => {
-    const matches = actions.filter((action) => action.actionKind === kind)
-    if (criterion.outcome === 'approved') {
-      return matches.some((action) => action.outcome === 'approved')
-    }
-    const terminal = matches.filter((action) => action.outcome !== 'approved')
-    return terminal.length > 0 && terminal.every((action) => action.outcome === criterion.outcome)
-  })
 }
 
 function evaluateEvidenceRequirement(requirement: EvidenceRequirement, evidence: EvidenceRef[], now: Date): CriterionEvaluation {

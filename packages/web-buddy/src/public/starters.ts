@@ -17,8 +17,6 @@ export interface ResearchStarter {
   schemaVersion: typeof RESEARCH_STARTER_SCHEMA_VERSION
   goal: string
   startUrl: string
-  /** Exact HTTP(S) origins the read-only researcher may navigate to. Defaults to the start URL origin. */
-  allowedNavigationOrigins?: string[]
   runId?: string
 }
 
@@ -41,8 +39,6 @@ export interface ComparisonStarter {
   goal: string
   options: ComparisonOption[]
   startUrl?: string
-  /** Exact HTTP(S) origins the read-only comparison task may navigate to. Defaults to the start URL origin. */
-  allowedNavigationOrigins?: string[]
   runId?: string
   capturedAt?: string
 }
@@ -65,15 +61,13 @@ export interface FormDraftStarter {
 
 export function createResearchStarter(input: ResearchStarter): WebTaskInput {
   if (input.schemaVersion !== RESEARCH_STARTER_SCHEMA_VERSION) unsupported('ResearchStarter')
-  const startUrl = httpUrl(input.startUrl)
-  const sensitiveActions = readOnlyActions(startUrl, input.allowedNavigationOrigins)
   return {
     schemaVersion: 'web-task-input/v1',
     goal: {
       instruction: required(input.goal, 'goal'),
       scenario: 'research',
     },
-    startUrl,
+    startUrl: httpUrl(input.startUrl),
     contract: {
       schemaVersion: 'web-task-contract/v1',
       contractId: 'starter.research.v1',
@@ -94,9 +88,9 @@ export function createResearchStarter(input: ResearchStarter): WebTaskInput {
         origins: ['web'],
         independentlyObserved: true,
       }],
-      sensitiveActions,
+      sensitiveActions: denyWriteActions(),
     },
-    policy: readOnlyPolicy(startUrl, input.allowedNavigationOrigins),
+    policy: denyWritePolicy(),
     ...(input.runId ? { runId: required(input.runId, 'runId') } : {}),
   }
 }
@@ -108,8 +102,6 @@ export function createComparisonStarter(input: ComparisonStarter): WebTaskInput 
   }
   const capturedAt = validTimestamp(input.capturedAt ?? new Date().toISOString())
   const contextItems = input.options.map((option, index) => comparisonContext(option, index, capturedAt))
-  const startUrl = input.startUrl ? httpUrl(input.startUrl) : undefined
-  const sensitiveActions = readOnlyActions(startUrl, input.allowedNavigationOrigins)
   if (new Set(contextItems.map((item) => item.id)).size !== contextItems.length) {
     invalid('Comparison option ids must be unique.')
   }
@@ -120,7 +112,7 @@ export function createComparisonStarter(input: ComparisonStarter): WebTaskInput 
       scenario: 'comparison',
       metadata: { optionCount: contextItems.length },
     },
-    ...(startUrl ? { startUrl } : {}),
+    ...(input.startUrl ? { startUrl: httpUrl(input.startUrl) } : {}),
     contextItems,
     contract: {
       schemaVersion: 'web-task-contract/v1',
@@ -134,9 +126,9 @@ export function createComparisonStarter(input: ComparisonStarter): WebTaskInput 
         minCount: 1,
         schemaVersions: ['comparison-report/v1'],
       }],
-      sensitiveActions,
+      sensitiveActions: denyWriteActions(),
     },
-    policy: readOnlyPolicy(startUrl, input.allowedNavigationOrigins),
+    policy: denyWritePolicy(),
     ...(input.runId ? { runId: required(input.runId, 'runId') } : {}),
   }
 }
@@ -309,53 +301,12 @@ function userContext(input: {
   }
 }
 
-function readOnlyPolicy(startUrl?: string, allowedNavigationOrigins?: readonly string[]) {
+function denyWritePolicy() {
   return {
     schemaVersion: 'task-policy/v1' as const,
     defaultSensitiveAction: 'deny' as const,
-    rules: readOnlyActions(startUrl, allowedNavigationOrigins),
+    rules: denyWriteActions(),
   }
-}
-
-function readOnlyActions(startUrl?: string, allowedNavigationOrigins?: readonly string[]): SensitiveActionRule[] {
-  if (!startUrl) {
-    if (allowedNavigationOrigins && allowedNavigationOrigins.length > 0) {
-      invalid('allowedNavigationOrigins requires startUrl.')
-    }
-    return denyWriteActions()
-  }
-  const origins = navigationOrigins(startUrl, allowedNavigationOrigins)
-  return [
-    {
-      id: 'starter-allow-read-only-navigation',
-      actionKinds: ['navigate'],
-      decision: 'allow',
-      destinationOrigins: origins,
-      requireApprovalBinding: false,
-    },
-    ...denyWriteActions(),
-  ]
-}
-
-function navigationOrigins(startUrl: string, values?: readonly string[]): string[] {
-  const candidates = values === undefined ? [new URL(startUrl).origin] : values
-  if (candidates.length === 0) invalid('allowedNavigationOrigins must not be empty when supplied.')
-  const origins = candidates.map((value, index) => httpOrigin(value, `allowedNavigationOrigins[${index}]`))
-  return [...new Set(origins)]
-}
-
-function httpOrigin(value: unknown, label: string): string {
-  const raw = required(value, label)
-  let parsed: URL
-  try {
-    parsed = new URL(raw)
-  } catch {
-    invalid(`${label} must be an absolute HTTP(S) origin.`)
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.origin !== raw) {
-    invalid(`${label} must be an exact HTTP(S) origin without credentials, path, query, or fragment.`)
-  }
-  return parsed.origin
 }
 
 function denyWriteActions(): SensitiveActionRule[] {

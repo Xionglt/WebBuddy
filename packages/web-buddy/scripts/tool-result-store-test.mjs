@@ -111,34 +111,6 @@ try {
     data: Buffer.from('fake-png-bytes').toString('base64'),
   })
 
-  const durableRef = await store.writeDurably({
-    runId: 'run-tool-result-store-test',
-    sessionId: 'session-tool-result-store-test',
-    toolCallId: 'call-durable-receipt',
-    toolName: 'external_action_reconciliation',
-    kind: 'generic_json',
-    content: { schemaVersion: 'durability-fixture/v1', result: 'committed' },
-  })
-  assert.equal(durableRef.toolCallId, 'call-durable-receipt')
-  assert.deepEqual((await store.read(durableRef)).content, {
-    schemaVersion: 'durability-fixture/v1',
-    result: 'committed',
-  })
-
-  for (const unsafeIdentity of ['../escape', 'nested/path', 'nested\\path']) {
-    await assert.rejects(
-      store.writeDurably({
-        runId: 'safe-run',
-        sessionId: unsafeIdentity,
-        toolCallId: 'unsafe-path',
-        toolName: 'external_action_reconciliation',
-        kind: 'generic_json',
-        content: { shouldNotPersist: true },
-      }),
-      /UNSAFE_STORAGE_IDENTITY/,
-    )
-  }
-
   console.log('tool-result-store-test: PASS')
 } finally {
   rmSync(root, { recursive: true, force: true })

@@ -1,22 +1,13 @@
 import type {
   ArtifactRef,
-  CheckpointRef,
   JsonObject,
   RunLifecycleState,
-  SessionRef,
   WebTaskEvent,
   WebTaskInputSnapshot,
 } from './contracts.js'
 import {
   PublicContractError,
 } from './task.js'
-import {
-  canonicalJson,
-  validateArtifactRef,
-  validateCheckpointRef,
-  validateSessionRef,
-} from '../task/contracts.js'
-import { redactSensitiveData } from '../security/redaction.js'
 import {
   assertServiceScopeAccess,
   validateServiceScope,
@@ -102,13 +93,7 @@ export interface PublicApproval {
     kind: string
     sourceOrigin?: string
     destinationOrigin?: string
-    externalBusinessKey?: string
-    externalEffectDigest?: string
-    externalProbeId?: string
-    externalActionKind?: string
-    externalEffectPreview?: string
   }
-  allowedDecisions: Array<'approved' | 'approved_and_execute' | 'denied'>
   requestedAt: string
   expiresAt: string
 }
@@ -179,7 +164,7 @@ export interface ApprovalClient {
     schemaVersion: 'approval-client-resolve/v1'
     approvalId: string
     expectedRevision: number
-    decision: 'approved' | 'approved_and_execute' | 'denied'
+    decision: 'approved' | 'denied'
     idempotencyKey: string
   }): Promise<PublicApproval>
 }
@@ -206,7 +191,7 @@ export function createRunClient(input: {
           input: request.input as unknown as JsonObject,
           idempotencyKey: request.idempotencyKey,
         },
-      }), scope, request.input.runId)
+      }), scope)
     },
     async list(request) {
       version(request, 'run-client-list/v1', 'RunClient.list')
@@ -219,7 +204,7 @@ export function createRunClient(input: {
     async get(request) {
       version(request, 'run-client-get/v1', 'RunClient.get')
       const value = await send({ method: 'GET', path: `/api/runs/${segment(request.runId)}` })
-      return value === undefined || value === null ? undefined : publicRun(value, scope, request.runId)
+      return value === undefined || value === null ? undefined : publicRun(value, scope)
     },
     pause: (request) => control(send, scope, 'pause', request),
     resume: (request) => control(send, scope, 'resume', request),
@@ -229,7 +214,7 @@ export function createRunClient(input: {
         method: 'POST',
         path: `/api/runs/${segment(request.runId)}/continuations/${segment(request.continuationId)}/resolve`,
         body: jsonObject(request),
-      }), scope, request.runId)
+      }), scope)
     },
     cancel: (request) => control(send, scope, 'cancel', request),
     async events(request) {
@@ -271,7 +256,7 @@ export function createApprovalClient(input: {
         method: 'GET',
         path: '/api/approvals',
         query: jsonObject(request),
-      }), scope, request.runId)
+      }), scope)
     },
     async resolve(request) {
       version(request, 'approval-client-resolve/v1', 'ApprovalClient.resolve')
@@ -279,7 +264,7 @@ export function createApprovalClient(input: {
         method: 'POST',
         path: `/api/approvals/${segment(request.approvalId)}/resolve`,
         body: jsonObject(request),
-      }), scope, request.approvalId)
+      }), scope)
     },
   }
   return Object.freeze(client)
@@ -296,22 +281,18 @@ async function control(
     method: 'POST',
     path: `/api/runs/${segment(request.runId)}/${action}`,
     body: jsonObject(request),
-  }), scope, request.runId)
+  }), scope)
 }
 
-function publicRun(value: unknown, scope: ServiceScope, expectedRunId?: string): PublicRun {
+function publicRun(value: unknown, scope: ServiceScope): PublicRun {
   const record = object(value, 'PublicRun')
   if (record.schemaVersion !== PUBLIC_RUN_SCHEMA_VERSION) unsupported('PublicRun')
   const resourceScope = validateServiceScope(record.scope)
   assertServiceScopeAccess(scope, resourceScope)
   if (!RUN_STATES.has(String(record.state))) transportError('PublicRun.state is invalid.')
-  const runId = requiredString(record.runId, 'PublicRun.runId')
-  if (expectedRunId !== undefined && runId !== expectedRunId) {
-    transportError('PublicRun.runId does not match the request.')
-  }
   return {
     schemaVersion: PUBLIC_RUN_SCHEMA_VERSION,
-    runId,
+    runId: requiredString(record.runId, 'PublicRun.runId'),
     revision: nonNegative(record.revision, 'PublicRun.revision'),
     attempt: positive(record.attempt, 'PublicRun.attempt'),
     state: record.state as RunLifecycleState,
@@ -388,96 +369,11 @@ function publicRunEvents(value: unknown, scope: ServiceScope, runId: string): Pu
   if (requiredString(response.runId, 'PublicRunEvents.runId') !== runId) {
     transportError('PublicRunEvents.runId does not match the request.')
   }
-  const items = response.items.map((value, index) => publicRunEvent(value, runId, index))
-  for (let index = 1; index < items.length; index += 1) {
-    const previous = items[index - 1]
-    const current = items[index]
-    if (current.sequence <= previous.sequence
-      || current.revision < previous.revision
-      || Date.parse(current.timestamp) < Date.parse(previous.timestamp)) {
-      transportError(`PublicRunEvents.items[${index}] is not a strictly ordered event stream.`)
-    }
-  }
   return {
     schemaVersion: PUBLIC_RUN_EVENTS_SCHEMA_VERSION,
     scope: resourceScope,
     runId,
-    items,
-  }
-}
-
-function publicRunEvent(value: unknown, runId: string, index: number): WebTaskEvent {
-  const label = `PublicRunEvents.items[${index}]`
-  const event = object(value, label)
-  closed(event, [
-    'schemaVersion', 'sequence', 'type', 'timestamp', 'runId', 'revision', 'snapshot', 'data',
-  ], label)
-  if (event.schemaVersion !== 'web-task-event/v1') transportError(`${label}.schemaVersion is invalid.`)
-  if (requiredString(event.runId, `${label}.runId`) !== runId) {
-    transportError(`${label}.runId does not match the response Run.`)
-  }
-  const revision = nonNegative(event.revision, `${label}.revision`)
-  const snapshot = event.snapshot === undefined
-    ? undefined
-    : publicRunSnapshot(event.snapshot, runId, revision, label)
-  if (event.data !== undefined) {
-    try {
-      canonicalJson(event.data)
-    } catch (error) {
-      transportError(`${label}.data is not JSON-safe: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  return {
-    schemaVersion: 'web-task-event/v1',
-    sequence: nonNegative(event.sequence, `${label}.sequence`),
-    type: requiredString(event.type, `${label}.type`),
-    timestamp: requiredTimestamp(event.timestamp, `${label}.timestamp`),
-    runId,
-    revision,
-    ...(snapshot ? { snapshot } : {}),
-    ...(event.data === undefined ? {} : { data: structuredClone(event.data) as JsonObject }),
-  }
-}
-
-function publicRunSnapshot(
-  value: unknown,
-  runId: string,
-  revision: number,
-  eventLabel: string,
-): NonNullable<WebTaskEvent['snapshot']> {
-  const label = `${eventLabel}.snapshot`
-  const snapshot = object(value, label)
-  closed(snapshot, [
-    'schemaVersion', 'runId', 'sessionRef', 'revision', 'attempt', 'state',
-    'checkpointRef', 'updatedAt', 'reason',
-  ], label)
-  if (snapshot.schemaVersion !== 'run-snapshot/v1') transportError(`${label}.schemaVersion is invalid.`)
-  const attempt = positive(snapshot.attempt, `${label}.attempt`)
-  if (requiredString(snapshot.runId, `${label}.runId`) !== runId
-    || nonNegative(snapshot.revision, `${label}.revision`) !== revision) {
-    transportError(`${label} does not match its event Run/revision.`)
-  }
-  if (!RUN_STATES.has(String(snapshot.state))) transportError(`${label}.state is invalid.`)
-  try {
-    if (snapshot.sessionRef !== undefined) validateSessionRef(snapshot.sessionRef as SessionRef, runId, attempt)
-    if (snapshot.checkpointRef !== undefined) validateCheckpointRef(snapshot.checkpointRef as CheckpointRef)
-  } catch (error) {
-    transportError(`${label} durable reference is invalid: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  return {
-    schemaVersion: 'run-snapshot/v1',
-    runId,
-    ...(snapshot.sessionRef === undefined
-      ? {}
-      : { sessionRef: structuredClone(snapshot.sessionRef) as SessionRef }),
-    revision,
-    attempt,
-    state: snapshot.state as RunLifecycleState,
-    ...(snapshot.checkpointRef === undefined
-      ? {}
-      : { checkpointRef: structuredClone(snapshot.checkpointRef) as CheckpointRef }),
-    updatedAt: requiredTimestamp(snapshot.updatedAt, `${label}.updatedAt`),
-    ...(snapshot.reason === undefined ? {} : { reason: requiredString(snapshot.reason, `${label}.reason`) }),
+    items: structuredClone(response.items) as WebTaskEvent[],
   }
 }
 
@@ -493,106 +389,25 @@ function publicArtifactList(value: unknown, scope: ServiceScope, runId: string):
   if (requiredString(response.runId, 'PublicArtifactList.runId') !== runId) {
     transportError('PublicArtifactList.runId does not match the request.')
   }
-  const items = response.items.map((value, index) => {
-    const artifact = structuredClone(value) as ArtifactRef
-    try {
-      const revision = nonNegative(artifact?.binding?.revision, `PublicArtifactList.items[${index}].binding.revision`)
-      validateArtifactRef(artifact, runId, revision)
-    } catch (error) {
-      transportError(`PublicArtifactList.items[${index}] is invalid: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    const expectedOwnerScope = resourceScope.kind === 'local'
-      ? undefined
-      : {
-          schemaVersion: 'owner-scope/v1' as const,
-          tenantId: resourceScope.tenantId,
-          userId: resourceScope.userId,
-        }
-    if ((expectedOwnerScope === undefined && artifact.ownerScope !== undefined)
-      || (expectedOwnerScope !== undefined
-        && (artifact.ownerScope === undefined
-          || canonicalJson(artifact.ownerScope) !== canonicalJson(expectedOwnerScope)))) {
-      transportError(`PublicArtifactList.items[${index}] owner scope does not match the response scope.`)
-    }
-    return artifact
-  })
   return {
     schemaVersion: PUBLIC_ARTIFACT_LIST_SCHEMA_VERSION,
     scope: resourceScope,
     runId,
-    items,
+    items: structuredClone(response.items) as ArtifactRef[],
   }
 }
 
-function publicApproval(
-  value: unknown,
-  scope: ServiceScope,
-  expectedApprovalId?: string,
-  expectedRunId?: string,
-): PublicApproval {
+function publicApproval(value: unknown, scope: ServiceScope): PublicApproval {
   const approval = object(value, 'PublicApproval')
   if (approval.schemaVersion !== PUBLIC_APPROVAL_SCHEMA_VERSION) unsupported('PublicApproval')
   const resourceScope = validateServiceScope(approval.scope)
   assertServiceScopeAccess(scope, resourceScope)
   if (!APPROVAL_STATES.has(String(approval.status))) transportError('PublicApproval.status is invalid.')
-  const approvalId = requiredString(approval.approvalId, 'PublicApproval.approvalId')
-  if (expectedApprovalId !== undefined && approvalId !== expectedApprovalId) {
-    transportError('PublicApproval.approvalId does not match the request.')
-  }
-  const runId = requiredString(approval.runId, 'PublicApproval.runId')
-  if (expectedRunId !== undefined && runId !== expectedRunId) {
-    transportError('PublicApproval.runId does not match the list request.')
-  }
   const action = object(approval.action, 'PublicApproval.action')
-  if (!Array.isArray(approval.allowedDecisions)
-    || approval.allowedDecisions.length === 0
-    || new Set(approval.allowedDecisions).size !== approval.allowedDecisions.length
-    || approval.allowedDecisions.some((decision) => (
-      decision !== 'approved'
-      && decision !== 'approved_and_execute'
-      && decision !== 'denied'
-    ))) {
-    transportError('PublicApproval.allowedDecisions is invalid.')
-  }
-  const externalActionKind = action.externalActionKind === undefined
-    ? undefined
-    : requiredExternalActionKind(action.externalActionKind)
-  const externalEffectPreview = action.externalEffectPreview === undefined
-    ? undefined
-    : requiredEffectPreview(action.externalEffectPreview)
-  const externalBusinessKey = action.externalBusinessKey === undefined
-    ? undefined
-    : requiredCanonicalString(action.externalBusinessKey, 'PublicApproval.action.externalBusinessKey', 1_024)
-  const externalEffectDigest = action.externalEffectDigest === undefined
-    ? undefined
-    : requiredSha256(action.externalEffectDigest, 'PublicApproval.action.externalEffectDigest')
-  const externalProbeId = action.externalProbeId === undefined
-    ? undefined
-    : requiredCanonicalString(action.externalProbeId, 'PublicApproval.action.externalProbeId', 256)
-  const externalIdentity = [externalBusinessKey, externalEffectDigest, externalProbeId]
-  if (externalIdentity.some((item) => item !== undefined)
-    && externalIdentity.some((item) => item === undefined)) {
-    transportError('PublicApproval.action external identity must include business key, digest and probe id together.')
-  }
-  if ((externalActionKind !== undefined || externalEffectPreview !== undefined)
-    && externalIdentity.some((item) => item === undefined)) {
-    transportError('PublicApproval.action semantic kind and preview require a complete external identity.')
-  }
-  if (approval.allowedDecisions.includes('approved_and_execute')
-    && (externalActionKind === undefined
-      || externalIdentity.some((item) => item === undefined)
-      || externalEffectPreview === undefined)) {
-    transportError('PublicApproval cannot offer approved_and_execute without a reviewable external effect.')
-  }
-  const requestedAt = requiredTimestamp(approval.requestedAt, 'PublicApproval.requestedAt')
-  const expiresAt = requiredTimestamp(approval.expiresAt, 'PublicApproval.expiresAt')
-  if (Date.parse(expiresAt) <= Date.parse(requestedAt)) {
-    transportError('PublicApproval.expiresAt must follow requestedAt.')
-  }
   return {
     schemaVersion: PUBLIC_APPROVAL_SCHEMA_VERSION,
-    approvalId,
-    runId,
+    approvalId: requiredString(approval.approvalId, 'PublicApproval.approvalId'),
+    runId: requiredString(approval.runId, 'PublicApproval.runId'),
     revision: nonNegative(approval.revision, 'PublicApproval.revision'),
     attempt: positive(approval.attempt, 'PublicApproval.attempt'),
     status: approval.status as PublicApproval['status'],
@@ -602,44 +417,24 @@ function publicApproval(
       kind: requiredString(action.kind, 'PublicApproval.action.kind'),
       ...(action.sourceOrigin === undefined
         ? {}
-        : { sourceOrigin: requiredOrigin(action.sourceOrigin, 'PublicApproval.action.sourceOrigin') }),
+        : { sourceOrigin: requiredString(action.sourceOrigin, 'PublicApproval.action.sourceOrigin') }),
       ...(action.destinationOrigin === undefined
         ? {}
-        : { destinationOrigin: requiredOrigin(action.destinationOrigin, 'PublicApproval.action.destinationOrigin') }),
-      ...(action.externalBusinessKey === undefined
-        ? {}
-        : { externalBusinessKey }),
-      ...(action.externalEffectDigest === undefined
-        ? {}
-        : { externalEffectDigest }),
-      ...(action.externalProbeId === undefined
-        ? {}
-        : { externalProbeId }),
-      ...(action.externalActionKind === undefined
-        ? {}
-        : { externalActionKind }),
-      ...(action.externalEffectPreview === undefined
-        ? {}
-        : { externalEffectPreview }),
+        : { destinationOrigin: requiredString(action.destinationOrigin, 'PublicApproval.action.destinationOrigin') }),
     },
-    allowedDecisions: [...approval.allowedDecisions] as PublicApproval['allowedDecisions'],
-    requestedAt,
-    expiresAt,
+    requestedAt: requiredTimestamp(approval.requestedAt, 'PublicApproval.requestedAt'),
+    expiresAt: requiredTimestamp(approval.expiresAt, 'PublicApproval.expiresAt'),
   }
 }
 
-function publicApprovalList(
-  value: unknown,
-  scope: ServiceScope,
-  expectedRunId?: string,
-): PublicApprovalList {
+function publicApprovalList(value: unknown, scope: ServiceScope): PublicApprovalList {
   const page = object(value, 'PublicApprovalList')
   if (page.schemaVersion !== PUBLIC_APPROVAL_LIST_SCHEMA_VERSION || !Array.isArray(page.items)) {
     transportError('PublicApprovalList response is invalid.')
   }
   return {
     schemaVersion: PUBLIC_APPROVAL_LIST_SCHEMA_VERSION,
-    items: page.items.map((item) => publicApproval(item, scope, undefined, expectedRunId)),
+    items: page.items.map((item) => publicApproval(item, scope)),
     ...(typeof page.nextCursor === 'string' ? { nextCursor: page.nextCursor } : {}),
   }
 }
@@ -700,63 +495,8 @@ function requiredString(value: unknown, label: string): string {
 
 function requiredTimestamp(value: unknown, label: string): string {
   const result = requiredString(value, label)
-  const parsed = Date.parse(result)
-  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== result) {
-    transportError(`${label} must be a canonical UTC timestamp.`)
-  }
+  if (!Number.isFinite(Date.parse(result))) transportError(`${label} must be a timestamp.`)
   return result
-}
-
-function requiredSha256(value: unknown, label: string): string {
-  const result = requiredString(value, label)
-  if (!/^[a-f0-9]{64}$/i.test(result)) transportError(`${label} must be a SHA-256 digest.`)
-  return result
-}
-
-function requiredCanonicalString(value: unknown, label: string, maxLength: number): string {
-  const result = requiredString(value, label)
-  if (result !== result.trim() || result.length > maxLength) {
-    transportError(`${label} must be a bounded canonical string.`)
-  }
-  return result
-}
-
-function requiredOrigin(value: unknown, label: string): string {
-  const result = requiredString(value, label)
-  try {
-    const parsed = new URL(result)
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== result) throw new Error('not canonical')
-  } catch {
-    transportError(`${label} must be a canonical HTTP(S) origin.`)
-  }
-  return result
-}
-
-function requiredExternalActionKind(value: unknown): 'upload' | 'send' | 'publish' | 'submit' | 'payment' {
-  if (value !== 'upload' && value !== 'send' && value !== 'publish' && value !== 'submit' && value !== 'payment') {
-    transportError('PublicApproval.action.externalActionKind is invalid.')
-  }
-  return value
-}
-
-function requiredEffectPreview(value: unknown): string {
-  const preview = requiredString(value, 'PublicApproval.action.externalEffectPreview')
-  if (preview.length > 1_024 || preview !== preview.trim()) {
-    transportError('PublicApproval.action.externalEffectPreview must be bounded review text.')
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(preview)
-  } catch {
-    transportError('PublicApproval.action.externalEffectPreview must be JSON.')
-  }
-  if (canonicalJson(parsed) !== preview) {
-    transportError('PublicApproval.action.externalEffectPreview must be canonical JSON.')
-  }
-  if (redactSensitiveData(parsed).changed) {
-    transportError('PublicApproval.action.externalEffectPreview must not contain secret-bearing material.')
-  }
-  return preview
 }
 
 function nonNegative(value: unknown, label: string): number {

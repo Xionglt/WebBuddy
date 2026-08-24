@@ -34,7 +34,7 @@ export { restoreSessionState, sanitizeRestoredMessagesForResume } from './sessio
 export type { RestoreSessionStateInput, RestoredSessionState } from './session-restore.js'
 export { confirmSessionCompletion } from './session-completion.js'
 export type { ConfirmSessionCompletionInput, ConfirmSessionCompletionResult } from './session-completion.js'
-export { appendJsonLine, appendJsonLineDurably, compactAssistantContent, compactToolResult, createTranscriptEntryId, JsonLinesCorruptionError, readJsonLines } from './transcript.js'
+export { appendJsonLine, compactAssistantContent, compactToolResult, createTranscriptEntryId, readJsonLines } from './transcript.js'
 export {
   migrateAgentSession,
   migrateAgentSessionWithWarnings,

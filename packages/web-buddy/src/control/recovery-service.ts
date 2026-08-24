@@ -27,70 +27,11 @@ export class RecoveryService {
   async recoverStartupRuns(scope?: ScopedStoreQuery): Promise<RecoveryDecision[]> {
     const page = await this.runs.list({
       ...(scope?.ownerScope ? { ownerScope: scope.ownerScope } : {}),
-      states: ['running', 'pausing', 'blocked_on_human', 'resuming', 'cancelling'],
+      states: ['running', 'pausing', 'resuming', 'cancelling'],
       limit: 1000,
     })
     const decisions: RecoveryDecision[] = []
     for (const record of page.items) {
-      if (record.state === 'blocked_on_human') {
-        const referencedApprovals = await Promise.all(record.pendingApprovalIds.map((approvalId) => (
-          this.approvals.get(approvalId, scope)
-        )))
-        const deliveryCannotBeProven = referencedApprovals.some((approval) => (
-          !approval
-          || approval.runRevision !== record.runRevision
-          || approval.attempt !== record.attempt
-          || approval.status !== 'pending'
-        ))
-        if (!deliveryCannotBeProven) {
-          // A pending durable request remains a valid human wait across restarts.
-          continue
-        }
-        const executionApproval = referencedApprovals.find((approval) => (
-          approval?.resolution?.decision === 'approved_and_execute'
-        ))
-        const reason = executionApproval
-          ? [
-              'Process restarted after an exact execution authorization became durable,',
-              'but delivery to the live Agent Loop cannot be proven.',
-              'Startup recovery replayed no action; reconcile external state and request a fresh approval in a new run.',
-            ].join(' ')
-          : [
-              'Process restarted after a terminal approval decision became durable,',
-              'but delivery to the live Agent Loop cannot be proven.',
-              'Startup recovery replayed no action; start a new run instead of reusing this decision.',
-            ].join(' ')
-        const failed = await this.runs.transition(record.runId, {
-          to: 'failed',
-          reason,
-          idempotencyKey: `startup-approval-delivery-failed:${record.recordRevision}`,
-          eventType: 'recovery_classified',
-          data: {
-            recoverable: false,
-            replayedAction: false,
-            approvalDeliveryProven: false,
-          },
-          update: () => ({ pendingApprovalIds: [], pendingContinuation: undefined }),
-        }, scope)
-        await this.approvals.cancelPendingForRun(
-          record.runId,
-          'Another approval for this run was terminal before restart; the abandoned attempt was fenced.',
-          `startup-approval-delivery-fence:${record.runRevision}:${record.attempt}`,
-          scope,
-          {
-            expectedRunRevision: record.runRevision,
-            expectedAttempt: record.attempt,
-          },
-        )
-        decisions.push({
-          runId: record.runId,
-          fromState: record.state,
-          toState: failed.state,
-          recoverable: false,
-          reason,
-        })
-        continue
-      }
       if (record.state === 'cancelling') {
         const reason = 'Process restarted while cancellation was settling; no write action was replayed.'
         const failed = await this.runs.transition(record.runId, {
