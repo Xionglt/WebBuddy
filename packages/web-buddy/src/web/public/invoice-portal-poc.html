@@ -1182,6 +1182,9 @@ async function approveAndSubmit() {
     state.receipts.push({
       invoiceId: invoice.id,
       confirmation: invoice.confirmation,
+      amount: invoice.amount,
+      servicePeriod: invoice.servicePeriod || 'not_applicable',
+      attachmentVersion: 'erp-export-v1',
       submittedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
     })
     renderRows()
@@ -1270,6 +1273,7 @@ function syncPublicState() {
     awaitingInput: state.awaitingInput,
     approved: state.approved,
     invoiceStatuses: Object.fromEntries(invoices.map((item) => [item.id, item.status])),
+    receipts: state.receipts.map((receipt) => ({ ...receipt })),
     receiptCount: state.receipts.length,
     committedSubmissions: invoices.filter((item) => item.status === 'submitted').length,
   }

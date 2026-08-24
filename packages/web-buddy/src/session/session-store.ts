@@ -6,7 +6,8 @@ import {
   sanitizeForPersistence,
   type PersistenceSanitizer,
 } from '../security/redaction.js'
-import { appendJsonLine } from './transcript.js'
+import { assertSafeStorageIdentity } from '../security/storage-identity.js'
+import { appendJsonLine, appendJsonLineDurably } from './transcript.js'
 import { migrateAgentSession } from './migrations.js'
 import type {
   AgentSession,
@@ -21,6 +22,12 @@ export interface FileSessionStoreOptions {
   sanitize?: PersistenceSanitizer
 }
 
+// FileSessionStore instances in one process can point at the same session
+// root. Share append tails at module scope so durable and best-effort writers
+// cannot reorder JSONL records merely because one metadata lookup completed
+// first. This is deliberately not a cross-process lease.
+const PROCESS_APPEND_TAILS = new Map<string, Promise<void>>()
+
 export class FileSessionStore implements SessionStore {
   readonly rootDir: string
   private readonly sanitize?: PersistenceSanitizer
@@ -34,6 +41,8 @@ export class FileSessionStore implements SessionStore {
     const now = input.now ?? new Date().toISOString()
     const sessionId = input.sessionId ?? createSessionId(now)
     const runId = input.runId ?? sessionId
+    assertSafeStorageIdentity(sessionId, 'sessionId')
+    assertSafeStorageIdentity(runId, 'runId')
     const outputDir = join(this.rootDir, sessionId)
     const session: AgentSession = {
       version: 1,
@@ -78,8 +87,11 @@ export class FileSessionStore implements SessionStore {
   }
 
   async get(sessionId: string): Promise<AgentSession | undefined> {
+    assertSafeStorageIdentity(sessionId, 'sessionId')
     try {
-      return migrateAgentSession(JSON.parse(await readFile(this.sessionJsonPath(sessionId), 'utf8')))
+      const session = migrateAgentSession(JSON.parse(await readFile(this.sessionJsonPath(sessionId), 'utf8')))
+      this.assertStorageBinding(sessionId, session)
+      return session
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
@@ -95,22 +107,47 @@ export class FileSessionStore implements SessionStore {
       version: 1,
       sessionId: current.sessionId,
       runId: current.runId,
+      outputDir: current.outputDir,
+      transcriptPath: current.transcriptPath,
+      eventsPath: current.eventsPath,
+      workflowPath: current.workflowPath,
       updatedAt: patch.updatedAt ?? new Date().toISOString(),
     })
+    this.assertStorageBinding(sessionId, next)
     await writeSession(next)
     return next
   }
 
   async appendTranscript(entry: TranscriptEntry): Promise<void> {
-    const session = await this.get(entry.sessionId)
-    if (!session) throw new Error(`Session not found: ${entry.sessionId}`)
-    await appendJsonLine(session.transcriptPath, this.protect(entry))
+    await enqueueProcessAppend(this.appendKey(entry.sessionId, 'transcript'), async () => {
+      const session = await this.get(entry.sessionId)
+      if (!session) throw new Error(`Session not found: ${entry.sessionId}`)
+      await appendJsonLine(session.transcriptPath, this.protect(entry))
+    })
+  }
+
+  async appendTranscriptDurably(entry: TranscriptEntry): Promise<void> {
+    await enqueueProcessAppend(this.appendKey(entry.sessionId, 'transcript'), async () => {
+      const session = await this.get(entry.sessionId)
+      if (!session) throw new Error(`Session not found: ${entry.sessionId}`)
+      await appendJsonLineDurably(session.transcriptPath, this.protect(entry))
+    })
   }
 
   async appendEvent(event: KernelEvent): Promise<void> {
-    const session = await this.get(event.sessionId)
-    if (!session) throw new Error(`Session not found: ${event.sessionId}`)
-    await appendJsonLine(session.eventsPath, this.protect(event))
+    await enqueueProcessAppend(this.appendKey(event.sessionId, 'events'), async () => {
+      const session = await this.get(event.sessionId)
+      if (!session) throw new Error(`Session not found: ${event.sessionId}`)
+      await appendJsonLine(session.eventsPath, this.protect(event))
+    })
+  }
+
+  async appendEventDurably(event: KernelEvent): Promise<void> {
+    await enqueueProcessAppend(this.appendKey(event.sessionId, 'events'), async () => {
+      const session = await this.get(event.sessionId)
+      if (!session) throw new Error(`Session not found: ${event.sessionId}`)
+      await appendJsonLineDurably(session.eventsPath, this.protect(event))
+    })
   }
 
   async writeWorkflowSnapshot(sessionId: string, workflowState: unknown): Promise<void> {
@@ -156,8 +193,37 @@ export class FileSessionStore implements SessionStore {
     return join(this.rootDir, sessionId, 'session.json')
   }
 
+  private appendKey(sessionId: string, stream: 'transcript' | 'events'): string {
+    assertSafeStorageIdentity(sessionId, 'sessionId')
+    return `${this.rootDir}\0${sessionId}\0${stream}`
+  }
+
+  private assertStorageBinding(requestedSessionId: string, session: AgentSession): void {
+    const outputDir = join(this.rootDir, requestedSessionId)
+    assertSafeStorageIdentity(session.sessionId, 'stored sessionId')
+    assertSafeStorageIdentity(session.runId, 'stored runId')
+    if (session.sessionId !== requestedSessionId
+      || session.outputDir !== outputDir
+      || session.transcriptPath !== join(outputDir, 'transcript.jsonl')
+      || session.eventsPath !== join(outputDir, 'events.jsonl')
+      || session.workflowPath !== join(outputDir, 'workflow.json')) {
+      throw new Error(`SESSION_STORAGE_BINDING_MISMATCH: stored paths do not match session ${requestedSessionId}.`)
+    }
+  }
+
   private protect<T>(value: T): T {
     return sanitizeForPersistence(value, this.sanitize) as unknown as T
+  }
+}
+
+async function enqueueProcessAppend(key: string, operation: () => Promise<void>): Promise<void> {
+  const previous = PROCESS_APPEND_TAILS.get(key) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(operation)
+  PROCESS_APPEND_TAILS.set(key, current)
+  try {
+    await current
+  } finally {
+    if (PROCESS_APPEND_TAILS.get(key) === current) PROCESS_APPEND_TAILS.delete(key)
   }
 }
 

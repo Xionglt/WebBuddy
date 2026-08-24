@@ -14,7 +14,7 @@ export type GateKind =
   | 'final_submit' // submitting the application
   | 'high_risk_action' // any L3/L4 click the policy flagged
 
-export type GateDecision = 'approve' | 'decline' | 'takeover'
+export type GateDecision = 'approve' | 'approve_and_execute' | 'decline' | 'takeover'
 
 export interface GateContext {
   url?: string

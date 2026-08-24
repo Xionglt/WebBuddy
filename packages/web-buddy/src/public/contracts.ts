@@ -182,6 +182,7 @@ export interface ArtifactPresentCriterion extends CompletionCriterionBase {
   artifactKinds: string[]
   minCount: number
   schemaVersions?: string[]
+  businessKeys?: string[]
 }
 
 export interface FormStateCriterion extends CompletionCriterionBase {
@@ -202,6 +203,7 @@ export interface ActionBoundaryCriterion extends CompletionCriterionBase {
   kind: 'action_boundary'
   actionKinds: SensitiveActionKind[]
   outcome: 'not_performed' | 'approved' | 'performed'
+  businessKeys?: string[]
 }
 
 export type CompletionCriterion =
@@ -224,7 +226,7 @@ export interface EvidenceRequirement {
 export interface SensitiveActionRule {
   id: string
   actionKinds: SensitiveActionKind[]
-  decision: 'ask' | 'deny'
+  decision: 'allow' | 'ask' | 'deny'
   sourceSensitivities?: ContentSensitivity[]
   destinationOrigins?: string[]
   requireApprovalBinding: boolean
@@ -259,22 +261,38 @@ export interface ActionBinding {
   sourceOrigin?: string
   destinationOrigin?: string
   targetFingerprint?: string
+  externalBusinessKey?: string
+  externalEffectDigest?: string
+  externalProbeId?: string
+  externalActionKind?: Extract<SensitiveActionKind, 'upload' | 'send' | 'publish' | 'submit' | 'payment'>
+  externalEffectPreview?: string
   actionSeq: number
   pageRevision?: number
   workflowRevision?: number
   expiresAt: string
 }
 
-export interface ApprovalBinding {
-  schemaVersion: 'approval-binding/v1'
+interface ApprovalBindingBase {
   approvalId: string
   actionBindingSha256: string
-  decision: 'approved' | 'denied'
   issuedAt: string
   expiresAt: string
   nonce: string
   consumedAt?: string
 }
+
+export interface ApprovalBindingV1 extends ApprovalBindingBase {
+  schemaVersion: 'approval-binding/v1'
+  /** Awareness/ordinary approval; a v2-reconciled external effect needs approval-binding/v2. */
+  decision: 'approved' | 'denied'
+}
+
+export interface ApprovalBindingV2 extends ApprovalBindingBase {
+  schemaVersion: 'approval-binding/v2'
+  decision: 'approved' | 'approved_and_execute' | 'denied'
+}
+
+export type ApprovalBinding = ApprovalBindingV1 | ApprovalBindingV2
 
 export interface EvidenceRef {
   schemaVersion: 'evidence-ref/v1'
@@ -325,7 +343,13 @@ export interface ArtifactRef {
   sensitivity: ContentSensitivity
   retention: RetentionPolicy
   ownerScope?: OwnerScope
-  binding: { runId: string; revision: number; sessionRef?: SessionRef; actionSeq?: number }
+  binding: {
+    runId: string
+    revision: number
+    sessionRef?: SessionRef
+    actionSeq?: number
+    externalBusinessKey?: string
+  }
   requiresMainWorkflowVerification: boolean
   authoritativeCompletionEvidence: boolean
   redaction: { status: 'not_required' | 'redacted' | 'rejected'; policyId: string }
@@ -341,8 +365,11 @@ export interface CompletionFormState {
 
 export interface ActionOutcome {
   actionKind: SensitiveActionKind
-  outcome: 'not_performed' | 'approved' | 'performed'
+  outcome: 'not_performed' | 'approved' | 'performed' | 'indeterminate'
   actionId?: string
+  businessKey?: string
+  /** True only when the durable Ledger crossed a local execution boundary. */
+  localExecutionAttempted?: boolean
 }
 
 export type RunLifecycleState =

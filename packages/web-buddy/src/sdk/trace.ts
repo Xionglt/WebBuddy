@@ -16,6 +16,7 @@ import {
   sanitizeForPersistence,
   type PersistenceSanitizer,
 } from '../security/redaction.js'
+import { assertSafeStorageIdentity } from '../security/storage-identity.js'
 
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3' | 'L4'
 export type StepStatus = 'ok' | 'warn' | 'blocked' | 'error'
@@ -90,6 +91,7 @@ export class TraceRecorder {
     const options: TraceRecorderOptions = typeof input === 'string' ? { runId: input } : input ?? {}
     this.startedAt = new Date().toISOString()
     this.runId = options.runId ?? this.startedAt.replace(/[:.]/g, '-').slice(0, 19)
+    assertSafeStorageIdentity(this.runId, 'trace runId')
     this.source = options.source ?? 'local-runtime'
     this.scenario = options.scenario
     this.profile = options.profile ?? 'debug'

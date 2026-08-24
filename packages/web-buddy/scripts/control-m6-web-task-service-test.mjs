@@ -91,6 +91,16 @@ const driver = {
   },
 }
 
+assert.throws(
+  () => createWebControlServer({
+    controlStoreDir: join(root, 'invalid-dual-runtime-boundary'),
+    webTaskRuntimeDriver: driver,
+    webTaskExternalActionAdapterFactory() { return {} },
+  }),
+  /mutually exclusive trust boundaries/,
+  'a whole-runtime test seam and trusted external-action plugin must not silently override each other',
+)
+
 let control = createControl(driver)
 try {
   await listen(control.server)
@@ -212,6 +222,9 @@ try {
   assert.equal(afterRestart.items[0].id, 'm6-comparison-artifact')
 
   await prelaunchFailureIsDurable(join(root, 'prelaunch-control'))
+  await externalActionAdapterFactoryIsOwnerScoped(join(root, 'external-adapter-control'))
+  await unsafeExternalAdapterExecutionConfigIsRejected(join(root, 'external-adapter-unsafe-config'))
+  await durableTerminalWinsSameEpochSettlement(join(root, 'terminal-settlement-control'))
 
   console.log('control-m6-web-task-service-test: PASS (generic gate/artifact/restart + legacy compatibility)')
 } finally {
@@ -288,6 +301,211 @@ async function prelaunchFailureIsDurable(storeRoot) {
     await prelaunch.close().catch(() => {})
   }
   assert.equal((await readTree(storeRoot)).includes(sentinel), false, 'pre-launch secret reached durable storage')
+}
+
+async function externalActionAdapterFactoryIsOwnerScoped(storeRoot) {
+  const contexts = []
+  const service = createWebControlServer({
+    controlStoreDir: storeRoot,
+    webTaskExternalActionAdapterFactory(context) {
+      assert.equal(Object.isFrozen(context), true)
+      assert.equal(Object.isFrozen(context.ownerScope), true)
+      assert.throws(() => { context.ownerScope.tenantId = 'mutated-tenant' }, TypeError)
+      contexts.push(structuredClone(context))
+      return { unsupportedAuthority: 'browser_write' }
+    },
+    serviceSecurity: {
+      schemaVersion: 'web-service-security/v1',
+      authenticate: ({ authorization }) => authorization === `Bearer ${token}`
+        ? {
+            schemaVersion: 'service-principal/v1',
+            actorId: 'm6-service-actor',
+            authentication: 'bearer',
+            scope,
+          }
+        : undefined,
+    },
+  })
+  try {
+    await listen(service.server)
+    const base = address(service.server)
+    const response = await request(base, '/api/runs', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': 'm6-owner-scoped-external-adapter',
+      },
+      body: JSON.stringify({
+        schemaVersion: 'run-client-create/v1',
+        input: genericSnapshot('client-owner-scoped-external-adapter'),
+      }),
+    })
+    assert.equal(response.status, 500)
+    assert.match(JSON.stringify(await response.json()), /adapter set contains an unsupported field/)
+    const listed = await json(base, '/api/runs')
+    const failed = listed.items.find((item) => item.state === 'failed')
+    assert(failed)
+    assert.match(failed.reason, /adapter set contains an unsupported field/)
+    assert.equal(contexts.length, 1)
+    assert.equal(contexts[0].runId, failed.runId)
+    assert.deepEqual(contexts[0].ownerScope, ownerScope)
+  } finally {
+    await service.close().catch(() => {})
+  }
+}
+
+async function unsafeExternalAdapterExecutionConfigIsRejected(storeRoot) {
+  const cases = [
+    {
+      name: 'strict-reconciliation-disabled',
+      adapterSet: {
+        allowFinalSubmitExecution: true,
+        requireExternalActionReconciliation: false,
+      },
+      expected: /requires strict external-action reconciliation/,
+    },
+    {
+      name: 'authoritative-preflight-disabled',
+      adapterSet: {
+        allowFinalSubmitExecution: true,
+        preflightExternalActions: false,
+      },
+      expected: /requires authoritative external-action preflight/,
+    },
+    {
+      name: 'owner-binding-v3-missing',
+      adapterSet: {
+        allowFinalSubmitExecution: true,
+      },
+      expected: /requires external-action-binding\/v3 owner scope enforcement/,
+    },
+    {
+      name: 'general-external-owner-binding-v3-missing',
+      adapterSet: {
+        allowExternalActionExecution: true,
+      },
+      expected: /requires external-action-binding\/v3 owner scope enforcement/,
+    },
+  ]
+  for (const item of cases) {
+    const service = createWebControlServer({
+      controlStoreDir: join(storeRoot, item.name),
+      webTaskExternalActionAdapterFactory() {
+        return item.adapterSet
+      },
+      serviceSecurity: {
+        schemaVersion: 'web-service-security/v1',
+        authenticate: ({ authorization }) => authorization === `Bearer ${token}`
+          ? {
+              schemaVersion: 'service-principal/v1',
+              actorId: 'm6-service-actor',
+              authentication: 'bearer',
+              scope,
+            }
+          : undefined,
+      },
+    })
+    try {
+      await listen(service.server)
+      const base = address(service.server)
+      const response = await request(base, '/api/runs', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': `m6-${item.name}`,
+        },
+        body: JSON.stringify({
+          schemaVersion: 'run-client-create/v1',
+          input: genericSnapshot(`client-${item.name}`),
+        }),
+      })
+      assert.equal(response.status, 500)
+      assert.match(JSON.stringify(await response.json()), item.expected)
+      const listed = await json(base, '/api/runs')
+      const failed = listed.items.find((record) => record.state === 'failed')
+      assert(failed)
+      assert.match(failed.reason, item.expected)
+    } finally {
+      await service.close().catch(() => {})
+    }
+  }
+}
+
+async function durableTerminalWinsSameEpochSettlement(storeRoot) {
+  let releaseDriver
+  let markStarted
+  const started = new Promise((resolve) => { markStarted = resolve })
+  const released = new Promise((resolve) => { releaseDriver = resolve })
+  const lateDriver = {
+    async execute(request) {
+      markStarted()
+      await released
+      return {
+        status: 'completed',
+        summary: 'Late same-epoch runtime result must not replace a durable control terminal.',
+        evidence: [],
+        artifacts: [comparisonArtifact(request.input.runId, request.input.revision, request.input.ownerScope)],
+        metrics: emptyRunMetrics({
+          runId: request.input.runId,
+          source: 'sdk',
+          scenario: 'm6-terminal-settlement-fixture',
+          profile: 'deterministic',
+        }),
+        actions: [{ actionKind: 'submit', outcome: 'not_performed' }],
+      }
+    },
+  }
+  const service = createWebControlServer({
+    controlStoreDir: storeRoot,
+    webTaskRuntimeDriver: lateDriver,
+    serviceSecurity: {
+      schemaVersion: 'web-service-security/v1',
+      authenticate: ({ authorization }) => authorization === `Bearer ${token}`
+        ? {
+            schemaVersion: 'service-principal/v1',
+            actorId: 'm6-service-actor',
+            authentication: 'bearer',
+            scope,
+          }
+        : undefined,
+    },
+  })
+  let closed = false
+  try {
+    await listen(service.server)
+    const base = address(service.server)
+    const created = await createGenericRun(
+      base,
+      'm6-terminal-wins-late-settlement',
+      genericSnapshot('client-terminal-wins-late-settlement'),
+    )
+    await started
+    const running = await service.runService.get(created.runId, { ownerScope })
+    assert.equal(running.state, 'running')
+    const failed = await service.runService.transition(created.runId, {
+      to: 'failed',
+      reason: 'Control plane already chose the authoritative terminal.',
+      idempotencyKey: 'm6-authoritative-terminal-before-late-result',
+      expectedRunRevision: running.runRevision,
+      expectedAttempt: running.attempt,
+    }, { ownerScope })
+    assert.equal(failed.state, 'failed')
+    releaseDriver()
+    await service.close()
+    closed = true
+    const terminal = await service.runService.get(created.runId, { ownerScope })
+    assert.equal(terminal.state, 'failed')
+    assert.equal(terminal.reason, 'Control plane already chose the authoritative terminal.')
+    const events = (await service.runService.events(created.runId, { ownerScope })).items
+    assert.equal(
+      events.filter((event) => event.eventType === 'state_transitioned').at(-1)?.data?.to,
+      'failed',
+      'the late same-epoch runtime result attempted a second terminal transition',
+    )
+  } finally {
+    releaseDriver?.()
+    if (!closed) await service.close().catch(() => {})
+  }
 }
 
 function redactSentinel(value, sentinel) {
@@ -464,7 +682,7 @@ function snapshotDigest(snapshot) {
 }
 
 async function waitForState(base, runId, states) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     const run = await json(base, `/api/runs/${encodeURIComponent(runId)}`)
     if (states.includes(run.state)) return run
     await new Promise((resolve) => setTimeout(resolve, 25))

@@ -24,6 +24,8 @@ import {
   type RunStoreEvent,
 } from '../control/index.js'
 import { createAgentRunController, type AgentRunController } from '../kernel/run-controller.js'
+import { FileTaskGraphStore } from '../agents/task-graph-store.js'
+import type { SessionArtifactRecord } from '../agents/session-artifact-store.js'
 import {
   AUTOMATIC_WEB_MEMORY_WRITE_POLICY,
   buildPageSemanticFingerprint,
@@ -72,6 +74,7 @@ import {
   type ArtifactRef,
   type JsonObject,
   type OwnerScope,
+  type TaskPolicy,
   type WebTaskInput,
   type WebTaskInputSnapshot,
   type WebTaskResult,
@@ -86,6 +89,10 @@ import {
   type ServicePrincipal,
   type WebServiceSecurityOptions,
 } from './service-security.js'
+import {
+  emptyCollaborationProjection,
+  projectCollaboration,
+} from './collaboration-projection.js'
 
 const SOURCE_FILE = fileURLToPath(import.meta.url)
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -137,9 +144,32 @@ export interface WebControlServerOptions {
   webTaskRuntimeDriver?: WebTaskRuntimeDriver
   /** Trusted read-only async worker assembly for eligible research/comparison profiles. */
   webTaskAsyncRuntimeFactory?: NonNullable<WebTaskExecutionHost['asyncTaskRuntimeFactory']>
+  /** Trusted service-side external-action adapters, constructed per run/owner scope. Not a public SDK hook. */
+  webTaskExternalActionAdapterFactory?: (
+    context: Readonly<{ runId: string; ownerScope: Readonly<OwnerScope> }>,
+  ) => WebTaskExternalActionAdapterSet | Promise<WebTaskExternalActionAdapterSet>
+}
+
+export interface WebTaskExternalActionAdapterSet {
+  externalActionBindingResolver?: NonNullable<WebTaskExecutionHost['externalActionBindingResolver']>
+  externalActionIntentResolver?: NonNullable<WebTaskExecutionHost['externalActionIntentResolver']>
+  externalActionProbes?: NonNullable<WebTaskExecutionHost['externalActionProbes']>
+  /** Defaults to true whenever this trusted service plugin is installed. */
+  requireExternalActionReconciliation?: boolean
+  /** Defaults to true: query authoritative state before offering approval/execution. */
+  preflightExternalActions?: boolean
+  /** Reserved for v3 owner-bound execution; owner-scoped service adapters currently reject true. */
+  allowFinalSubmitExecution?: boolean
+  /** Reserved for v3 owner-bound execution of any reconciled external effect. */
+  allowExternalActionExecution?: boolean
 }
 
 export function createWebControlServer(options: WebControlServerOptions = {}) {
+  if (options.webTaskRuntimeDriver && options.webTaskExternalActionAdapterFactory) {
+    throw new Error(
+      'webTaskRuntimeDriver and webTaskExternalActionAdapterFactory are mutually exclusive trust boundaries.',
+    )
+  }
   const controlStoreDir = options.controlStoreDir
     ? resolve(options.controlStoreDir)
     : resolve(process.env.WEB_BUDDY_CONTROL_STORE_DIR || join(outputDir(), 'control-plane'))
@@ -510,6 +540,17 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         ? memoryForOwnerScope(running.ownerScope)
         : undefined
       const automaticMemoryEnabled = process.env.WEB_BUDDY_AUTOMATIC_MEMORY_ENABLED === 'true'
+      if (options.webTaskExternalActionAdapterFactory && !running.ownerScope) {
+        throw new Error('Trusted external-action adapters require an owner-scoped Web Task run.')
+      }
+      const externalActionAdapters = options.webTaskExternalActionAdapterFactory
+        ? validateExternalActionAdapterSet(await options.webTaskExternalActionAdapterFactory(
+            Object.freeze({
+              runId: running.runId,
+              ownerScope: Object.freeze(structuredClone(running.ownerScope!)),
+            }),
+          ))
+        : undefined
       const driver = options.webTaskRuntimeDriver ?? createWebTaskRuntimeDriver({
         config,
         gate,
@@ -524,6 +565,16 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         ...(options.webTaskAsyncRuntimeFactory
           ? { asyncTaskRuntimeFactory: options.webTaskAsyncRuntimeFactory }
           : {}),
+        ...(externalActionAdapters ? {
+          externalActionBindingResolver: externalActionAdapters.externalActionBindingResolver,
+          externalActionIntentResolver: externalActionAdapters.externalActionIntentResolver,
+          externalActionProbes: externalActionAdapters.externalActionProbes,
+          requireExternalActionReconciliation:
+            externalActionAdapters.requireExternalActionReconciliation ?? true,
+          preflightExternalActions: externalActionAdapters.preflightExternalActions ?? true,
+          allowFinalSubmitExecution: externalActionAdapters.allowFinalSubmitExecution ?? false,
+          allowExternalActionExecution: externalActionAdapters.allowExternalActionExecution ?? false,
+        } : {}),
         persistenceSanitizer: (value) => security.sanitize(value),
         ...(automaticMemoryEnabled && lifecycleMemory && running.ownerScope ? {
           automaticMemorySink: createLifecycleAutomaticMemorySink({
@@ -636,6 +687,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
       })
       endRun(rejected.record, result, safeError)
+      return
+    }
+
+    if (TERMINAL_STATES.has(current.state)) {
+      endRun(current, result, safeError)
       return
     }
 
@@ -754,6 +810,11 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         ...(launched.ownerScope ? { ownerScope: launched.ownerScope } : {}),
       })
       endWebTaskRun(rejected.record, result, safeError)
+      return
+    }
+
+    if (TERMINAL_STATES.has(current.state)) {
+      endWebTaskRun(current, result, safeError)
       return
     }
 
@@ -1021,6 +1082,7 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         baseUrl: config.model.baseUrl,
         name: config.model.name,
         credentialConfigured: security.secretProvider.credentialConfigured(),
+        asyncTasksEnabled: config.agent.asyncTasks?.enabled === true,
         alibabaCareersUrl: config.alibabaCareersUrl,
       })
       return
@@ -1573,6 +1635,58 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       return
     }
 
+    const collaborationMatch = path.match(/^\/api\/runs\/([^/]+)\/collaboration$/)
+    if (collaborationMatch && req.method === 'GET') {
+      const runId = decodeURIComponent(collaborationMatch[1])
+      const run = await runService.get(runId, storeScope)
+      if (!run) return denyResource({ kind: 'trace' })
+      const sessionRef = run.sessionRef
+      if (!sessionRef
+        || sessionRef.provider !== 'file-session-store'
+        || sessionRef.runId !== run.runId
+        || sessionRef.attempt !== run.attempt) {
+        respond(200, emptyCollaborationProjection(run.runId, run.state))
+        return
+      }
+      const session = await sessionStore.get(sessionRef.id)
+      if (!session || session.runId !== run.runId || session.sessionId !== sessionRef.id) {
+        respond(200, emptyCollaborationProjection(run.runId, run.state))
+        return
+      }
+      const graphStore = new FileTaskGraphStore({
+        resolveSessionDir: () => join(session.outputDir, 'async-task-state'),
+      })
+      const graph = await graphStore.load(session.sessionId)
+      if (!graph || graph.runId !== run.runId || graph.sessionId !== session.sessionId) {
+        respond(200, {
+          ...emptyCollaborationProjection(run.runId, run.state),
+          sessionId: session.sessionId,
+        })
+        return
+      }
+      const manifestPath = join(session.outputDir, 'async-artifacts', 'manifest.jsonl')
+      const artifactRecords = existsSync(manifestPath)
+        ? await readJsonLines<SessionArtifactRecord>(manifestPath)
+        : []
+      const events = await graphStore.readEvents(session.sessionId)
+      await security.audit({
+        principal,
+        requestId,
+        action: 'trace.read',
+        target: { kind: 'trace', id: `${runId}:collaboration` },
+        result: 'succeeded',
+      })
+      respond(200, projectCollaboration({
+        runId: run.runId,
+        sessionId: session.sessionId,
+        runState: run.state,
+        graph,
+        events,
+        artifactRecords,
+      }))
+      return
+    }
+
     const artifactMatch = path.match(/^\/api\/runs\/([^/]+)\/artifacts$/)
     if (artifactMatch && req.method === 'GET') {
       const runId = decodeURIComponent(artifactMatch[1])
@@ -1633,10 +1747,10 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
       if (!approvalRun
         || approvalRun.runRevision !== approval.runRevision
         || approvalRun.attempt !== approval.attempt
-        || !['running', 'pausing', 'blocked_on_human'].includes(approvalRun.state)) {
+        || (approval.status === 'pending' && approvalRun.state !== 'blocked_on_human')) {
         throw new ControlStoreError(
           'BINDING_MISMATCH',
-          'Approval belongs to a stale run revision/attempt and cannot be resolved.',
+          'Approval belongs to a stale run revision/attempt or its live gate is not ready.',
         )
       }
       const expectedRevision = requireExpectedRevision(body)
@@ -1648,8 +1762,14 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
           approval.runRevision,
         )
       }
-      const decision = body.decision === 'approved' || body.decision === 'denied' ? body.decision : undefined
-      if (!decision) return respond(400, { error: 'decision must be approved or denied' })
+      const decision = body.decision === 'approved'
+        || body.decision === 'approved_and_execute'
+        || body.decision === 'denied'
+        ? body.decision
+        : undefined
+      if (!decision) {
+        return respond(400, { error: 'decision must be approved, approved_and_execute, or denied' })
+      }
       const idempotencyKey = security.bindIdempotencyKey(
         principal,
         requireIdempotencyKey(req, body),
@@ -1678,6 +1798,42 @@ export function createWebControlServer(options: WebControlServerOptions = {}) {
         expiresAt: approval.expiresAt,
       })
       const resumedLive = await executions.get(approval.runId)?.gate.resolveLive(approvalId, decision) ?? false
+      if (!resumedLive) {
+        const undelivered = await runService.get(approval.runId, storeScope)
+        if (undelivered
+          && undelivered.state === 'blocked_on_human'
+          && undelivered.runRevision === approval.runRevision
+          && undelivered.attempt === approval.attempt) {
+          await approvalService.cancelPendingForRun(
+            approval.runId,
+            'A terminal approval could not be delivered to a live Agent Loop.',
+            `approval-delivery-fence:${approval.runRevision}:${approval.attempt}`,
+            storeScope,
+            {
+              expectedRunRevision: approval.runRevision,
+              expectedAttempt: approval.attempt,
+            },
+          )
+          await runService.transition(approval.runId, {
+            to: 'failed',
+            reason: [
+              'The approval decision is durable, but delivery to the live Agent Loop could not be proven.',
+              'No action was replayed; reconcile external state and request a fresh approval in a new run.',
+            ].join(' '),
+            idempotencyKey: `approval-delivery-failed:${approval.runRevision}:${approval.attempt}:${approvalId}`,
+            eventType: 'recovery_classified',
+            data: {
+              recoverable: false,
+              replayedAction: false,
+              approvalDeliveryProven: false,
+            },
+            update: () => ({ pendingApprovalIds: [], pendingContinuation: undefined }),
+          }, storeScope)
+          executions.get(approval.runId)?.controller.abort(
+            'Approval decision could not be delivered to the live Agent Loop.',
+          )
+        }
+      }
       await security.audit({
         principal,
         requestId,
@@ -1904,10 +2060,10 @@ function isReadOnlyGenericInput(
   if (!input.startUrl
     || !input.policy
     || input.policy.defaultSensitiveAction !== 'deny'
-    || input.policy.rules.some((rule) => rule.decision !== 'deny')
+    || input.policy.rules.some((rule) => !isReadOnlySensitiveRule(rule))
     || !input.contract
     || !input.contract.sensitiveActions?.length
-    || input.contract.sensitiveActions.some((rule) => rule.decision !== 'deny')) {
+    || input.contract.sensitiveActions.some((rule) => !isReadOnlySensitiveRule(rule))) {
     return false
   }
   return input.contract.criteria.every((criterion) => (
@@ -1915,6 +2071,14 @@ function isReadOnlyGenericInput(
     || criterion.kind === 'artifact_present'
     || (criterion.kind === 'action_boundary' && criterion.outcome === 'not_performed')
   ))
+}
+
+function isReadOnlySensitiveRule(rule: NonNullable<TaskPolicy['rules']>[number]): boolean {
+  return rule.decision === 'deny'
+    || (rule.decision === 'allow'
+      && rule.requireApprovalBinding === false
+      && rule.actionKinds.length > 0
+      && rule.actionKinds.every((actionKind) => actionKind === 'navigate'))
 }
 
 function isReadOnlyGenericSnapshot(snapshot: WebTaskInputSnapshot): boolean {
@@ -2038,7 +2202,23 @@ function projectPublicApproval(approval: ApprovalRecord, scope: ServiceScope) {
       ...(approval.actionBinding.destinationOrigin
         ? { destinationOrigin: approval.actionBinding.destinationOrigin }
         : {}),
+      ...(approval.actionBinding.externalBusinessKey
+        ? { externalBusinessKey: approval.actionBinding.externalBusinessKey }
+        : {}),
+      ...(approval.actionBinding.externalEffectDigest
+        ? { externalEffectDigest: approval.actionBinding.externalEffectDigest }
+        : {}),
+      ...(approval.actionBinding.externalProbeId
+        ? { externalProbeId: approval.actionBinding.externalProbeId }
+        : {}),
+      ...(approval.actionBinding.externalActionKind
+        ? { externalActionKind: approval.actionBinding.externalActionKind }
+        : {}),
+      ...(approval.actionBinding.externalEffectPreview
+        ? { externalEffectPreview: approval.actionBinding.externalEffectPreview }
+        : {}),
     },
+    allowedDecisions: [...approval.allowedDecisions],
     requestedAt: approval.requestedAt,
     expiresAt: approval.expiresAt,
   }
@@ -2465,6 +2645,93 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   } catch {
     throw new HttpError(400, 'request body must be a JSON object')
   }
+}
+
+function validateExternalActionAdapterSet(value: WebTaskExternalActionAdapterSet): WebTaskExternalActionAdapterSet {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Trusted external-action adapter factory must return an adapter set object.')
+  }
+  const allowed = new Set([
+    'externalActionBindingResolver',
+    'externalActionIntentResolver',
+    'externalActionProbes',
+    'requireExternalActionReconciliation',
+    'preflightExternalActions',
+    'allowFinalSubmitExecution',
+    'allowExternalActionExecution',
+  ])
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new Error('Trusted external-action adapter set contains an unsupported field.')
+  }
+  if (value.externalActionBindingResolver !== undefined
+    && typeof value.externalActionBindingResolver !== 'function') {
+    throw new Error('externalActionBindingResolver must be a function.')
+  }
+  if (value.externalActionIntentResolver !== undefined
+    && typeof value.externalActionIntentResolver !== 'function') {
+    throw new Error('externalActionIntentResolver must be a function.')
+  }
+  if (value.externalActionProbes !== undefined && !Array.isArray(value.externalActionProbes)) {
+    throw new Error('externalActionProbes must be an array.')
+  }
+  if (value.requireExternalActionReconciliation !== undefined
+    && typeof value.requireExternalActionReconciliation !== 'boolean') {
+    throw new Error('requireExternalActionReconciliation must be boolean.')
+  }
+  if (value.preflightExternalActions !== undefined
+    && typeof value.preflightExternalActions !== 'boolean') {
+    throw new Error('preflightExternalActions must be boolean.')
+  }
+  if (value.allowFinalSubmitExecution !== undefined
+    && typeof value.allowFinalSubmitExecution !== 'boolean') {
+    throw new Error('allowFinalSubmitExecution must be boolean.')
+  }
+  if (value.allowExternalActionExecution !== undefined
+    && typeof value.allowExternalActionExecution !== 'boolean') {
+    throw new Error('allowExternalActionExecution must be boolean.')
+  }
+  const executionRequested = value.allowFinalSubmitExecution === true
+    || value.allowExternalActionExecution === true
+  if (executionRequested
+    && value.requireExternalActionReconciliation === false) {
+    throw new Error(
+      'External action execution requires strict external-action reconciliation.',
+    )
+  }
+  if (executionRequested
+    && value.preflightExternalActions === false) {
+    throw new Error(
+      'External action execution requires authoritative external-action preflight.',
+    )
+  }
+  if (executionRequested) {
+    throw new Error(
+      'External action execution for owner-scoped service adapters requires external-action-binding/v3 owner scope enforcement.',
+    )
+  }
+  return Object.freeze({
+    ...(value.externalActionBindingResolver
+      ? { externalActionBindingResolver: value.externalActionBindingResolver }
+      : {}),
+    ...(value.externalActionIntentResolver
+      ? { externalActionIntentResolver: value.externalActionIntentResolver }
+      : {}),
+    ...(value.externalActionProbes
+      ? { externalActionProbes: Object.freeze([...value.externalActionProbes]) }
+      : {}),
+    ...(value.requireExternalActionReconciliation !== undefined
+      ? { requireExternalActionReconciliation: value.requireExternalActionReconciliation }
+      : {}),
+    ...(value.preflightExternalActions !== undefined
+      ? { preflightExternalActions: value.preflightExternalActions }
+      : {}),
+    ...(value.allowFinalSubmitExecution !== undefined
+      ? { allowFinalSubmitExecution: value.allowFinalSubmitExecution }
+      : {}),
+    ...(value.allowExternalActionExecution !== undefined
+      ? { allowExternalActionExecution: value.allowExternalActionExecution }
+      : {}),
+  })
 }
 
 function readJsonl(file: string, limit: number): unknown[] {

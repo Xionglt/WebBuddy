@@ -105,7 +105,9 @@ import { createNormalizedToolError } from '../../tools/tool-errors.js'
 import type { BackgroundToolBridgeV1 } from '../../tools/background-tool-bridge.js'
 import type { ToolCall } from '../../tools/tool-contract.js'
 import {
+  canonicalJson,
   digestCanonicalJson,
+  validateSessionRef,
   type ActionBinding,
   type ActionOutcome,
   type ApprovalBinding,
@@ -113,11 +115,30 @@ import {
   type CompletionFormState,
   type ContextItem,
   type EvidenceRef,
+  type SessionRef,
   type SensitiveActionKind,
   type TaskContract,
   type TaskPolicy,
 } from '../../task/contracts.js'
 import { ActionLedger, type ActionLedgerEntry } from '../../task/action-ledger.js'
+import { evaluateCompletionContract } from '../../task/completion-contract.js'
+import {
+  bindExternalActionRequest,
+  externalActionDestinationOrigin,
+  externalActionProbeById,
+  externalActionProbeTimeoutForBudget,
+  inspectExternalActionWithDeadline,
+  isUnresolvedActionStatus,
+  reconcileExternalActionWithDeadline,
+  resolveExternalActionIntentKind,
+  requiresDurableActionJournal,
+  unresolvedActionEntries,
+  type ExternalActionBindingResolver,
+  type ExternalActionIntentResolver,
+  type ExternalActionProbe,
+  type ExternalActionReconciliationVerdict,
+} from '../../task/action-reconciliation.js'
+import { persistExternalActionReconciliationAttempt } from '../../task/action-reconciliation-artifact.js'
 import {
   createSinkActionBinding,
   destinationOriginForTool,
@@ -217,8 +238,16 @@ export interface AgentLoopInput {
   permissionMode?: PermissionMode
   /** Explicit future switch for final-submit automation. Defaults false. */
   allowFinalSubmit?: boolean
+  /**
+   * Independent trusted-host capability for an isolated v2-reconciled external effect.
+   * The execute option still requires strict preflight and a durable Session; this flag
+   * is not a cross-Run claim or downstream idempotency guarantee.
+   */
+  allowExternalActionExecution?: boolean
   /** Optional append-only session recorder for resumable runtime state. */
   session?: SessionRecorder
+  /** Exact durable execution epoch bound into approval-bearing ActionBindings. */
+  sessionRef?: SessionRef
   /** Chat transcript restored from session transcript and prepended to the next model call. */
   restoredMessages?: ChatMessage[]
   /** Prompt-delivery receipts restored from the durable session transcript. */
@@ -263,6 +292,24 @@ export interface AgentLoopInput {
   toolResultStore?: ToolResultStore
   /** Runtime-owned sensitive-action audit ledger. */
   actionLedger?: ActionLedger
+  /** Authoritative artifacts restored from the current durable session. */
+  initialCompletionArtifacts?: readonly ArtifactRef[]
+  /** Site adapter that binds a side effect to a stable domain key before execution. */
+  externalActionBindingResolver?: ExternalActionBindingResolver
+  /** Trusted site adapter that upgrades an opaque browser call to a reconciled external action. */
+  externalActionIntentResolver?: ExternalActionIntentResolver
+  /** Deterministic adapters that query authoritative external state after execution or recovery. */
+  externalActionProbes?: readonly ExternalActionProbe[]
+  /** Fail closed unless every durable external action has a stable binding and registered Probe. */
+  requireExternalActionReconciliation?: boolean
+  /** Query authoritative state before approval/execution; required before machine execution can be offered. */
+  preflightExternalActions?: boolean
+  /** Bounded read-only reconciliation timeout. Defaults to 10 seconds per action. */
+  externalActionProbeTimeoutMs?: number
+  /** Total startup reconciliation budget. Defaults to 30 seconds. */
+  externalActionRecoveryBudgetMs?: number
+  /** Internal handoff: the embedding Runtime already reconciled durable actions before entering the loop. */
+  externalActionBootstrapReconciled?: boolean
   /** Trusted write-time sanitizer supplied by an embedding service secret provider. */
   persistenceSanitizer?: (value: unknown) => unknown
   /** Trusted rollout controls; `parallel` is a narrow Wave-5 allowlisted path. */
@@ -432,12 +479,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   const workflowEngine = input.workflowEngine ?? defaultWorkflowEngine
   const completionGate = input.completionGate ?? defaultCompletionGate
   const workflowEvidenceStore = new EvidenceStore()
-  const completionArtifacts: ArtifactRef[] = []
+  const completionArtifacts: ArtifactRef[] = structuredClone([...(input.initialCompletionArtifacts ?? [])])
   const actionLedger = input.actionLedger ?? new ActionLedger()
   const monitoredActionKinds: SensitiveActionKind[] = input.taskContract?.criteria.flatMap((criterion) => (
     criterion.kind === 'action_boundary' ? criterion.actionKinds : []
   )) ?? []
   const session = input.session
+  if (input.sessionRef) {
+    validateSessionRef(input.sessionRef, session?.session.runId ?? ctx.trace.runId)
+    if (!session
+      || input.sessionRef.id !== session.session.sessionId
+      || input.sessionRef.runId !== session.session.runId) {
+      throw new Error('AGENT_LOOP_SESSION_BINDING_MISMATCH: SessionRef does not match the durable recorder.')
+    }
+  }
   const promptCacheNamespace = 'agent_loop'
   const promptCacheKey = promptCacheKeyForScope(
     session?.session.sessionId ?? ctx.sessionId,
@@ -459,6 +514,42 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       artifacts: completionArtifacts,
       actions: completionActions(),
     }
+  }
+  const verifiedFinalSubmitCompletion = (): boolean => {
+    const contract = input.taskContract
+    if (!contract) return false
+    const finalActionCriteria = contract.criteria.filter((criterion): criterion is Extract<
+      TaskContract['criteria'][number],
+      { kind: 'action_boundary' }
+    > => (
+      criterion.kind === 'action_boundary'
+      && criterion.outcome === 'performed'
+      && criterion.businessKeys !== undefined
+      && criterion.businessKeys.length > 0
+      && criterion.actionKinds.some((kind) => kind === 'submit' || kind === 'payment')
+    ))
+    if (finalActionCriteria.length === 0) return false
+    const finalBusinessKeys = new Set(finalActionCriteria.flatMap((criterion) => criterion.businessKeys ?? []))
+    const receiptCriteria = contract.criteria.filter((criterion): criterion is Extract<
+      TaskContract['criteria'][number],
+      { kind: 'artifact_present' }
+    > => (
+      criterion.kind === 'artifact_present'
+      && criterion.artifactKinds.includes('external_action_receipt')
+      && criterion.businessKeys?.some((businessKey) => finalBusinessKeys.has(businessKey)) === true
+    ))
+    const receiptCoveredKeys = new Set(receiptCriteria.flatMap((criterion) => criterion.businessKeys ?? []))
+    if ([...finalBusinessKeys].some((businessKey) => !receiptCoveredKeys.has(businessKey))) return false
+    const { requiredEvidence: _ignoredRequiredEvidence, ...contractWithoutRequiredEvidence } = contract
+    const fields = completionContractFields()
+    const evaluation = evaluateCompletionContract({
+      ...fields,
+      contract: {
+        ...contractWithoutRequiredEvidence,
+        criteria: [...finalActionCriteria, ...receiptCriteria],
+      },
+    })
+    return evaluation.criteria.length > 0 && evaluation.criteria.every((criterion) => criterion.passed)
   }
   const toolResultStore = input.toolResultStore ?? new FileToolResultStore({
     rootDir: join(ctx.trace.agentTrace?.dir ?? ctx.trace.dir, 'artifacts', 'tool-results'),
@@ -511,6 +602,8 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   let consecutiveRejectedAgentDoneToolCalls = 0
   let lastRejectedAgentDoneGateSummary: string | undefined
   let lastRejectedAgentDoneGateReason: string | undefined
+  let lastObservedExternalEffectGateSummary: string | undefined
+  let lastObservedExternalEffectGateReason: string | undefined
   let activeAutomaticMemoryEvidence: AutomaticMemoryEvidence[] = []
   let activeAutomaticMemoryAssistantContext = ''
   const automaticMemoryProcessedTurns = new Set<string>()
@@ -546,15 +639,133 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     sessionAction('workflow', () => session!.workflow(state))
   const sessionStatus = async (status: AgentSessionStatus, patch?: Parameters<SessionRecorder['updateStatus']>[1]) =>
     sessionAction('status', () => session!.updateStatus(status, patch))
-  const recordActionLedgerEntry = async (entry: ActionLedgerEntry) => {
-    ctx.trace.agentTrace?.recordEvent('action_ledger_updated', { entry })
-    await sessionEvent({
+  const recordActionLedgerEntry = async (
+    entry: ActionLedgerEntry,
+    reconciliation?: ExternalActionReconciliationVerdict,
+    receiptArtifact?: ArtifactRef,
+    receiptStorageRef?: ToolResultArtifactRef,
+  ) => {
+    ctx.trace.agentTrace?.recordEvent('action_ledger_updated', {
+      entry,
+      ...(reconciliation ? { reconciliation } : {}),
+      ...(receiptArtifact ? { receiptArtifact } : {}),
+      ...(receiptStorageRef ? { receiptStorageRef } : {}),
+    })
+    const event: Parameters<SessionRecorder['event']>[0] = {
       type: 'action_ledger_updated',
       toolCallId: entry.actionId.split(':').at(-1),
       message: `${entry.actionKind}: ${entry.status}`,
-      data: { entry },
-    })
+      data: {
+        entry,
+        ...(reconciliation ? { reconciliation } : {}),
+        ...(receiptArtifact ? { receiptArtifact } : {}),
+        ...(receiptStorageRef ? { receiptStorageRef } : {}),
+      },
+    }
+    if (requiresDurableActionJournal(entry.actionKind)) {
+      if (!session || session.durability !== 'durable') {
+        if (entry.status === 'executing') {
+          throw new Error(`DURABLE_ACTION_JOURNAL_REQUIRED: ${entry.actionKind} cannot execute without a durable session.`)
+        }
+        return
+      }
+      await session.eventDurably(event)
+      return
+    }
+    await sessionEvent(event)
   }
+  const reconcileActionIfPossible = async (
+    actionId: string,
+    timeoutMs = input.externalActionProbeTimeoutMs ?? 10_000,
+  ) => {
+    const action = actionLedger.latest(actionId)
+    const binding = action?.externalBinding
+    if (!action || (action.status !== 'proposed' && !isUnresolvedActionStatus(action.status))) return
+    if (!binding) {
+      if (requiresDurableActionJournal(action.actionKind)) {
+        ctx.trace.agentTrace?.recordEvent('external_action_reconciliation_skipped', {
+          actionId: action.actionId,
+          actionKind: action.actionKind,
+          status: action.status,
+          reason: 'binding_unavailable',
+        })
+        if (input.requireExternalActionReconciliation) {
+          throw new Error(
+            `EXTERNAL_ACTION_BINDING_REQUIRED: strict reconciliation mode cannot continue ${action.actionId} without a durable binding.`,
+          )
+        }
+      }
+      return
+    }
+    const probe = externalActionProbeById(input.externalActionProbes, binding.probeId)
+    if (!probe) {
+      ctx.trace.agentTrace?.recordEvent('external_action_reconciliation_skipped', {
+        actionId: action.actionId,
+        actionKind: action.actionKind,
+        businessKey: binding.businessKey,
+        probeId: binding.probeId,
+        status: action.status,
+        reason: 'probe_unavailable',
+      })
+      if (input.requireExternalActionReconciliation) {
+        throw new Error(
+          `EXTERNAL_ACTION_PROBE_REQUIRED: strict reconciliation mode cannot continue ${action.actionId} without ${binding.probeId}.`,
+        )
+      }
+      return
+    }
+    const attempt = await reconcileExternalActionWithDeadline({
+      ledger: actionLedger,
+      actionId,
+      probe,
+      timeoutMs,
+    })
+    if (attempt.ledgerEntry) {
+      const receipt = await persistExternalActionReconciliationAttempt({
+        store: toolResultStore,
+        runId: session?.session.runId ?? ctx.trace.runId,
+        revision: input.taskContract?.revision ?? 0,
+        sessionId: session?.session.sessionId ?? ctx.sessionId,
+        action: attempt.ledgerEntry,
+        verdict: attempt.verdict,
+        persistLedgerEvent: async (materialized) => recordActionLedgerEntry(
+          attempt.ledgerEntry!,
+          attempt.verdict,
+          materialized?.artifact,
+          materialized?.storageRef,
+        ),
+      })
+      if (receipt && !completionArtifacts.some((artifact) => artifact.id === receipt.artifact.id)) {
+        completionArtifacts.push(receipt.artifact)
+      }
+    }
+  }
+  if (!input.externalActionBootstrapReconciled) {
+    const recoveryStartedAtMs = Date.now()
+    const bootstrapActions = unresolvedActionEntries(actionLedger.snapshot())
+    for (const [index, action] of bootstrapActions.entries()) {
+      const timeoutMs = externalActionProbeTimeoutForBudget({
+        perActionTimeoutMs: input.externalActionProbeTimeoutMs ?? 10_000,
+        recoveryBudgetMs: input.externalActionRecoveryBudgetMs ?? 30_000,
+        startedAtMs: recoveryStartedAtMs,
+        nowMs: Date.now(),
+      })
+      if (timeoutMs === undefined) {
+        ctx.trace.agentTrace?.recordEvent('external_action_reconciliation_skipped', {
+          reason: 'recovery_budget_exhausted',
+          recoveryBudgetMs: input.externalActionRecoveryBudgetMs ?? 30_000,
+          remainingActionCount: bootstrapActions.length - index,
+        })
+        break
+      }
+      await reconcileActionIfPossible(action.actionId, timeoutMs)
+    }
+  }
+  // The embedding Runtime's handoff flag is an optimization, not authority.
+  // Strict mode still inspects the resulting ledger so a forged/stale
+  // `externalActionBootstrapReconciled=true` cannot start the model with
+  // unresolved external effects.
+  const unresolvedBootstrapActions = unresolvedActionEntries(actionLedger.snapshot())
   const recordRunMemorySnapshot = async (reason: string, currentStep: number, turnId?: string, toolCallId?: string) => {
     const memory = compactRunMemory(runMemory)
     ctx.trace.agentTrace?.recordEvent('memory_updated', {
@@ -872,6 +1083,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
     const evaluation = workflowEngine.evaluate({
       ...evaluationInput,
+      verifiedFinalSubmitCompletion: verifiedFinalSubmitCompletion(),
       previous: workflowState,
       recentActions: workflowRecentActions(recentActions, evaluationInput),
       policyFacts: evaluationInput.policyDecision ? [evaluationInput.policyDecision] : undefined,
@@ -958,8 +1170,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
     request: PermissionRequest,
     decision: PermissionDecision,
     currentStep: number,
+    allowedDecisions?: GateDecision[],
   ): Promise<ApprovalRequest> => {
-    const approval = approvalQueue.enqueue(approvalInputFor(request, decision))
+    const approval = approvalQueue.enqueue(approvalInputFor(request, decision, allowedDecisions))
     rememberApproval(approvals, approval)
     const approvalData = approvalMetadata(approval)
     ctx.trace.agentTrace?.recordEvent('approval_requested', { step: currentStep, approval: approvalData })
@@ -1145,6 +1358,34 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
   await sessionTranscript({ type: 'user_message', content: goal })
   const abortedAfterStart = await checkAbort()
   if (abortedAfterStart) return abortedAfterStart
+  if (input.requireExternalActionReconciliation && unresolvedBootstrapActions.length > 0) {
+    summary = [
+      'Strict external-action recovery is blocked because',
+      `${unresolvedBootstrapActions.length} durable action(s) remain in doubt after authoritative reconciliation.`,
+      'Resolve them through owner-scoped human verification before the model can create more external effects.',
+    ].join(' ')
+    done = true
+    blocked = true
+    rememberUniqueBlocker(blockers, summary)
+    emit('gate', summary, step)
+    ctx.trace.record({ phase: 'agent_loop', action: summary, status: 'blocked' })
+    await finalizeSession(
+      'blocked',
+      { steps: step, toolCalls, done, blocked, summary, workflowState, runMemory: compactRunMemory(runMemory) },
+      summary,
+    )
+    return {
+      steps: step,
+      toolCalls,
+      done,
+      blocked,
+      summary,
+      workflowState,
+      evidence: [],
+      artifacts: completionArtifacts,
+      actions: completionActions(),
+    }
+  }
 
   // Snapshot the already-open page so the model starts from the real form
   // instead of guessing a URL to open. (The orchestrator opens the target first.)
@@ -1386,6 +1627,36 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       emit('warn', `Async completion readiness unavailable: ${error instanceof Error ? error.message : String(error)}`, step)
       return undefined
     }
+  }
+  const evaluateObservedExternalEffectCompletion = async (
+    candidateSummary: string,
+    toolCallId: string,
+    source: 'external_action_ledger' | 'external_action_preflight',
+  ): Promise<CompletionGateDecision | undefined> => {
+    if (!input.taskContract && !asyncTaskRuntime) return undefined
+    await assembleResultArtifacts(candidateSummary)
+    const mainCompletionReadiness = await asyncCompletionReadiness()
+    const decision = completionGate.evaluate({
+      done: true,
+      blocked: false,
+      summary: candidateSummary,
+      workflowState,
+      workflowEvaluation: lastWorkflowEvaluation,
+      page: latestContext.page,
+      form: latestContext.form,
+      formCoverage: latestFormCoverage(latestContext),
+      fillLedgerSummary: fillLedger.summary(),
+      requiresCurrentResumeUpload,
+      currentResumeUploaded,
+      taskType,
+      ...completionContractFields(),
+      source,
+      asyncTaskRuntimeEnabled: Boolean(asyncTaskRuntime),
+      ...(mainCompletionReadiness ? { mainCompletionReadiness } : {}),
+      summaryAuthority: 'main_agent',
+    })
+    await recordCompletionGateDecision(decision, step, { toolCallId })
+    return decision
   }
   const injectAsyncTaskNotifications = async (turnId: string): Promise<number> => {
     if (!asyncTaskRuntime) return 0
@@ -1994,7 +2265,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       const dependencyKey = typeof tool?.metadata?.dependencyKey === 'string' && tool.metadata.dependencyKey.trim()
         ? tool.metadata.dependencyKey.trim()
         : undefined
-      const risk = registry.resolveRisk(call.name, call.arguments, ctx)
+      let risk = registry.resolveRisk(call.name, call.arguments, ctx)
       const callRedaction = redactSensitiveData(call.arguments)
       const safeCallArgs = callRedaction.value as Record<string, unknown>
       const argBrief = briefArgs(call.name, safeCallArgs)
@@ -2070,18 +2341,206 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         contextText,
         freshness: latestContext.freshness,
       })
-      const sinkActionKind = sensitiveActionKindForTool(call.name, policyDecision.gateKind, call.arguments)
-      const ledgerActionId = sinkActionKind ? `${turnId}:${call.id}` : undefined
+      const inferredSinkActionKind = sensitiveActionKindForTool(call.name, policyDecision.gateKind, call.arguments)
+      const prospectiveActionId = `${turnId}:${call.id}`
+      let externalDestinationOrigin = destinationOriginForTool(call.name, call.arguments, currentUrl)
+      const externalActionAdapterArgs = immutableExternalActionAdapterSnapshot(call.arguments)
+      const externalActionIntentRequest = immutableExternalActionAdapterSnapshot({
+        schemaVersion: 'external-action-intent-request/v1' as const,
+        actionId: prospectiveActionId,
+        toolName: call.name,
+        args: externalActionAdapterArgs,
+        ...(inferredSinkActionKind ? { inferredActionKind: inferredSinkActionKind } : {}),
+        ...(currentUrl ? { currentUrl } : {}),
+        ...(externalDestinationOrigin ? { destinationOrigin: externalDestinationOrigin } : {}),
+      })
+      const externalActionIntentResult = input.externalActionIntentResolver?.(externalActionIntentRequest)
+      const externalActionIntent = externalActionIntentResult === undefined
+        ? undefined
+        : immutableExternalActionAdapterSnapshot(externalActionIntentResult)
+      if (input.requireExternalActionReconciliation
+        && inferredSinkActionKind === undefined
+        && isOpaqueClickTool(call.name)
+        && !externalActionIntent) {
+        throw new Error(
+          `EXTERNAL_ACTION_INTENT_REQUIRED: strict reconciliation mode requires an explicit external or non_external classification for ${call.name}.`,
+        )
+      }
+      const sinkActionKind = resolveExternalActionIntentKind(externalActionIntent, inferredSinkActionKind)
+      risk = effectiveExternalActionRisk(risk, sinkActionKind)
+      const ledgerActionId = sinkActionKind ? prospectiveActionId : undefined
+      let externalBinding: ReturnType<typeof bindExternalActionRequest> | undefined
+      let externalEffectPreview: string | undefined
+      let ledgerActionProposed = false
+      let shouldProposeLedgerAction = false
+      let pendingExternalPreflight: {
+        probe: ExternalActionProbe
+      } | undefined
       if (sinkActionKind && ledgerActionId) {
-        await recordActionLedgerEntry(actionLedger.propose({
+        const externalBindingRequest = immutableExternalActionAdapterSnapshot({
           actionId: ledgerActionId,
           actionKind: sinkActionKind,
           toolName: call.name,
-        }))
+          args: externalActionAdapterArgs,
+          ...(currentUrl ? { currentUrl } : {}),
+          ...(externalDestinationOrigin ? { destinationOrigin: externalDestinationOrigin } : {}),
+        })
+        const intentBinding = externalActionIntent?.actionKind === 'non_external'
+          ? undefined
+          : externalActionIntent?.binding
+        const externalBindingCandidateResult = requiresDurableActionJournal(sinkActionKind)
+          ? intentBinding ?? input.externalActionBindingResolver?.(externalBindingRequest)
+          : undefined
+        const externalBindingCandidate = externalBindingCandidateResult === undefined
+          ? undefined
+          : immutableExternalActionAdapterSnapshot(externalBindingCandidateResult)
+        externalEffectPreview = externalBindingCandidate
+          ? externalEffectPreviewForApproval(
+              externalBindingCandidate.effectPayload ?? externalActionAdapterArgs,
+            )
+          : undefined
+        if (externalBindingCandidate) {
+          externalDestinationOrigin = externalActionDestinationOrigin(
+            externalBindingCandidate,
+            externalBindingRequest,
+          )
+        }
+        externalBinding = externalBindingCandidate
+          ? bindExternalActionRequest(externalBindingCandidate, externalBindingRequest)
+          : undefined
+        if (requiresDurableActionJournal(sinkActionKind)
+          && input.requireExternalActionReconciliation
+          && !externalBinding) {
+          throw new Error(
+            `EXTERNAL_ACTION_BINDING_REQUIRED: strict reconciliation mode blocked unbound ${sinkActionKind}.`,
+          )
+        }
+        const unresolvedSameKind = requiresDurableActionJournal(sinkActionKind)
+          ? unresolvedActionEntries(actionLedger.snapshot()).filter((entry) => entry.actionKind === sinkActionKind)
+          : []
+        if (!externalBinding && unresolvedSameKind.length > 0) {
+          throw new Error([
+            'EXTERNAL_ACTION_BINDING_REQUIRED:',
+            `${sinkActionKind} has ${unresolvedSameKind.length} unresolved external action(s),`,
+            'so a new side effect cannot execute without a stable business key.',
+          ].join(' '))
+        }
+        const externalProbe = externalBinding
+          ? externalActionProbeById(input.externalActionProbes, externalBinding.probeId)
+          : undefined
+        if (externalBinding && !externalProbe) {
+          throw new Error(
+            `EXTERNAL_ACTION_PROBE_REQUIRED: ${externalBinding.probeId} is not registered for ${externalBinding.businessKey}.`,
+          )
+        }
+        const existingExternalAction = externalBinding
+          ? actionLedger.latestExternalAction(externalBinding.businessKey)
+          : undefined
+        if (existingExternalAction?.externalBinding?.schemaVersion === 'external-action-binding/v1') {
+          throw new Error(
+            `EXTERNAL_ACTION_LEGACY_BINDING_REQUIRES_REVIEW: ${externalBinding!.businessKey} has no effect digest.`,
+          )
+        }
+        if (existingExternalAction && existingExternalAction.actionKind !== sinkActionKind) {
+          throw new Error(
+            `EXTERNAL_ACTION_KEY_COLLISION: ${externalBinding!.businessKey} is already bound to ${existingExternalAction.actionKind}, not ${sinkActionKind}.`,
+          )
+        }
+        if (existingExternalAction?.externalBinding?.schemaVersion === 'external-action-binding/v2'
+          && existingExternalAction.externalBinding.effectDigest !== externalBinding?.effectDigest) {
+          throw new Error(
+            `EXTERNAL_ACTION_KEY_COLLISION: ${externalBinding!.businessKey} is already bound to a different effect digest.`,
+          )
+        }
+        if (existingExternalAction?.status === 'committed' || existingExternalAction?.status === 'performed') {
+          const observation = [
+            'NO_OP (EXTERNAL_ACTION_ALREADY_COMMITTED):',
+            `${externalBinding!.businessKey} is already confirmed by the external action ledger.`,
+            'The runtime refused to invoke the side-effecting tool again.',
+          ].join(' ')
+          await materializeTerminal(call, index, 'EARLIER_TOOL_COMPLETED', observation)
+          rememberRecentAction(recentActions, {
+            step,
+            toolName: call.name,
+            argumentsSummary: argBrief,
+            status: 'ok',
+            risk,
+            observation,
+          })
+          const completionDecision = await evaluateObservedExternalEffectCompletion(
+            observation,
+            call.id,
+            'external_action_ledger',
+          )
+          if (completionDecision && completionDecision.action !== 'allow') {
+            lastObservedExternalEffectGateSummary = completionGateBlockerSummary(completionDecision)
+            lastObservedExternalEffectGateReason = completionDecision.reason
+            const completionMessage = [
+              'EXTERNAL_EFFECT_OBSERVED_BUT_TASK_INCOMPLETE',
+              completionDecision.reason,
+              'The side effect remains a no-op; choose an action that satisfies the exact current TaskContract.',
+            ].join('\n')
+            messages.push({ role: 'user', content: completionMessage })
+            summary = completionDecision.reason
+            if (completionDecision.action === 'block') {
+              blocked = true
+              done = true
+              rememberUniqueBlocker(blockers, completionGateBlockerSummary(completionDecision))
+              emit('gate', completionGateBlockerSummary(completionDecision), step)
+              return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
+            }
+            done = false
+            emit('gate', completionGateBlockerSummary(completionDecision), step)
+            return { continueTurn: true }
+          }
+          done = true
+          summary = observation
+          emit('done', observation, step)
+          return { continueTurn: false, stopCode: 'EARLIER_TOOL_COMPLETED' }
+        }
+        if (existingExternalAction
+          && (existingExternalAction.status === 'proposed'
+            || isUnresolvedActionStatus(existingExternalAction.status))) {
+          const observation = [
+            'BLOCKED (EXTERNAL_ACTION_IN_DOUBT):',
+            `${externalBinding!.businessKey} remains ${existingExternalAction.status}.`,
+            'Reconcile the authoritative external state before retrying.',
+          ].join(' ')
+          await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
+          rememberRecentAction(recentActions, {
+            step,
+            toolName: call.name,
+            argumentsSummary: argBrief,
+            status: 'blocked',
+            risk,
+            observation,
+          })
+          rememberUniqueBlocker(blockers, observation)
+          blocked = true
+          done = true
+          summary = observation
+          emit('gate', observation, step)
+          return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
+        }
+        if ((!existingExternalAction
+            || existingExternalAction.status === 'not_committed'
+            || existingExternalAction.status === 'denied'
+            || existingExternalAction.status === 'skipped')
+          && externalBinding
+          && externalProbe
+          && input.preflightExternalActions === true) {
+          if (!session || session.durability !== 'durable') {
+            throw new Error(
+              `DURABLE_ACTION_JOURNAL_REQUIRED: ${sinkActionKind} preflight evidence requires a durable session.`,
+            )
+          }
+          pendingExternalPreflight = { probe: externalProbe }
+        }
+        shouldProposeLedgerAction = true
       }
       const sinkSourceItems = contextItems.filter((item) => item.allowedUses.includes('sink'))
       const sinkSourceOrigin = originForUrl(currentUrl)
-      const sinkDestinationOrigin = destinationOriginForTool(call.name, call.arguments, currentUrl)
+      const sinkDestinationOrigin = externalDestinationOrigin
       const sinkExecutableArgs = sinkActionKind
         ? finalExecutableSinkArguments(call.name, call.arguments)
         : call.arguments
@@ -2090,12 +2549,23 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             contractId: input.taskContract.contractId,
             revision: input.taskContract.revision,
             runId: session?.session.runId ?? ctx.trace.runId,
+            ...(input.sessionRef ? { sessionRef: input.sessionRef } : {}),
             actionId: `${turnId}:${call.id}`,
             toolName: call.name,
             args: sinkExecutableArgs,
             sourceItems: sinkSourceItems,
             ...(sinkSourceOrigin ? { sourceOrigin: sinkSourceOrigin } : {}),
             ...(sinkDestinationOrigin ? { destinationOrigin: sinkDestinationOrigin } : {}),
+            ...(externalBinding ? {
+              externalBusinessKey: externalBinding.businessKey,
+              externalEffectDigest: externalBinding.effectDigest,
+              externalProbeId: externalBinding.probeId,
+              externalActionKind: sinkActionKind as Extract<
+                SensitiveActionKind,
+                'upload' | 'send' | 'publish' | 'submit' | 'payment'
+              >,
+              ...(externalEffectPreview ? { externalEffectPreview } : {}),
+            } : {}),
             actionSeq: step * 1000 + index,
             expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
           })
@@ -2145,13 +2615,186 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         toolName: call.name,
         decision: policyMetadata(policyDecision),
       })
-      await sessionEvent({
+      const policyEvent: Parameters<SessionRecorder['event']>[0] = {
         type: 'policy_evaluated',
         turnId,
         toolCallId: call.id,
         message: `${call.name}: ${policyDecision.action}`,
         data: { decision: policyMetadata(policyDecision) },
-      })
+      }
+      if (shouldProposeLedgerAction
+        && sinkActionKind
+        && requiresDurableActionJournal(sinkActionKind)
+        && session?.durability === 'durable') {
+        // This is the recovery authorization boundary. Make the policy
+        // decision independently durable before a proposal can cause startup
+        // recovery to query an external sink.
+        await session.eventDurably(policyEvent)
+      } else {
+        await sessionEvent(policyEvent)
+      }
+
+      // Only an action whose deterministic policy was durably evaluated and
+      // not blocked can become a recoverable Ledger proposal. Otherwise a
+      // crash between proposal and policy could make startup recovery query a
+      // sink that policy never allowed the Runtime to access.
+      if (shouldProposeLedgerAction
+        && ledgerActionId
+        && sinkActionKind
+        && policyDecision.action !== 'block') {
+        await recordActionLedgerEntry(actionLedger.propose({
+          actionId: ledgerActionId,
+          actionKind: sinkActionKind,
+          toolName: call.name,
+          ...(externalBinding ? { externalBinding } : {}),
+        }))
+        ledgerActionProposed = true
+      }
+
+      // A read-only Probe is still an external access. Never let the trusted
+      // adapter query a sink that the deterministic policy already blocked.
+      // For allowed/gated actions, preflight still completes before any human
+      // approval is requested or side-effecting tool is invoked.
+      if (pendingExternalPreflight && policyDecision.action !== 'block') {
+        if (!session || session.durability !== 'durable') {
+          throw new Error('DURABLE_ACTION_JOURNAL_REQUIRED: external preflight lost its durable session.')
+        }
+        const preflightAction = actionLedger.latest(ledgerActionId!)
+        if (!preflightAction || preflightAction.status !== 'proposed') {
+          throw new Error('EXTERNAL_ACTION_PREFLIGHT_STATE_INVALID: durable proposal is missing after policy evaluation.')
+        }
+        const preflightBinding = preflightAction.externalBinding!
+        const preflight = await inspectExternalActionWithDeadline({
+          action: preflightAction,
+          probe: pendingExternalPreflight.probe,
+          timeoutMs: input.externalActionProbeTimeoutMs ?? 10_000,
+        })
+        const preflightAudit = {
+          actionId: preflightAction.actionId,
+          actionKind: preflightAction.actionKind,
+          businessKey: preflightBinding.businessKey,
+          probeId: preflightBinding.probeId,
+          policyRuleId: policyDecision.ruleId,
+          policyAction: policyDecision.action,
+          resolved: preflight.resolved,
+          ...(preflight.verdict ? { verdict: preflight.verdict } : {}),
+          ...(preflight.error ? { error: preflight.error } : {}),
+        }
+        ctx.trace.agentTrace?.recordEvent('external_action_preflight', preflightAudit)
+        await session.eventDurably({
+          type: 'external_action_preflight',
+          toolCallId: preflightAction.actionId.split(':').at(-1),
+          message: `${preflightAction.actionKind}: preflight ${preflight.verdict?.state ?? 'failed'}`,
+          data: preflightAudit,
+        })
+        if (preflight.verdict?.state === 'committed') {
+          const committedEntry = actionLedger.observeCommitted(
+            preflightAction.actionId,
+            `Read-only preflight confirmed an existing external effect: ${preflight.verdict.summary}`,
+          )
+          const receipt = await persistExternalActionReconciliationAttempt({
+            store: toolResultStore,
+            runId: session.session.runId,
+            revision: input.taskContract?.revision ?? 0,
+            sessionId: session.session.sessionId,
+            action: committedEntry,
+            verdict: preflight.verdict,
+            persistLedgerEvent: async (materialized) => recordActionLedgerEntry(
+              committedEntry,
+              preflight.verdict,
+              materialized?.artifact,
+              materialized?.storageRef,
+            ),
+          })
+          if (receipt && !completionArtifacts.some((artifact) => artifact.id === receipt.artifact.id)) {
+            completionArtifacts.push(receipt.artifact)
+          }
+          const observation = [
+            'NO_OP (EXTERNAL_ACTION_PREFLIGHT_COMMITTED):',
+            `${preflightBinding.businessKey} already exists with reference ${preflight.verdict.externalReference}.`,
+            'The current run did not request approval or invoke the side-effecting tool.',
+          ].join(' ')
+          await materializeTerminal(call, index, 'EARLIER_TOOL_COMPLETED', observation)
+          rememberRecentAction(recentActions, {
+            step,
+            toolName: call.name,
+            argumentsSummary: argBrief,
+            status: 'ok',
+            risk,
+            observation,
+          })
+          const completionDecision = await evaluateObservedExternalEffectCompletion(
+            observation,
+            call.id,
+            'external_action_preflight',
+          )
+          if (completionDecision && completionDecision.action !== 'allow') {
+            lastObservedExternalEffectGateSummary = completionGateBlockerSummary(completionDecision)
+            lastObservedExternalEffectGateReason = completionDecision.reason
+            const completionMessage = [
+              'EXTERNAL_EFFECT_OBSERVED_BUT_TASK_INCOMPLETE',
+              completionDecision.reason,
+              'The side effect remains a no-op; choose an action that satisfies the exact current TaskContract.',
+            ].join('\n')
+            messages.push({ role: 'user', content: completionMessage })
+            summary = completionDecision.reason
+            if (completionDecision.action === 'block') {
+              blocked = true
+              done = true
+              rememberUniqueBlocker(blockers, completionGateBlockerSummary(completionDecision))
+              emit('gate', completionGateBlockerSummary(completionDecision), step)
+              return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
+            }
+            done = false
+            emit('gate', completionGateBlockerSummary(completionDecision), step)
+            return { continueTurn: true }
+          }
+          done = true
+          summary = observation
+          emit('done', observation, step)
+          return { continueTurn: false, stopCode: 'EARLIER_TOOL_COMPLETED' }
+        }
+        if (preflight.verdict?.state !== 'not_committed') {
+          const ambiguousEntry = actionLedger.markPreflightAmbiguous(
+            preflightAction.actionId,
+            preflight.error
+              ? `Read-only preflight failed closed: ${preflight.error}`
+              : `Read-only preflight was ambiguous: ${preflight.verdict?.summary ?? 'no authoritative verdict'}`,
+          )
+          await persistExternalActionReconciliationAttempt({
+            store: toolResultStore,
+            runId: session.session.runId,
+            revision: input.taskContract?.revision ?? 0,
+            sessionId: session.session.sessionId,
+            action: ambiguousEntry,
+            ...(preflight.verdict ? { verdict: preflight.verdict } : {}),
+            persistLedgerEvent: async () => recordActionLedgerEntry(
+              ambiguousEntry,
+              preflight.verdict,
+            ),
+          })
+          const observation = [
+            'BLOCKED (EXTERNAL_ACTION_PREFLIGHT_IN_DOUBT):',
+            `${preflightBinding.businessKey} could not be proven absent before execution.`,
+            'The runtime did not request approval or invoke the side-effecting tool.',
+          ].join(' ')
+          await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
+          rememberUniqueBlocker(blockers, observation)
+          rememberRecentAction(recentActions, {
+            step,
+            toolName: call.name,
+            argumentsSummary: argBrief,
+            status: 'blocked',
+            risk,
+            observation,
+          })
+          blocked = true
+          done = true
+          summary = observation
+          emit('gate', observation, step)
+          return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
+        }
+      }
 
       const permissionRequest = createToolPermissionRequest({
         call: {
@@ -2179,13 +2822,20 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           sinkActionId: sinkActionBinding.actionId,
           sinkDestinationOrigin: sinkActionBinding.destinationOrigin,
           sinkContractRevision: sinkActionBinding.contractRevision,
+          ...(sinkActionBinding.externalBusinessKey ? {
+            externalBusinessKey: sinkActionBinding.externalBusinessKey,
+            externalEffectDigest: sinkActionBinding.externalEffectDigest,
+            externalProbeId: sinkActionBinding.externalProbeId,
+            externalActionKind: sinkActionBinding.externalActionKind,
+            externalEffectPreview: sinkActionBinding.externalEffectPreview,
+          } : {}),
         }
       }
       const permissionDecision = await decidePermission(permissionRequest, step)
       let sinkApprovalBinding: ApprovalBinding | undefined
 
       if (permissionDecision.action === 'deny') {
-        if (ledgerActionId) {
+        if (ledgerActionId && ledgerActionProposed) {
           await recordActionLedgerEntry(actionLedger.deny(ledgerActionId, permissionDecision.reason))
         }
         const note = `BLOCKED by permission [${permissionDecision.ruleId}]. ${permissionDecision.reason}`
@@ -2238,12 +2888,50 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
 
       if (permissionDecision.action === 'allow') {
         if (ledgerActionId) {
-          await recordActionLedgerEntry(actionLedger.authorize(ledgerActionId, permissionDecision.reason))
+          await recordActionLedgerEntry(actionLedger.authorize(
+            ledgerActionId,
+            permissionDecision.reason,
+            {
+              schemaVersion: 'action-decision-ref/v1',
+              source: 'task_policy',
+              decisionRef: permissionDecision.ruleId,
+              ...(sinkActionBinding
+                ? { actionBindingSha256: digestCanonicalJson(sinkActionBinding) }
+                : {}),
+            },
+          ))
         }
         if (policyDecision.action === 'auto_confirm') markConfirmed(call)
       } else if (permissionDecision.action === 'ask') {
-        const approval = await enqueueApproval(permissionRequest, permissionDecision, step)
-        const kind = approval.gateKind
+        const kind = permissionDecision.gateKind ?? permissionRequest.gateKind ?? fallbackGateKind(permissionRequest)
+        const hostAllowsThisExternalExecution = input.allowExternalActionExecution === true
+          && (sinkActionKind !== 'submit' && sinkActionKind !== 'payment'
+            || input.allowFinalSubmit === true)
+        const canOfferExternalExecution = hostAllowsThisExternalExecution
+          && input.requireExternalActionReconciliation === true
+          && input.preflightExternalActions === true
+          && session?.durability === 'durable'
+          && Boolean(input.sessionRef)
+          && Boolean(sinkActionBinding?.sessionRef)
+          && externalBinding?.schemaVersion === 'external-action-binding/v2'
+          && Boolean(sinkActionBinding?.externalBusinessKey)
+          && Boolean(sinkActionBinding?.externalEffectDigest)
+          && Boolean(sinkActionBinding?.externalProbeId)
+          && sinkActionBinding?.externalActionKind === sinkActionKind
+          && Boolean(sinkActionBinding?.externalEffectPreview)
+          && taskContractAuthorizesExternalExecution(
+            input.taskContract,
+            sinkActionKind,
+            sinkActionBinding?.externalBusinessKey,
+          )
+        const approval = await enqueueApproval(
+          permissionRequest,
+          permissionDecision,
+          step,
+          canOfferExternalExecution
+            ? ['approve', 'approve_and_execute', 'decline', 'takeover']
+            : ['approve', 'decline', 'takeover'],
+        )
         await sessionEvent({
           type: 'human_gate_requested',
           turnId,
@@ -2265,21 +2953,41 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         })
         const decision = gateResponse.decision
         const resolvedApproval = await resolveApproval(approval, decision, step, gateResponse.rememberScope)
-        if (decision === 'approve' && sinkActionBinding) {
+        if ((decision === 'approve' || decision === 'approve_and_execute') && sinkActionBinding) {
           const issuedAt = resolvedApproval.resolvedAt ?? new Date().toISOString()
-          sinkApprovalBinding = {
-            schemaVersion: 'approval-binding/v1',
+          const approvalBindingBase = {
             approvalId: resolvedApproval.approvalId,
             actionBindingSha256: digestCanonicalJson(sinkActionBinding),
-            decision: 'approved',
             issuedAt,
             expiresAt: sinkActionBinding.expiresAt,
             nonce: `${resolvedApproval.approvalId}:${sinkActionBinding.actionId}`,
           }
+          sinkApprovalBinding = decision === 'approve_and_execute'
+            ? {
+                ...approvalBindingBase,
+                schemaVersion: 'approval-binding/v2',
+                decision: 'approved_and_execute',
+              }
+            : {
+                ...approvalBindingBase,
+                schemaVersion: 'approval-binding/v1',
+                decision: 'approved',
+              }
         }
         if (ledgerActionId) {
-          await recordActionLedgerEntry(decision === 'approve'
-            ? actionLedger.authorize(ledgerActionId, `Human gate approved ${kind}.`)
+          await recordActionLedgerEntry(decision === 'approve' || decision === 'approve_and_execute'
+            ? actionLedger.authorize(
+                ledgerActionId,
+                `Human gate returned ${decision} for ${kind}.`,
+                {
+                  schemaVersion: 'action-decision-ref/v1',
+                  source: 'human_gate',
+                  decisionRef: resolvedApproval.approvalId,
+                  ...(sinkApprovalBinding
+                    ? { actionBindingSha256: sinkApprovalBinding.actionBindingSha256 }
+                    : {}),
+                },
+              )
             : actionLedger.deny(ledgerActionId, `Human gate resolved ${decision} for ${kind}.`))
         }
         const rememberedPermission = await rememberPermissionDecision({
@@ -2324,7 +3032,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           url: currentUrl,
           risk,
           observation: permissionDecision.reason,
-          status: decision === 'approve' ? 'ok' : 'blocked',
+          status: decision === 'approve' || decision === 'approve_and_execute' ? 'ok' : 'blocked',
         })
         await evaluateWorkflow(step, `Human gate ${kind} resolved ${decision}.`, {
           turnId,
@@ -2341,10 +3049,13 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           gateDecision: decision,
         })
         emit('gate', `[${kind}] ${call.name}(${argBrief}) → ${decision}`, step)
-        if (kind === 'final_submit') {
+        const requiresExplicitExternalExecution = externalBinding?.schemaVersion === 'external-action-binding/v2'
+          && sinkActionBinding?.externalActionKind === sinkActionKind
+        if ((kind === 'final_submit' || requiresExplicitExternalExecution)
+          && decision !== 'approve_and_execute') {
           const note = decision === 'approve'
-            ? 'FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human approved awareness of this final-submit step, but the runtime will not click a true final-submit control. If this is actually an application-entry or review-step action, inspect the page and choose the correct non-final control; otherwise ask the human to complete the final submit manually, then continue observing or call agent_done.'
-            : `FINAL_SUBMIT_NOT_EXECUTED_AUTOMATICALLY. The human chose ${decision} for this final-submit step. Do not retry this exact final-submit action; continue with any remaining safe checks or call agent_done if no safe work remains.`
+            ? 'EXTERNAL_EFFECT_NOT_EXECUTED_AUTOMATICALLY. The human acknowledged this external-effect boundary but did not authorize the machine to execute it. Ask the human to perform the exact effect manually, then continue with read-only verification; do not retry this exact action.'
+            : `EXTERNAL_EFFECT_NOT_EXECUTED_AUTOMATICALLY. The human chose ${decision} for this external-effect step. Do not retry this exact action; continue with safe read-only checks or call agent_done if no safe work remains.`
           const observation = noteWithPermission(note, policyDecision, permissionDecision)
           await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
           if (decision === 'approve' && ledgerActionId) {
@@ -2354,7 +3065,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             ))
           }
           if (decision !== 'approve') {
-            blockers.push(`final_submit gate did not execute ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
+            blockers.push(`external-effect gate did not execute ${call.name}(${argBrief}) with decision=${decision}: ${permissionDecision.reason}`)
           }
           rememberRecentAction(recentActions, {
             step,
@@ -2364,7 +3075,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
             risk,
             observation,
           })
-          await evaluateWorkflow(step, `Final-submit gate returned control to the agent without executing ${call.name}.`, {
+          await evaluateWorkflow(step, `External-effect gate returned control to the agent without executing ${call.name}.`, {
             turnId,
             toolCallId: call.id,
             currentUrl,
@@ -2382,12 +3093,12 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
           if (decision !== 'approve') {
             blocked = true
             done = true
-            summary = `Human ${decision} the final_submit step.`
+            summary = `Human ${decision} the external-effect step.`
             return { continueTurn: false, stopCode: 'EARLIER_TOOL_BLOCKED' }
           }
           return { continueTurn: true }
         }
-        if (decision !== 'approve') {
+        if (decision !== 'approve' && decision !== 'approve_and_execute') {
           const note = `BLOCKED by human gate (${decision}). Do not retry this action; call agent_done if you cannot proceed.`
           const observation = noteWithPermission(note, policyDecision, permissionDecision)
           await materializeTerminal(call, index, 'EARLIER_TOOL_BLOCKED', observation)
@@ -2566,7 +3277,14 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
       let result: LocalToolRunResult
       let execution: NormalizedToolResult | undefined
       let fatalExecutionError: Error | undefined
+      let externalReconciliationBlocked = false
       const runPreparedToolCall = async (): Promise<NormalizedToolResult> => {
+        if (ledgerActionId) {
+          await recordActionLedgerEntry(actionLedger.begin(
+            ledgerActionId,
+            'Execution boundary persisted before invoking the tool.',
+          ))
+        }
         if (executionPolicy.background === 'eligible') {
           if (!input.backgroundToolBridge) throw new Error(`Background pilot is unavailable for ${call.name}.`)
           const started = await input.backgroundToolBridge.start({
@@ -2642,9 +3360,46 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         result = toLegacyToolRunResult(execution)
       }
       if (ledgerActionId) {
-        await recordActionLedgerEntry((execution?.ok ?? false)
-          ? actionLedger.perform(ledgerActionId, 'Tool execution succeeded.')
-          : actionLedger.fail(ledgerActionId, execution?.error?.message ?? 'Tool execution failed.'))
+        const succeeded = execution?.ok ?? false
+        const reason = execution?.error?.message ?? 'Tool execution failed after crossing the execution boundary.'
+        await recordActionLedgerEntry(succeeded
+          ? requiresDurableActionJournal(sinkActionKind!)
+            ? actionLedger.markExecuted(
+                ledgerActionId,
+                'Tool returned success; authoritative external business state is not yet proven.',
+              )
+            : actionLedger.perform(ledgerActionId, 'Tool execution succeeded.')
+          : requiresDurableActionJournal(sinkActionKind!)
+            ? actionLedger.markAmbiguous(ledgerActionId, reason)
+            : actionLedger.fail(ledgerActionId, reason))
+        if (requiresDurableActionJournal(sinkActionKind!)) {
+          await reconcileActionIfPossible(ledgerActionId)
+          const reconciledAction = actionLedger.latest(ledgerActionId)
+          if (input.requireExternalActionReconciliation
+            && reconciledAction?.status === 'ambiguous') {
+            const reconciliationBlocker = [
+              'BLOCKED (EXTERNAL_ACTION_RECONCILIATION_IN_DOUBT):',
+              `${reconciledAction.externalBinding?.businessKey ?? reconciledAction.actionId} remains ambiguous after execution.`,
+              'The runtime stopped before any later tool call; authoritative human verification is required.',
+            ].join(' ')
+            externalReconciliationBlocked = true
+            blocked = true
+            done = true
+            summary = reconciliationBlocker
+            rememberUniqueBlocker(blockers, reconciliationBlocker)
+            result = {
+              ...result,
+              observation: `${result.observation}\n\n${reconciliationBlocker}`,
+              done: true,
+              data: {
+                ...(result.data ?? {}),
+                blocked: true,
+                externalActionStatus: 'ambiguous',
+              },
+            }
+            emit('gate', reconciliationBlocker, step)
+          }
+        }
       }
       if (controlled && execution) {
         controlled.runOutcome.resolve({
@@ -3033,7 +3788,9 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         continueTurn: !done && !fatalExecutionError,
         ...(fatalExecutionError
           ? { stopCode: 'FATAL_TOOL_ERROR' as const, fatalError: fatalExecutionError }
-          : done ? { stopCode: 'EARLIER_TOOL_COMPLETED' as const } : {}),
+          : externalReconciliationBlocked
+            ? { stopCode: 'EARLIER_TOOL_BLOCKED' as const }
+            : done ? { stopCode: 'EARLIER_TOOL_COMPLETED' as const } : {}),
       }
     }
 
@@ -3237,6 +3994,19 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<AgentLoopResu
         action: gateMessage,
         status: 'blocked',
         observation: (lastRejectedAgentDoneGateReason ?? summary).slice(0, 300),
+      })
+    } else if (lastObservedExternalEffectGateSummary) {
+      done = true
+      blocked = true
+      summary = `Completion gate blocked: ${lastObservedExternalEffectGateReason ?? lastObservedExternalEffectGateSummary}`
+      const gateMessage = lastObservedExternalEffectGateSummary.replace(/^completion_gate rejected/i, 'completion_gate blocked')
+      rememberUniqueBlocker(blockers, gateMessage)
+      emit('gate', gateMessage, step)
+      ctx.trace.record({
+        phase: 'agent_loop',
+        action: gateMessage,
+        status: 'blocked',
+        observation: (lastObservedExternalEffectGateReason ?? summary).slice(0, 300),
       })
     } else {
       summary = `Reached step budget (${maxSteps}) without agent_done.`
@@ -3785,6 +4555,20 @@ function briefArgs(name: string, args: Record<string, unknown>): string {
   return parts.length ? parts.join(', ') : '(no args)'
 }
 
+/**
+ * Produce the complete effect text a human can review before granting machine
+ * execution. A digest proves sameness to the Runtime, not intelligibility to
+ * the approver. Secret-bearing or oversized effects deliberately have no
+ * preview, which removes approve_and_execute from the decision set.
+ */
+function externalEffectPreviewForApproval(effect: Readonly<Record<string, unknown>>): string | undefined {
+  const redaction = redactSensitiveData(effect)
+  if (redaction.changed) return undefined
+  const preview = canonicalJson(redaction.value)
+  if (preview.length === 0 || preview.length > 1_024) return undefined
+  return preview
+}
+
 function sinkPolicyDecisionForPermission(
   current: PolicyEngineDecision,
   sink: SinkPolicyDecision,
@@ -3793,11 +4577,11 @@ function sinkPolicyDecisionForPermission(
   return {
     ...current,
     action: blocked ? 'block' : 'gate',
-    riskLevel: blocked ? 'critical' : 'high',
+    riskLevel: blocked || sink.actionKind === 'payment' ? 'critical' : 'high',
     reason: sink.reason,
     policyCode: `security.sink.${sink.reasonCode}`,
     ruleId: `security.sink.${sink.reasonCode}.v1`,
-    gateKind: sink.actionKind === 'submit'
+    gateKind: sink.actionKind === 'submit' || sink.actionKind === 'payment'
       ? 'final_submit'
       : current.gateKind ?? 'high_risk_action',
     auditTags: [
@@ -3814,6 +4598,25 @@ function labelForClick(args: Record<string, unknown>, ctx: ToolContext): string 
   const ref = String(args.ref ?? '')
   const stored = sessionManager.get(ctx.sessionId)?.latestSnapshot?.refMap.get(ref)
   return [stored?.name, stored?.text].filter(Boolean).join(' ')
+}
+
+function isOpaqueClickTool(toolName: string): boolean {
+  return toolName === 'browser_click' || toolName === 'browser_click_text'
+}
+
+function effectiveExternalActionRisk(
+  current: RiskLevel | undefined,
+  actionKind: ActionLedgerEntry['actionKind'] | undefined,
+): RiskLevel | undefined {
+  const minimum = actionKind === 'payment'
+    ? 'L4'
+    : actionKind && requiresDurableActionJournal(actionKind)
+      ? 'L3'
+      : undefined
+  if (!minimum) return current
+  if (!current) return minimum
+  const rank: Record<RiskLevel, number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 }
+  return rank[current] >= rank[minimum] ? current : minimum
 }
 
 function actionIntentContextText(snapshot: ContextSnapshot): string {
@@ -3848,6 +4651,18 @@ function finalExecutableSinkArguments(
     executable.confirmed = true
   }
   return executable
+}
+
+function immutableExternalActionAdapterSnapshot<T>(value: T): Readonly<T> {
+  return deepFreezeExternalActionAdapterValue(structuredClone(value))
+}
+
+function deepFreezeExternalActionAdapterValue<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value)
+    for (const child of Object.values(value)) deepFreezeExternalActionAdapterValue(child)
+  }
+  return value
 }
 
 function noteWithPermission(note: string, policy: PolicyEngineDecision, permission: PermissionDecision): string {
@@ -3972,7 +4787,33 @@ function completionGateBlockerSummary(decision: CompletionGateDecision): string 
   return `${prefix}: ${truncateForWorkflowEvidence(decision.reason, 180)}`
 }
 
-function approvalInputFor(request: PermissionRequest, decision: PermissionDecision): ApprovalEnqueueInput {
+function taskContractAuthorizesExternalExecution(
+  contract: TaskContract | undefined,
+  actionKind: SensitiveActionKind | undefined,
+  businessKey: string | undefined,
+): boolean {
+  if (!contract || !actionKind || !businessKey) return false
+  const requiresExactEffect = contract.criteria.some((criterion) => (
+    criterion.kind === 'action_boundary'
+    && criterion.required !== false
+    && criterion.outcome === 'performed'
+    && criterion.actionKinds.includes(actionKind)
+    && criterion.businessKeys?.includes(businessKey) === true
+  ))
+  if (!requiresExactEffect) return false
+  return contract.criteria.some((criterion) => (
+    criterion.kind === 'artifact_present'
+    && criterion.required !== false
+    && criterion.artifactKinds.includes('external_action_receipt')
+    && criterion.businessKeys?.includes(businessKey) === true
+  ))
+}
+
+function approvalInputFor(
+  request: PermissionRequest,
+  decision: PermissionDecision,
+  allowedDecisions?: GateDecision[],
+): ApprovalEnqueueInput {
   const gateKind = decision.gateKind ?? request.gateKind ?? fallbackGateKind(request)
   const toolCallId = permissionToolCallId(request)
   const toolName = permissionToolName(request)
@@ -3990,6 +4831,7 @@ function approvalInputFor(request: PermissionRequest, decision: PermissionDecisi
     riskLevel: decision.riskLevel,
     title: approvalTitle(gateKind),
     message: approvalMessage(request),
+    ...(allowedDecisions ? { allowedDecisions: [...allowedDecisions] } : {}),
     context: {
       ...(request.currentUrl ? { url: request.currentUrl } : {}),
       ...(request.risk ? { risk: request.risk } : {}),
@@ -4001,6 +4843,13 @@ function approvalInputFor(request: PermissionRequest, decision: PermissionDecisi
       ...(request.workflowPhase ? { workflowPhase: request.workflowPhase } : {}),
       ...(request.observationPhase ? { observationPhase: request.observationPhase } : {}),
       permissionReason: decision.reason,
+      ...(request.context?.externalBusinessKey ? {
+        externalBusinessKey: request.context.externalBusinessKey,
+        externalEffectDigest: request.context.externalEffectDigest,
+        externalProbeId: request.context.externalProbeId,
+        externalActionKind: request.context.externalActionKind,
+        externalEffectPreview: request.context.externalEffectPreview,
+      } : {}),
     },
     metadata: {
       permission: permissionMetadata(decision),
@@ -4210,6 +5059,7 @@ function promptCacheSnapshotForLlm(
 }
 
 const TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES = 12 * 1024
+const READ_ONLY_BROWSER_ARTIFACT_THRESHOLD_BYTES = 2 * 1024
 const TOOL_MESSAGE_OBSERVATION_CHARS = 6000
 
 async function maybeStoreToolResultArtifact(input: {
@@ -4228,7 +5078,10 @@ async function maybeStoreToolResultArtifact(input: {
 }): Promise<ToolResultArtifactRef | undefined> {
   const content = stringifyPretty(input.result)
   const originalBytes = Buffer.byteLength(content, 'utf8')
-  if (originalBytes <= TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES) return undefined
+  const threshold = READ_ONLY_BROWSER_ARTIFACT_TOOLS.has(input.toolName)
+    ? READ_ONLY_BROWSER_ARTIFACT_THRESHOLD_BYTES
+    : TOOL_RESULT_ARTIFACT_THRESHOLD_BYTES
+  if (originalBytes <= threshold) return undefined
 
   const ref = await input.store.write({
     runId: input.runId,
@@ -4237,7 +5090,7 @@ async function maybeStoreToolResultArtifact(input: {
     toolName: input.toolName,
     kind: toolResultArtifactKind(input.toolName, input.result),
     content: input.result,
-    sensitivity: toolResultArtifactSensitivity(input.toolName, content),
+    sensitivity: toolResultArtifactSensitivity(input.toolName, input.result),
     retention: { scope: 'run', deleteWithSession: true },
     summary: toolResultArtifactSummary(input.toolName, input.result),
     metadata: {
@@ -4250,6 +5103,16 @@ async function maybeStoreToolResultArtifact(input: {
   await input.store.read(ref)
   return ref
 }
+
+const READ_ONLY_BROWSER_ARTIFACT_TOOLS = new Set([
+  'browser_open',
+  'browser_snapshot',
+  'browser_form_snapshot',
+  'browser_form_audit',
+  'browser_screenshot',
+  'browser_inspect_options',
+  'browser_wait',
+])
 
 function toolMessageContentWithArtifact(observation: string, artifact: ToolResultArtifactRef | undefined): string {
   const visible = observation.slice(0, TOOL_MESSAGE_OBSERVATION_CHARS)
@@ -4271,9 +5134,9 @@ function toolResultArtifactKind(toolName: string, result: unknown): ToolResultAr
   return 'generic_json'
 }
 
-function toolResultArtifactSensitivity(toolName: string, content: string): ToolResultArtifactSensitivity {
+function toolResultArtifactSensitivity(toolName: string, content: unknown): ToolResultArtifactSensitivity {
   const normalized = toolName.toLowerCase()
-  if (/(password|cookie|token|secret|authorization|storage[_-]?state)/i.test(content)) return 'secret'
+  if (redactSensitiveData(content).changed) return 'secret'
   if (/(resume|profile|ask_user|upload|set_field|browser_type|form|snapshot)/i.test(normalized)) return 'personal'
   return 'internal'
 }

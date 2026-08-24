@@ -496,11 +496,23 @@ try {
     { expectedRunRevision: 1, expectedAttempt: 2 },
   )
 
+  const approvalRunCreate = await request(base, '/api/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      mode: 'raw',
+      startUrl: 'https://example.test/approval',
+      taskPrompt: 'Wait for one exact approval.',
+    }),
+  })
+  assert.equal(approvalRunCreate.status, 201)
+  const approvalRun = await approvalRunCreate.json()
+  await control.runService.start(approvalRun.runId, 'approval-api-start-c3', { ownerScope })
   const actionBinding = {
     schemaVersion: 'action-binding/v1',
     contractId: 'web-control-plane-legacy-adapter',
     contractRevision: 0,
-    runId: created.runId,
+    runId: approvalRun.runId,
     actionId: 'publish-api-c3',
     toolName: 'browser_click',
     argsSha256: 'b'.repeat(64),
@@ -515,7 +527,7 @@ try {
   const approvalId = 'approval-api-c3'
   await control.approvalService.enqueue({
     approvalId,
-    runId: created.runId,
+    runId: approvalRun.runId,
     runRevision: 0,
     attempt: 1,
     status: 'pending',
@@ -525,6 +537,23 @@ try {
     requestedAt,
     expiresAt: '2030-01-01T00:00:00.000Z',
   }, 'enqueue-api-c3')
+
+  const tooEarlyResolution = await request(base, `/api/approvals/${approvalId}/resolve`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'resolve-api-too-early-c3' },
+    body: JSON.stringify({ decision: 'denied', expectedRevision: 0 }),
+  })
+  assert.equal(tooEarlyResolution.status, 409, 'decision is not accepted before the live gate is ready')
+  assert.equal(
+    (await control.approvalService.get(approvalId, { ownerScope })).status,
+    'pending',
+    'an early decision must not mutate the durable approval',
+  )
+  await control.runService.transition(approvalRun.runId, {
+    to: 'blocked_on_human',
+    idempotencyKey: 'approval-api-blocked-c3',
+    reason: 'Waiting for exact API approval.',
+  }, { ownerScope })
 
   const inbox = await json(base, '/api/approvals')
   assert.equal(inbox.items.length, 1)
@@ -536,6 +565,11 @@ try {
   }
   const resolved = await json(base, `/api/approvals/${approvalId}/resolve`, resolveRequest)
   assert.equal(resolved.status, 'denied')
+  assert.equal(
+    (await control.runService.get(approvalRun.runId, { ownerScope })).state,
+    'failed',
+    'a durable decision with no live Agent Loop fails closed instead of remaining stranded',
+  )
   const replayedResolution = await json(
     base,
     `/api/approvals/${approvalId}/resolve`,

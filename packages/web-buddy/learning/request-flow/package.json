@@ -1,0 +1,13 @@
+{
+  "name": "web-buddy-request-flow-learning",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "../../node_modules/.bin/tsc --noEmit -p tsconfig.json",
+    "build": "../../node_modules/.bin/tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "test:learning-1": "npm run build && node --test --test-name-pattern=learning-1 dist/test/*.test.js",
+    "test:learning-2": "npm run build && node --test --test-name-pattern=learning-2 dist/test/*.test.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  }
+}

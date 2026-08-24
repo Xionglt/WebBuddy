@@ -8,6 +8,7 @@ import {
   type ContentSensitivity,
   type ContentTrust,
   type ContextItem,
+  type SessionRef,
   type SensitiveActionKind,
   type TaskPolicy,
 } from '../task/contracts.js'
@@ -100,6 +101,25 @@ export function evaluateSinkPolicy(input: SinkPolicyInput): SinkPolicyDecision {
         : `No TaskPolicy was supplied; the fail-closed default denied ${input.actionKind}.`,
     )
   }
+  if (policyDecision === 'allow') {
+    if (rule?.requireApprovalBinding !== false || input.actionKind !== 'navigate') {
+      return deny(base, 'binding_mismatch', 'Approval-free TaskPolicy rules may only allow read-only navigation.')
+    }
+    if (sourceSensitivities.some((sensitivity) => sensitivity !== 'public' && sensitivity !== 'internal')) {
+      return {
+        ...base,
+        action: 'ask',
+        reasonCode: 'approval_required',
+        reason: 'Navigation carrying non-public source content still requires exact approval.',
+      }
+    }
+    return {
+      ...base,
+      action: 'allow',
+      reasonCode: 'not_sensitive',
+      reason: 'TaskPolicy explicitly allows read-only navigation without approval.',
+    }
+  }
   if (!input.actionBinding || !input.approvalBinding) {
     return {
       ...base,
@@ -116,6 +136,11 @@ export function evaluateSinkPolicy(input: SinkPolicyInput): SinkPolicyDecision {
       input.approvalBinding,
       input.consumedApprovalNonces ?? new Set<string>(),
       input.now ?? new Date(),
+      input.actionBinding.externalActionKind !== undefined
+        || input.actionKind === 'submit'
+        || input.actionKind === 'payment'
+        ? 'approved_and_execute'
+        : 'approved',
     )
     return {
       ...base,
@@ -150,12 +175,18 @@ export function createSinkActionBinding(input: {
   contractId: string
   revision: number
   runId: string
+  sessionRef?: SessionRef
   actionId: string
   toolName: string
   args: Record<string, unknown>
   sourceItems?: ReadonlyArray<Pick<ContextItem, 'id' | 'sensitivity'>>
   sourceOrigin?: string
   destinationOrigin?: string
+  externalBusinessKey?: string
+  externalEffectDigest?: string
+  externalProbeId?: string
+  externalActionKind?: Extract<SensitiveActionKind, 'upload' | 'send' | 'publish' | 'submit' | 'payment'>
+  externalEffectPreview?: string
   actionSeq: number
   expiresAt: string
 }): ActionBinding {
@@ -164,6 +195,7 @@ export function createSinkActionBinding(input: {
     contractId: input.contractId,
     contractRevision: input.revision,
     runId: input.runId,
+    ...(input.sessionRef ? { sessionRef: structuredClone(input.sessionRef) } : {}),
     actionId: input.actionId,
     toolName: input.toolName,
     argsSha256: digestCanonicalJson(input.args),
@@ -171,6 +203,11 @@ export function createSinkActionBinding(input: {
     sourceSensitiveClasses: sensitiveClasses((input.sourceItems ?? []).map((item) => item.sensitivity)),
     ...(input.sourceOrigin ? { sourceOrigin: input.sourceOrigin } : {}),
     ...(input.destinationOrigin ? { destinationOrigin: input.destinationOrigin } : {}),
+    ...(input.externalBusinessKey ? { externalBusinessKey: input.externalBusinessKey } : {}),
+    ...(input.externalEffectDigest ? { externalEffectDigest: input.externalEffectDigest } : {}),
+    ...(input.externalProbeId ? { externalProbeId: input.externalProbeId } : {}),
+    ...(input.externalActionKind ? { externalActionKind: input.externalActionKind } : {}),
+    ...(input.externalEffectPreview ? { externalEffectPreview: input.externalEffectPreview } : {}),
     actionSeq: input.actionSeq,
     expiresAt: input.expiresAt,
   }
@@ -224,6 +261,22 @@ export function destinationOriginForTool(
 function validateSinkBinding(input: SinkPolicyInput, sourceContentIds: string[]): void {
   const binding = input.actionBinding!
   validateActionBinding(binding, input.runId, input.revision)
+  if (binding.externalActionKind !== undefined && binding.externalActionKind !== input.actionKind) {
+    throw new Error('Action binding semantic kind does not match the exact sink action.')
+  }
+  if (binding.externalActionKind !== undefined
+    || input.actionKind === 'submit'
+    || input.actionKind === 'payment') {
+    if (binding.externalActionKind !== input.actionKind
+      || !binding.externalBusinessKey
+      || !binding.externalEffectDigest
+      || !binding.externalProbeId
+      || !binding.externalEffectPreview) {
+      throw new Error(
+        `${input.actionKind} external execution binding requires the same semantic kind, complete external identity and review preview.`,
+      )
+    }
+  }
   if (binding.argsSha256 !== digestCanonicalJson(input.payload ?? null)) {
     throw new Error('Action binding does not match the exact final executable payload.')
   }

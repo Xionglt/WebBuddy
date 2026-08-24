@@ -16,6 +16,7 @@ import {
 } from '../continuation/contracts.js'
 import {
   digestCanonicalJson,
+  validateActionBinding,
   type ActionBinding,
   type OwnerScope,
   type TaskContract,
@@ -127,6 +128,7 @@ export class DurableHumanGate implements HumanGate {
       actionBinding?: ActionBinding
     },
   ): Promise<GateDecision> {
+    assertPermissionEnvelope(this.options, permission)
     const scope = scoped(this.options.ownerScope)
     const current = await this.options.runs.get(this.options.runId, scope)
     if (!current
@@ -142,57 +144,74 @@ export class DurableHumanGate implements HumanGate {
       permission.request,
       expiresAt,
     )
+    assertActionBindingHandoff(this.options, permission.request, actionBinding, permission.actionBinding !== undefined)
     const requestedAt = new Date().toISOString()
-    await this.options.approvals.enqueue({
-      approvalId: permission.approval.approvalId,
-      runId: this.options.runId,
-      runRevision: this.options.runRevision,
-      attempt: this.options.attempt,
-      status: 'pending',
-      actionBinding,
-      allowedDecisions: ['approved', 'denied'],
-      ...(this.options.ownerScope ? { ownerScope: this.options.ownerScope } : {}),
-      sessionRef: {
-        schemaVersion: 'session-ref/v1',
-        provider: 'file-session-store',
-        id: this.options.sessionId,
-        runId: this.options.runId,
-        attempt: this.options.attempt,
-      },
-      requestedAt,
-      expiresAt,
-    }, `runtime-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`)
-    await this.options.runs.setPendingApproval(
-      this.options.runId,
-      permission.approval.approvalId,
-      true,
-      `run-pending-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`,
-      scope,
-    )
-    await this.options.runs.transition(this.options.runId, {
-      to: 'blocked_on_human',
-      reason: permission.approval.message,
-      idempotencyKey: `run-blocked-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`,
-      expectedRunRevision: this.options.runRevision,
-      expectedAttempt: this.options.attempt,
-      data: { approvalId: permission.approval.approvalId },
-    }, scope)
-
-    return new Promise<GateDecision>((resolve) => {
-      const onAbort = () => {
-        this.pending.delete(permission.approval.approvalId)
-        resolve('takeover')
-      }
-      this.options.abortSignal.addEventListener('abort', onAbort, { once: true })
-      this.pending.set(permission.approval.approvalId, {
-        resolve,
-        removeAbortListener: () => this.options.abortSignal.removeEventListener('abort', onAbort),
-      })
-      if (this.options.abortSignal.aborted) onAbort()
+    let resolveGate!: (decision: GateDecision) => void
+    const response = new Promise<GateDecision>((resolve) => {
+      resolveGate = resolve
     })
+    const onAbort = () => {
+      this.pending.delete(permission.approval.approvalId)
+      resolveGate('takeover')
+    }
+    this.options.abortSignal.addEventListener('abort', onAbort, { once: true })
+    this.pending.set(permission.approval.approvalId, {
+      resolve: resolveGate,
+      removeAbortListener: () => this.options.abortSignal.removeEventListener('abort', onAbort),
+    })
+    try {
+      await this.options.approvals.enqueue({
+        approvalId: permission.approval.approvalId,
+        runId: this.options.runId,
+        runRevision: this.options.runRevision,
+        attempt: this.options.attempt,
+        status: 'pending',
+        actionBinding,
+        allowedDecisions: permission.approval.allowedDecisions.flatMap((decision) => {
+          if (decision === 'approve') return ['approved' as const]
+          if (decision === 'approve_and_execute') return ['approved_and_execute' as const]
+          if (decision === 'decline') return ['denied' as const]
+          return []
+        }),
+        ...(this.options.ownerScope ? { ownerScope: this.options.ownerScope } : {}),
+        sessionRef: {
+          schemaVersion: 'session-ref/v1',
+          provider: 'file-session-store',
+          id: this.options.sessionId,
+          runId: this.options.runId,
+          attempt: this.options.attempt,
+        },
+        requestedAt,
+        expiresAt,
+      }, `runtime-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`)
+      await this.options.runs.setPendingApproval(
+        this.options.runId,
+        permission.approval.approvalId,
+        true,
+        `run-pending-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`,
+        scope,
+      )
+      await this.options.runs.transition(this.options.runId, {
+        to: 'blocked_on_human',
+        reason: permission.approval.message,
+        idempotencyKey: `run-blocked-approval:${this.options.runRevision}:${this.options.attempt}:${permission.approval.approvalId}`,
+        expectedRunRevision: this.options.runRevision,
+        expectedAttempt: this.options.attempt,
+        data: { approvalId: permission.approval.approvalId },
+      }, scope)
+    } catch (error) {
+      this.pending.delete(permission.approval.approvalId)
+      this.options.abortSignal.removeEventListener('abort', onAbort)
+      throw error
+    }
+    if (this.options.abortSignal.aborted) onAbort()
+    return response
   }
 
-  async resolveLive(approvalId: string, decision: 'approved' | 'denied'): Promise<boolean> {
+  async resolveLive(
+    approvalId: string,
+    decision: 'approved' | 'approved_and_execute' | 'denied',
+  ): Promise<boolean> {
     const pending = this.pending.get(approvalId)
     if (!pending) return false
     const scope = scoped(this.options.ownerScope)
@@ -227,7 +246,13 @@ export class DurableHumanGate implements HumanGate {
     }, scope)
     this.pending.delete(approvalId)
     pending.removeAbortListener()
-    pending.resolve(decision === 'approved' ? 'approve' : 'decline')
+    pending.resolve(
+      decision === 'approved_and_execute'
+        ? 'approve_and_execute'
+        : decision === 'approved'
+          ? 'approve'
+          : 'decline',
+    )
     return true
   }
 
@@ -266,6 +291,51 @@ export class DurableHumanGate implements HumanGate {
 
 function scoped(ownerScope?: OwnerScope): { ownerScope: OwnerScope } | undefined {
   return ownerScope ? { ownerScope } : undefined
+}
+
+function assertPermissionEnvelope(
+  options: DurableHumanGateOptions,
+  permission: {
+    request: PermissionRequest
+    decision: PermissionDecision
+    approval: ApprovalRequest
+    actionBinding?: ActionBinding
+  },
+): void {
+  const { request, approval } = permission
+  if (request.runId !== options.runId
+    || request.sessionId !== options.sessionId
+    || approval.runId !== options.runId
+    || approval.sessionId !== options.sessionId
+    || approval.id !== approval.approvalId
+    || (approval.permissionRequestId !== undefined
+      && approval.permissionRequestId !== request.requestId)
+    || (approval.toolCallId !== undefined
+      && request.subject.kind === 'tool_call'
+      && approval.toolCallId !== request.subject.toolCallId)) {
+    throw new Error('DURABLE_HUMAN_GATE_BINDING_MISMATCH: permission, approval and run/session scope disagree.')
+  }
+}
+
+function assertActionBindingHandoff(
+  options: DurableHumanGateOptions,
+  request: PermissionRequest,
+  actionBinding: ActionBinding,
+  suppliedByRuntime: boolean,
+): void {
+  validateActionBinding(actionBinding, options.runId, options.taskContract.revision)
+  if (actionBinding.contractId !== options.taskContract.contractId
+    || actionBinding.sessionRef?.id !== options.sessionId
+    || actionBinding.sessionRef?.runId !== options.runId
+    || actionBinding.sessionRef?.attempt !== options.attempt) {
+    throw new Error('DURABLE_HUMAN_GATE_BINDING_MISMATCH: ActionBinding does not match the current contract/session epoch.')
+  }
+  if (!suppliedByRuntime) return
+  const bindingDigest = digestCanonicalJson(actionBinding)
+  if (request.context?.sinkActionId !== actionBinding.actionId
+    || request.context?.sinkActionBindingSha256 !== bindingDigest) {
+    throw new Error('DURABLE_HUMAN_GATE_BINDING_MISMATCH: PermissionRequest did not deliver this exact ActionBinding.')
+  }
 }
 
 function fallbackActionBinding(

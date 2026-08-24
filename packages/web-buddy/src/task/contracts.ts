@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { RunMetrics } from '../metrics/schema.js'
+import { isSafeStorageIdentity } from '../security/storage-identity.js'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -160,6 +161,8 @@ export interface ArtifactPresentCriterion extends CompletionCriterionBase {
   artifactKinds: string[]
   minCount: number
   schemaVersions?: string[]
+  /** When present, each external business key must have its own matching artifact. */
+  businessKeys?: string[]
 }
 
 export interface FormStateCriterion extends CompletionCriterionBase {
@@ -180,6 +183,8 @@ export interface ActionBoundaryCriterion extends CompletionCriterionBase {
   kind: 'action_boundary'
   actionKinds: SensitiveActionKind[]
   outcome: 'not_performed' | 'approved' | 'performed'
+  /** When present, every listed domain action must independently satisfy the outcome. */
+  businessKeys?: string[]
 }
 
 export type CompletionCriterion = EvidencePresentCriterion | ArtifactPresentCriterion | FormStateCriterion | HumanConfirmationCriterion | ActionBoundaryCriterion
@@ -197,7 +202,7 @@ export interface EvidenceRequirement {
 export interface SensitiveActionRule {
   id: string
   actionKinds: SensitiveActionKind[]
-  decision: 'ask' | 'deny'
+  decision: 'allow' | 'ask' | 'deny'
   sourceSensitivities?: ContentSensitivity[]
   destinationOrigins?: string[]
   requireApprovalBinding: boolean
@@ -232,22 +237,41 @@ export interface ActionBinding {
   sourceOrigin?: string
   destinationOrigin?: string
   targetFingerprint?: string
+  /** Stable external effect identity covered by the approval digest. */
+  externalBusinessKey?: string
+  externalEffectDigest?: string
+  externalProbeId?: string
+  /** Trusted semantic effect kind, distinct from the low-level browser tool name. */
+  externalActionKind?: Extract<SensitiveActionKind, 'upload' | 'send' | 'publish' | 'submit' | 'payment'>
+  /** Bounded, redacted canonical effect JSON shown to the approver and covered by this binding. */
+  externalEffectPreview?: string
   actionSeq: number
   pageRevision?: number
   workflowRevision?: number
   expiresAt: string
 }
 
-export interface ApprovalBinding {
-  schemaVersion: 'approval-binding/v1'
+interface ApprovalBindingBase {
   approvalId: string
   actionBindingSha256: string
-  decision: 'approved' | 'denied'
   issuedAt: string
   expiresAt: string
   nonce: string
   consumedAt?: string
 }
+
+export interface ApprovalBindingV1 extends ApprovalBindingBase {
+  schemaVersion: 'approval-binding/v1'
+  /** `approved` is awareness/ordinary approval; a reconciled external effect requires the explicit execution decision. */
+  decision: 'approved' | 'denied'
+}
+
+export interface ApprovalBindingV2 extends ApprovalBindingBase {
+  schemaVersion: 'approval-binding/v2'
+  decision: 'approved' | 'approved_and_execute' | 'denied'
+}
+
+export type ApprovalBinding = ApprovalBindingV1 | ApprovalBindingV2
 
 export interface EvidenceRef {
   schemaVersion: 'evidence-ref/v1'
@@ -291,7 +315,13 @@ export interface ArtifactRef {
   sensitivity: ContentSensitivity
   retention: RetentionPolicy
   ownerScope?: OwnerScope
-  binding: { runId: string; revision: number; sessionRef?: SessionRef; actionSeq?: number }
+  binding: {
+    runId: string
+    revision: number
+    sessionRef?: SessionRef
+    actionSeq?: number
+    externalBusinessKey?: string
+  }
   requiresMainWorkflowVerification: boolean
   authoritativeCompletionEvidence: boolean
   redaction: { status: 'not_required' | 'redacted' | 'rejected'; policyId: string }
@@ -430,8 +460,11 @@ export interface CompletionFormState {
 
 export interface ActionOutcome {
   actionKind: SensitiveActionKind
-  outcome: 'not_performed' | 'approved' | 'performed'
+  outcome: 'not_performed' | 'approved' | 'performed' | 'indeterminate'
   actionId?: string
+  businessKey?: string
+  /** Distinguishes a local execution attempt from an effect found only by authoritative read-back. */
+  localExecutionAttempted?: boolean
 }
 
 export type WebTaskContractErrorCode = 'INVALID_CONTRACT' | 'UNSUPPORTED_SCHEMA_VERSION' | 'STALE_REVISION' | 'BINDING_MISMATCH' | 'PROVIDER_FAILED' | 'IDEMPOTENCY_CONFLICT'
@@ -449,6 +482,9 @@ export function validateWebTaskInput(input: WebTaskInput): void {
   validateTaskContract(input.contract)
   if (input.startUrl) validateStartUrl(input.startUrl)
   integer(input.revision ?? 0, 'revision')
+  if (input.runId !== undefined && !isSafeStorageIdentity(input.runId)) {
+    invalid('runId must be a canonical storage-safe identity.')
+  }
   input.contextItems?.forEach(validateContextItem)
   unique(input.contextItems?.map((item) => item.id) ?? [], 'context item id')
   for (const provider of input.contextProviders ?? []) {
@@ -482,7 +518,7 @@ export function validateWebTaskInputSnapshot(
     'ownerScope',
     'sha256',
   ], 'WebTaskInputSnapshot')
-  nonEmpty(input.runId, 'snapshot.runId')
+  if (!isSafeStorageIdentity(input.runId)) invalid('snapshot.runId must be a canonical storage-safe identity.')
   validateTaskGoal(input.goal, 'snapshot.goal')
   validateTaskContract(input.contract)
   if (input.startUrl) validateStartUrl(input.startUrl)
@@ -556,9 +592,15 @@ export function validateTaskContract(contract: TaskContract): void {
         'artifactKinds',
         'minCount',
         'schemaVersions',
+        'businessKeys',
       ], `criterion(${criterion.id})`)
       nonEmptyArray(criterion.artifactKinds, `${criterion.id}.artifactKinds`)
       positiveInteger(criterion.minCount, `${criterion.id}.minCount`)
+      if (criterion.businessKeys !== undefined) {
+        nonEmptyArray(criterion.businessKeys, `${criterion.id}.businessKeys`)
+        for (const key of criterion.businessKeys) nonEmpty(key, `${criterion.id}.businessKeys[]`)
+        unique(criterion.businessKeys, `${criterion.id}.businessKeys`)
+      }
     } else if (criterion.kind === 'form_state') {
       exactKeys(criterion as unknown as Record<string, unknown>, [
         ...baseKeys,
@@ -580,8 +622,14 @@ export function validateTaskContract(contract: TaskContract): void {
         ...baseKeys,
         'actionKinds',
         'outcome',
+        'businessKeys',
       ], `criterion(${criterion.id})`)
       nonEmptyArray(criterion.actionKinds, `${criterion.id}.actionKinds`)
+      if (criterion.businessKeys !== undefined) {
+        nonEmptyArray(criterion.businessKeys, `${criterion.id}.businessKeys`)
+        for (const key of criterion.businessKeys) nonEmpty(key, `${criterion.id}.businessKeys[]`)
+        unique(criterion.businessKeys, `${criterion.id}.businessKeys`)
+      }
     } else {
       invalid(`Unknown completion criterion kind: ${(criterion as { kind?: unknown }).kind}`)
     }
@@ -622,6 +670,7 @@ export function validateTaskPolicy(policy: TaskPolicy): void {
     'defaultSensitiveAction',
     'rules',
   ], 'TaskPolicy')
+  enumValue(policy.defaultSensitiveAction, ['ask', 'deny'], 'TaskPolicy.defaultSensitiveAction')
   validateSensitiveActionRules(policy.rules, 'TaskPolicy.rules')
 }
 
@@ -642,20 +691,117 @@ function validateSensitiveActionRules(
     ], `sensitiveActionRule(${rule.id})`)
     nonEmpty(rule.id, 'sensitiveActionRule.id')
     nonEmptyArray(rule.actionKinds, `${rule.id}.actionKinds`)
+    enumValue(rule.decision, ['allow', 'ask', 'deny'], `${rule.id}.decision`)
+    if (rule.decision === 'allow') {
+      if (rule.requireApprovalBinding) invalid(`${rule.id}.requireApprovalBinding must be false for an allow rule.`)
+      if (rule.actionKinds.some((actionKind: SensitiveActionKind) => actionKind !== 'navigate')) {
+        invalid(`${rule.id}.allow may only cover read-only navigation.`)
+      }
+    }
     for (const origin of rule.destinationOrigins ?? []) validateFullOrigin(origin, `${rule.id}.destinationOrigins`)
   }
 }
 
 export function validateEvidenceRef(evidence: EvidenceRef, runId: string, revision: number): void {
   if (evidence.schemaVersion !== 'evidence-ref/v1') unsupported('EvidenceRef', evidence.schemaVersion)
+  exactKeys(evidence as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'id',
+    'kind',
+    'summary',
+    'authority',
+    'origin',
+    'trust',
+    'sensitivity',
+    'provenance',
+    'freshness',
+    'independentlyObserved',
+    'spoofableTextOnly',
+    'binding',
+    'verifier',
+    'verificationStatus',
+    'createdAt',
+    'expiresAt',
+    'artifactSha256',
+    'actionBinding',
+    'approvalBinding',
+  ], 'EvidenceRef')
+  exactKeys(evidence.provenance as unknown as Record<string, unknown>, [
+    'capturedAt',
+    'parentContentIds',
+    'runId',
+    'sessionId',
+    'sourceUrl',
+    'sourceOrigin',
+    'toolCallId',
+    'artifactId',
+    'sha256',
+  ], `${evidence.id}.provenance`)
+  exactKeys(evidence.freshness as unknown as Record<string, unknown>, [
+    'validity', 'revision', 'actionSeq', 'pageRevision', 'workflowRevision', 'expiresAt',
+  ], `${evidence.id}.freshness`)
+  exactKeys(evidence.binding as unknown as Record<string, unknown>, [
+    'runId', 'revision', 'sessionRef', 'actionSeq', 'pageRevision', 'workflowRevision',
+  ], `${evidence.id}.binding`)
   nonEmpty(evidence.id, 'evidence.id')
   nonEmpty(evidence.kind, `${evidence.id}.kind`)
+  nonEmpty(evidence.summary, `${evidence.id}.summary`)
   nonEmpty(evidence.verifier, `${evidence.id}.verifier`)
+  enumValue(evidence.authority, [
+    'main_runtime', 'user', 'page_claim', 'subagent_advisory',
+  ], `${evidence.id}.authority`)
+  enumValue(evidence.origin, CONTEXT_ORIGINS, `${evidence.id}.origin`)
+  enumValue(evidence.trust, CONTEXT_TRUST_LEVELS, `${evidence.id}.trust`)
+  enumValue(evidence.sensitivity, CONTEXT_SENSITIVITY_LEVELS, `${evidence.id}.sensitivity`)
+  enumValue(evidence.freshness.validity, [
+    'current', 'stale', 'unverified', 'not_applicable',
+  ], `${evidence.id}.freshness.validity`)
+  enumValue(evidence.verificationStatus, [
+    'verified', 'unverified', 'rejected',
+  ], `${evidence.id}.verificationStatus`)
+  if (typeof evidence.independentlyObserved !== 'boolean'
+    || typeof evidence.spoofableTextOnly !== 'boolean') {
+    invalid(`${evidence.id} observation flags must be boolean.`)
+  }
   isoTimestamp(evidence.createdAt, `${evidence.id}.createdAt`)
-  if (evidence.expiresAt) isoTimestamp(evidence.expiresAt, `${evidence.id}.expiresAt`)
+  if (evidence.expiresAt !== undefined) isoTimestamp(evidence.expiresAt, `${evidence.id}.expiresAt`)
+  if (evidence.expiresAt !== undefined
+    && Date.parse(evidence.expiresAt) <= Date.parse(evidence.createdAt)) {
+    invalid(`${evidence.id}.expiresAt must follow createdAt.`)
+  }
+  isoTimestamp(evidence.provenance.capturedAt, `${evidence.id}.provenance.capturedAt`)
+  if (!Array.isArray(evidence.provenance.parentContentIds)
+    || evidence.provenance.parentContentIds.some((value) => typeof value !== 'string' || value.trim() === '')) {
+    invalid(`${evidence.id}.provenance.parentContentIds must contain only non-empty strings.`)
+  }
+  unique(evidence.provenance.parentContentIds, `${evidence.id}.provenance.parentContentIds`)
+  if (evidence.provenance.sha256 !== undefined
+    && !/^[a-f0-9]{64}$/i.test(evidence.provenance.sha256)) {
+    invalid(`${evidence.id}.provenance.sha256 must be a SHA-256 hex digest.`)
+  }
+  for (const [key, value] of Object.entries(evidence.provenance)) {
+    if (key !== 'parentContentIds' && key !== 'capturedAt' && key !== 'sha256' && value !== undefined) {
+      nonEmpty(value, `${evidence.id}.provenance.${key}`)
+    }
+  }
+  if (evidence.freshness.expiresAt !== undefined) {
+    isoTimestamp(evidence.freshness.expiresAt, `${evidence.id}.freshness.expiresAt`)
+  }
+  for (const [key, value] of Object.entries(evidence.freshness)) {
+    if (['revision', 'actionSeq', 'pageRevision', 'workflowRevision'].includes(key)
+      && value !== undefined) {
+      nonNegativeInteger(value as number, `${evidence.id}.freshness.${key}`)
+    }
+  }
+  nonNegativeInteger(evidence.binding.revision, `${evidence.id}.binding.revision`)
   if (evidence.binding.runId !== runId || evidence.binding.revision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', `${evidence.id} does not match the current run/revision.`)
   if (evidence.binding.sessionRef) validateSessionRef(evidence.binding.sessionRef, runId)
   if (evidence.binding.actionSeq !== undefined) nonNegativeInteger(evidence.binding.actionSeq, `${evidence.id}.binding.actionSeq`)
+  if (evidence.binding.pageRevision !== undefined) nonNegativeInteger(evidence.binding.pageRevision, `${evidence.id}.binding.pageRevision`)
+  if (evidence.binding.workflowRevision !== undefined) nonNegativeInteger(evidence.binding.workflowRevision, `${evidence.id}.binding.workflowRevision`)
+  if (evidence.artifactSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(evidence.artifactSha256)) {
+    invalid(`${evidence.id}.artifactSha256 must be a SHA-256 hex digest.`)
+  }
   if (evidence.authority === 'subagent_advisory' && evidence.trust !== 'non_authoritative') invalid(`${evidence.id}: subagent evidence must be non_authoritative.`)
   if (evidence.actionBinding) {
     validateActionBinding(evidence.actionBinding, runId, revision)
@@ -667,20 +813,112 @@ export function validateEvidenceRef(evidence: EvidenceRef, runId: string, revisi
       throw new WebTaskContractError('BINDING_MISMATCH', `${evidence.id}.binding.sessionRef does not match its ActionBinding.`)
     }
   }
+  if (evidence.approvalBinding) {
+    validateApprovalBinding(evidence.approvalBinding)
+    if (!evidence.actionBinding
+      || evidence.approvalBinding.actionBindingSha256 !== digestCanonicalJson(evidence.actionBinding)) {
+      throw new WebTaskContractError(
+        'BINDING_MISMATCH',
+        `${evidence.id}.approvalBinding does not bind its exact ActionBinding.`,
+      )
+    }
+  }
 }
 
 export function validateArtifactRef(artifact: ArtifactRef, runId: string, revision: number): void {
   if (artifact.schemaVersion !== 'artifact-ref/v1') unsupported('ArtifactRef', artifact.schemaVersion)
+  exactKeys(artifact as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'id',
+    'kind',
+    'payloadSchemaVersion',
+    'mediaType',
+    'byteLength',
+    'sha256',
+    'createdAt',
+    'immutable',
+    'locator',
+    'producer',
+    'parentEvidenceIds',
+    'parentArtifactIds',
+    'origin',
+    'trust',
+    'sensitivity',
+    'retention',
+    'ownerScope',
+    'binding',
+    'requiresMainWorkflowVerification',
+    'authoritativeCompletionEvidence',
+    'redaction',
+    'scanner',
+  ], 'ArtifactRef')
+  exactKeys(artifact.producer as unknown as Record<string, unknown>, ['id', 'version'], `${artifact.id}.producer`)
+  exactKeys(artifact.retention as unknown as Record<string, unknown>, [
+    'scope', 'expiresAt', 'deleteWithSession', 'audience',
+  ], `${artifact.id}.retention`)
+  exactKeys(artifact.binding as unknown as Record<string, unknown>, [
+    'runId', 'revision', 'sessionRef', 'actionSeq', 'externalBusinessKey',
+  ], `${artifact.id}.binding`)
+  exactKeys(artifact.redaction as unknown as Record<string, unknown>, ['status', 'policyId'], `${artifact.id}.redaction`)
+  exactKeys(artifact.scanner as unknown as Record<string, unknown>, ['status', 'scannerId'], `${artifact.id}.scanner`)
   nonEmpty(artifact.id, 'artifact.id')
   nonEmpty(artifact.kind, `${artifact.id}.kind`)
+  nonEmpty(artifact.payloadSchemaVersion, `${artifact.id}.payloadSchemaVersion`)
+  nonEmpty(artifact.mediaType, `${artifact.id}.mediaType`)
+  nonEmpty(artifact.locator, `${artifact.id}.locator`)
+  nonEmpty(artifact.producer.id, `${artifact.id}.producer.id`)
+  nonEmpty(artifact.producer.version, `${artifact.id}.producer.version`)
+  nonEmpty(artifact.redaction.policyId, `${artifact.id}.redaction.policyId`)
+  nonEmpty(artifact.scanner.scannerId, `${artifact.id}.scanner.scannerId`)
   isoTimestamp(artifact.createdAt, `${artifact.id}.createdAt`)
+  nonNegativeInteger(artifact.binding.revision, `${artifact.id}.binding.revision`)
   if (artifact.binding.runId !== runId || artifact.binding.revision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', `${artifact.id} does not match the current run/revision.`)
   if (artifact.binding.sessionRef) validateSessionRef(artifact.binding.sessionRef, runId)
   if (artifact.binding.actionSeq !== undefined) nonNegativeInteger(artifact.binding.actionSeq, `${artifact.id}.binding.actionSeq`)
+  if (artifact.binding.externalBusinessKey !== undefined) {
+    nonEmpty(artifact.binding.externalBusinessKey, `${artifact.id}.binding.externalBusinessKey`)
+    if (artifact.binding.externalBusinessKey !== artifact.binding.externalBusinessKey.trim()) {
+      invalid(`${artifact.id}.binding.externalBusinessKey must be canonical.`)
+    }
+  }
   if (!Number.isSafeInteger(artifact.byteLength) || artifact.byteLength < 0) invalid(`${artifact.id}.byteLength must be a non-negative integer.`)
   if (!/^[a-f0-9]{64}$/i.test(artifact.sha256)) invalid(`${artifact.id}.sha256 must be a SHA-256 hex digest.`)
   if (!artifact.immutable) invalid(`${artifact.id} must be immutable.`)
   if (/^(?:file:|\/|[A-Za-z]:[\\/])/.test(artifact.locator)) invalid(`${artifact.id}.locator must be opaque and must not expose an absolute path.`)
+  if (!Array.isArray(artifact.parentEvidenceIds)
+    || artifact.parentEvidenceIds.some((value) => typeof value !== 'string' || value.trim() === '')) {
+    invalid(`${artifact.id}.parentEvidenceIds must contain only non-empty strings.`)
+  }
+  if (!Array.isArray(artifact.parentArtifactIds)
+    || artifact.parentArtifactIds.some((value) => typeof value !== 'string' || value.trim() === '')) {
+    invalid(`${artifact.id}.parentArtifactIds must contain only non-empty strings.`)
+  }
+  unique(artifact.parentEvidenceIds, `${artifact.id}.parentEvidenceIds`)
+  unique(artifact.parentArtifactIds, `${artifact.id}.parentArtifactIds`)
+  enumValue(artifact.origin, CONTEXT_ORIGINS, `${artifact.id}.origin`)
+  enumValue(artifact.trust, CONTEXT_TRUST_LEVELS, `${artifact.id}.trust`)
+  enumValue(artifact.sensitivity, CONTEXT_SENSITIVITY_LEVELS, `${artifact.id}.sensitivity`)
+  enumValue(artifact.retention.scope, ['turn', 'run', 'session', 'project'], `${artifact.id}.retention.scope`)
+  if (typeof artifact.retention.deleteWithSession !== 'boolean') {
+    invalid(`${artifact.id}.retention.deleteWithSession must be boolean.`)
+  }
+  if (artifact.retention.expiresAt !== undefined) {
+    isoTimestamp(artifact.retention.expiresAt, `${artifact.id}.retention.expiresAt`)
+  }
+  if (artifact.retention.audience !== undefined) {
+    if (!Array.isArray(artifact.retention.audience)
+      || artifact.retention.audience.some((value) => typeof value !== 'string' || value.trim() === '')) {
+      invalid(`${artifact.id}.retention.audience must contain only non-empty strings.`)
+    }
+    unique(artifact.retention.audience, `${artifact.id}.retention.audience`)
+  }
+  validateOwnerScope(artifact.ownerScope)
+  if (typeof artifact.requiresMainWorkflowVerification !== 'boolean'
+    || typeof artifact.authoritativeCompletionEvidence !== 'boolean') {
+    invalid(`${artifact.id} completion authority flags must be boolean.`)
+  }
+  enumValue(artifact.redaction.status, ['not_required', 'redacted', 'rejected'], `${artifact.id}.redaction.status`)
+  enumValue(artifact.scanner.status, ['clean', 'quarantined', 'rejected', 'not_scanned'], `${artifact.id}.scanner.status`)
   if (artifact.origin === 'subagent' || artifact.trust === 'non_authoritative') {
     if (!artifact.requiresMainWorkflowVerification || artifact.authoritativeCompletionEvidence) invalid(`${artifact.id}: subagent artifacts must require Main verification and cannot be authoritative.`)
   }
@@ -688,15 +926,99 @@ export function validateArtifactRef(artifact: ArtifactRef, runId: string, revisi
 
 export function validateActionBinding(binding: ActionBinding, runId = binding.runId, revision = binding.contractRevision): void {
   if (binding.schemaVersion !== 'action-binding/v1') unsupported('ActionBinding', binding.schemaVersion)
+  exactKeys(binding as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'contractId',
+    'contractRevision',
+    'runId',
+    'sessionRef',
+    'actionId',
+    'toolName',
+    'argsSha256',
+    'sourceContentIds',
+    'sourceSensitiveClasses',
+    'sourceOrigin',
+    'destinationOrigin',
+    'targetFingerprint',
+    'externalBusinessKey',
+    'externalEffectDigest',
+    'externalProbeId',
+    'externalActionKind',
+    'externalEffectPreview',
+    'actionSeq',
+    'pageRevision',
+    'workflowRevision',
+    'expiresAt',
+  ], 'ActionBinding')
+  nonEmpty(binding.contractId, 'actionBinding.contractId')
+  nonNegativeInteger(binding.contractRevision, 'actionBinding.contractRevision')
+  nonEmpty(binding.runId, 'actionBinding.runId')
   if (binding.runId !== runId || binding.contractRevision !== revision) throw new WebTaskContractError('BINDING_MISMATCH', 'Action binding does not match the current run/revision.')
   nonEmpty(binding.actionId, 'actionBinding.actionId')
   nonEmpty(binding.toolName, 'actionBinding.toolName')
   if (binding.sessionRef) validateSessionRef(binding.sessionRef, runId)
   nonNegativeInteger(binding.actionSeq, 'actionBinding.actionSeq')
+  if (binding.pageRevision !== undefined) nonNegativeInteger(binding.pageRevision, 'actionBinding.pageRevision')
+  if (binding.workflowRevision !== undefined) nonNegativeInteger(binding.workflowRevision, 'actionBinding.workflowRevision')
   isoTimestamp(binding.expiresAt, 'actionBinding.expiresAt')
   if (!/^[a-f0-9]{64}$/i.test(binding.argsSha256)) invalid('actionBinding.argsSha256 must be a SHA-256 hex digest.')
+  if (!Array.isArray(binding.sourceContentIds)
+    || binding.sourceContentIds.some((value) => typeof value !== 'string' || value.trim() === '')) {
+    invalid('actionBinding.sourceContentIds must contain only non-empty strings.')
+  }
+  unique(binding.sourceContentIds, 'actionBinding.sourceContentIds')
+  if (!Array.isArray(binding.sourceSensitiveClasses)
+    || binding.sourceSensitiveClasses.some((value) => ![
+      'cookie', 'token', 'password', 'otp', 'captcha', 'identity', 'payment', 'file_path',
+    ].includes(value))) {
+    invalid('actionBinding.sourceSensitiveClasses contains an unsupported sensitive data class.')
+  }
+  unique(binding.sourceSensitiveClasses, 'actionBinding.sourceSensitiveClasses')
   if (binding.sourceOrigin) validateFullOrigin(binding.sourceOrigin, 'actionBinding.sourceOrigin')
   if (binding.destinationOrigin) validateFullOrigin(binding.destinationOrigin, 'actionBinding.destinationOrigin')
+  if (binding.targetFingerprint !== undefined) nonEmpty(binding.targetFingerprint, 'actionBinding.targetFingerprint')
+  const externalFields = [binding.externalBusinessKey, binding.externalEffectDigest, binding.externalProbeId]
+  if (externalFields.some((value) => value !== undefined)) {
+    if (externalFields.some((value) => (
+      typeof value !== 'string' || value.trim() === '' || value !== value.trim()
+    ))) {
+      invalid('actionBinding external effect identity must include business key, digest and probe id together.')
+    }
+    if (!/^[a-f0-9]{64}$/i.test(binding.externalEffectDigest!)) {
+      invalid('actionBinding.externalEffectDigest must be a SHA-256 hex digest.')
+    }
+    if (binding.externalBusinessKey!.length > 1_024) {
+      invalid('actionBinding.externalBusinessKey exceeds the maximum length.')
+    }
+    if (binding.externalProbeId!.length > 256) {
+      invalid('actionBinding.externalProbeId exceeds the maximum length.')
+    }
+    if (binding.externalEffectPreview !== undefined
+      && (typeof binding.externalEffectPreview !== 'string'
+        || binding.externalEffectPreview.length === 0
+        || binding.externalEffectPreview.length > 1_024
+        || binding.externalEffectPreview !== binding.externalEffectPreview.trim())) {
+      invalid('actionBinding.externalEffectPreview must be bounded canonical review text for an external effect.')
+    }
+    if (binding.externalEffectPreview !== undefined) {
+      let parsedPreview: unknown
+      try {
+        parsedPreview = JSON.parse(binding.externalEffectPreview)
+      } catch {
+        invalid('actionBinding.externalEffectPreview must be canonical JSON.')
+      }
+      if (canonicalJson(parsedPreview) !== binding.externalEffectPreview) {
+        invalid('actionBinding.externalEffectPreview must be canonical JSON.')
+      }
+    }
+  } else if (binding.externalEffectPreview !== undefined) {
+    invalid('actionBinding.externalEffectPreview requires the complete external effect identity.')
+  }
+  if (binding.externalActionKind !== undefined
+    && (!externalFields.every((value) => value !== undefined)
+      || !['upload', 'send', 'publish', 'submit', 'payment'].includes(binding.externalActionKind))) {
+    invalid('actionBinding.externalActionKind must be a supported external effect with complete identity.')
+  }
 }
 
 export function validateSessionRef(ref: SessionRef, runId: string, expectedAttempt?: number): void {
@@ -713,7 +1035,8 @@ export function validateSessionRef(ref: SessionRef, runId: string, expectedAttem
     throw new WebTaskContractError('BINDING_MISMATCH', 'SessionRef does not match the current run/attempt.')
   }
   nonEmpty(ref.provider, 'sessionRef.provider')
-  nonEmpty(ref.id, 'sessionRef.id')
+  if (!isSafeStorageIdentity(ref.id)) invalid('sessionRef.id must be a canonical storage-safe identity.')
+  if (!isSafeStorageIdentity(ref.runId)) invalid('sessionRef.runId must be a canonical storage-safe identity.')
   positiveInteger(ref.attempt, 'sessionRef.attempt')
   if (ref.checkpointRef) validateCheckpointRef(ref.checkpointRef)
 }
@@ -771,16 +1094,67 @@ export function consumeApprovalBinding(
   approval: ApprovalBinding,
   consumedNonces: Set<string>,
   now = new Date(),
+  requiredDecision: Extract<ApprovalBinding['decision'], 'approved' | 'approved_and_execute'> = 'approved',
 ): ApprovalBinding {
   validateActionBinding(action)
-  if (approval.schemaVersion !== 'approval-binding/v1') unsupported('ApprovalBinding', approval.schemaVersion)
-  if (approval.decision !== 'approved') throw new WebTaskContractError('BINDING_MISMATCH', 'Approval decision is not approved.')
+  validateApprovalBinding(approval)
+  const issuedAtMs = Date.parse(approval.issuedAt)
+  const expiresAtMs = Date.parse(approval.expiresAt)
+  if (issuedAtMs > now.getTime()) {
+    throw new WebTaskContractError('BINDING_MISMATCH', 'Approval binding cannot be issued in the future.')
+  }
+  if (approval.decision !== requiredDecision) {
+    throw new WebTaskContractError(
+      'BINDING_MISMATCH',
+      `Approval decision must be ${requiredDecision}, received ${approval.decision}.`,
+    )
+  }
   if (approval.actionBindingSha256 !== digestCanonicalJson(action)) throw new WebTaskContractError('BINDING_MISMATCH', 'Approval does not bind the exact canonical action.')
-  if (Date.parse(approval.expiresAt) <= now.getTime() || Date.parse(action.expiresAt) <= now.getTime()) throw new WebTaskContractError('BINDING_MISMATCH', 'Approval or action binding has expired.')
+  if (expiresAtMs <= now.getTime() || Date.parse(action.expiresAt) <= now.getTime()) throw new WebTaskContractError('BINDING_MISMATCH', 'Approval or action binding has expired.')
   if (approval.consumedAt || consumedNonces.has(approval.nonce)) throw new WebTaskContractError('BINDING_MISMATCH', 'Approval nonce has already been consumed.')
-  nonEmpty(approval.nonce, 'approvalBinding.nonce')
   consumedNonces.add(approval.nonce)
   return { ...approval, consumedAt: now.toISOString() }
+}
+
+function validateApprovalBinding(approval: ApprovalBinding): void {
+  const approvalSchemaVersion = (approval as { schemaVersion?: unknown }).schemaVersion
+  if (approvalSchemaVersion !== 'approval-binding/v1'
+    && approvalSchemaVersion !== 'approval-binding/v2') {
+    unsupported('ApprovalBinding', approvalSchemaVersion)
+  }
+  exactKeys(approval as unknown as Record<string, unknown>, [
+    'schemaVersion',
+    'approvalId',
+    'actionBindingSha256',
+    'decision',
+    'issuedAt',
+    'expiresAt',
+    'nonce',
+    'consumedAt',
+  ], 'ApprovalBinding')
+  nonEmpty(approval.approvalId, 'approvalBinding.approvalId')
+  nonEmpty(approval.nonce, 'approvalBinding.nonce')
+  if (!/^[a-f0-9]{64}$/i.test(approval.actionBindingSha256)) {
+    invalid('approvalBinding.actionBindingSha256 must be a SHA-256 hex digest.')
+  }
+  enumValue(approval.decision, [
+    'approved', 'approved_and_execute', 'denied',
+  ], 'approvalBinding.decision')
+  if (approval.decision === 'approved_and_execute'
+    && approvalSchemaVersion !== 'approval-binding/v2') {
+    throw new WebTaskContractError(
+      'BINDING_MISMATCH',
+      'approved_and_execute requires approval-binding/v2.',
+    )
+  }
+  isoTimestamp(approval.issuedAt, 'approvalBinding.issuedAt')
+  isoTimestamp(approval.expiresAt, 'approvalBinding.expiresAt')
+  if (approval.consumedAt !== undefined) {
+    isoTimestamp(approval.consumedAt, 'approvalBinding.consumedAt')
+  }
+  if (Date.parse(approval.expiresAt) <= Date.parse(approval.issuedAt)) {
+    invalid('approvalBinding.expiresAt must follow approvalBinding.issuedAt.')
+  }
 }
 
 export function validateContextItem(item: ContextItem): void {
@@ -846,6 +1220,13 @@ export function validateContextItem(item: ContextItem): void {
   enumValue(item.trust, CONTEXT_TRUST_LEVELS, `${item.id}.trust`)
   enumValue(item.instructionAuthority, INSTRUCTION_AUTHORITIES, `${item.id}.instructionAuthority`)
   enumValue(item.sensitivity, CONTEXT_SENSITIVITY_LEVELS, `${item.id}.sensitivity`)
+  isoTimestamp(item.provenance.capturedAt, `${item.id}.provenance.capturedAt`)
+  if (item.freshness.expiresAt !== undefined) {
+    isoTimestamp(item.freshness.expiresAt, `${item.id}.freshness.expiresAt`)
+  }
+  if (item.retention.expiresAt !== undefined) {
+    isoTimestamp(item.retention.expiresAt, `${item.id}.retention.expiresAt`)
+  }
   if (!Array.isArray(item.allowedUses) || !item.allowedUses.length) invalid(`${item.id}.allowedUses must be non-empty.`)
   for (const use of item.allowedUses) enumValue(use, CONTEXT_USES, `${item.id}.allowedUses`)
   unique(item.allowedUses, `${item.id} allowed use`)
@@ -881,8 +1262,12 @@ export function snapshotWebTaskInput(input: WebTaskInput, resolvedRunId = input.
     revision,
     ...(input.ownerScope ? { ownerScope: input.ownerScope } : {}),
   }
-  const sha256 = digestCanonicalJson(unsigned)
-  return { ...unsigned, sha256 }
+  // A snapshot is an execution boundary, not a view over caller-owned input.
+  // Detach every durable field before hashing so an async caller cannot mutate
+  // the TaskContract/Policy seen by approval and execution after validation.
+  const detached = structuredClone(unsigned)
+  const sha256 = digestCanonicalJson(detached)
+  return { ...detached, sha256 }
 }
 
 export function digestCanonicalJson(value: unknown): string {
@@ -896,10 +1281,12 @@ export function canonicalJson(value: unknown): string {
 export function isContextItemEligible(item: ContextItem, now = new Date()): boolean {
   if (item.sanitization.status === 'quarantined' || item.sanitization.status === 'rejected') return false
   if (item.freshness.validity === 'stale' || item.freshness.validity === 'unverified') return false
+  const capturedAt = Date.parse(item.provenance.capturedAt)
+  if (!Number.isFinite(capturedAt) || capturedAt > now.getTime()) return false
   if (expired(item.freshness.expiresAt, now) || expired(item.retention.expiresAt, now)) return false
   if (item.origin === 'memory') {
     if (!item.memory || item.memory.status !== 'active') return false
-    if (expired(item.memory.expiresAt, now) || item.memory.tombstoneAt) return false
+    if (expired(item.memory.expiresAt, now) || item.memory.tombstoneAt !== undefined) return false
   }
   return true
 }
@@ -963,6 +1350,8 @@ function validateMemoryBinding(memory: MemoryBinding, id: string): void {
   ], `${id}.memory`)
   nonEmpty(memory.memoryId, `${id}.memory.memoryId`)
   integer(memory.revision, `${id}.memory.revision`)
+  if (memory.expiresAt !== undefined) isoTimestamp(memory.expiresAt, `${id}.memory.expiresAt`)
+  if (memory.tombstoneAt !== undefined) isoTimestamp(memory.tombstoneAt, `${id}.memory.tombstoneAt`)
 }
 
 function validateOwnerScope(scope: OwnerScope | undefined): void {
@@ -1009,11 +1398,13 @@ function validateFullOrigin(value: string, path: string): void {
 }
 
 function expired(value: string | undefined, now: Date): boolean {
-  return Boolean(value && Date.parse(value) <= now.getTime())
+  if (value === undefined) return false
+  const parsed = Date.parse(value)
+  return !Number.isFinite(parsed) || parsed <= now.getTime()
 }
 
-function nonEmpty(value: string | undefined, path: string): void {
-  if (!value?.trim()) invalid(`${path} must be a non-empty string.`)
+function nonEmpty(value: unknown, path: string): asserts value is string {
+  if (typeof value !== 'string' || !value.trim()) invalid(`${path} must be a non-empty string.`)
 }
 
 function nonEmptyArray(value: readonly unknown[], path: string): void {

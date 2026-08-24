@@ -111,13 +111,14 @@ function hasFinalSubmitBoundary(input: ObservationPhaseInput): boolean {
     (input.form?.facts?.uploadCandidateCount ?? 0) === 0 &&
     input.page?.facts?.hasRealUploadInput !== true &&
     (input.page?.facts?.uploadCandidateCount ?? 0) === 0 &&
-    (input.form?.submitCandidates.some((candidate) => candidate.visible !== false) ?? false)
+    (input.form?.submitCandidates.some(isFinalSubmitCandidate) ?? false)
   if (hasOnlySubmitLikeControls) return true
 
   return (
     (input.page?.inputCount ?? 0) === 0 &&
     (input.page?.formCount ?? 0) === 0 &&
-    (input.page?.facts?.submitLikeButtons.some((button) => button.visible !== false) ?? false) &&
+    (input.page?.facts?.submitLikeButtons.some((button) =>
+      button.visible !== false && FINAL_SUBMIT_TEXT.test(button.text)) ?? false) &&
     (input.page?.facts?.likelyApplyEntryButtons.length ?? 0) === 0
   )
 }
@@ -161,8 +162,8 @@ function isUnrecoverableBlocker(blocker: ObservationPhaseBlocker): boolean {
 function isFinalSubmitCandidate(candidate: SubmitCandidate): boolean {
   if (candidate.visible === false) return false
   if (APPLY_ENTRY_TEXT.test(candidate.text)) return false
-  if (candidate.risk === 'L3' || candidate.risk === 'L4') return true
-  return candidate.type === 'submit' && FINAL_SUBMIT_TEXT.test(candidate.text)
+  return FINAL_SUBMIT_TEXT.test(candidate.text)
+    && (candidate.risk === 'L3' || candidate.risk === 'L4' || candidate.type === 'submit')
 }
 
 function hasUnfilledRealFields(form: FormState): boolean {
