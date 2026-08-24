@@ -14,6 +14,7 @@ export type KernelEventType =
   | 'policy_evaluated'
   | 'permission_evaluated'
   | 'action_ledger_updated'
+  | 'external_action_preflight'
   | 'approval_requested'
   | 'approval_resolved'
   | 'skill_resolved'

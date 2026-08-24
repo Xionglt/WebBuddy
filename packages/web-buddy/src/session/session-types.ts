@@ -230,7 +230,9 @@ export interface SessionStore {
   get(sessionId: string): Promise<AgentSession | undefined>
   update(sessionId: string, patch: Partial<AgentSession>): Promise<AgentSession>
   appendTranscript(entry: TranscriptEntry): Promise<void>
+  appendTranscriptDurably?(entry: TranscriptEntry): Promise<void>
   appendEvent(event: KernelEvent): Promise<void>
+  appendEventDurably?(event: KernelEvent): Promise<void>
   writeWorkflowSnapshot(sessionId: string, workflowState: unknown): Promise<void>
   list(options?: { limit?: number; status?: AgentSessionStatus }): Promise<AgentSession[]>
 }

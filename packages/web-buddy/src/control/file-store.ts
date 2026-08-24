@@ -317,13 +317,14 @@ export class FileApprovalStore implements ApprovalStore {
       const current = await readRecord(paths, decodeApprovalRecord)
       if (!current) throw new ControlStoreError('APPROVAL_NOT_FOUND', `Approval not found: ${command.approvalId}`)
       validateApprovalResolve(current, command)
+      const status = command.resolution.decision === 'denied' ? 'denied' : 'approved'
       const record: ApprovalRecord = {
         ...current,
         recordRevision: current.recordRevision + 1,
-        status: command.resolution.decision,
+        status,
         resolution: command.resolution,
         terminal: {
-          status: command.resolution.decision,
+          status,
           source: 'user',
           occurredAt: command.resolvedAt,
         },

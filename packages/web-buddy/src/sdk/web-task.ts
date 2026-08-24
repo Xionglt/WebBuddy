@@ -48,6 +48,22 @@ import {
 } from '../task/contracts.js'
 import { join } from 'node:path'
 import { ActionLedger, type ActionLedgerEntry } from '../task/action-ledger.js'
+import type {
+  ExternalActionBindingResolver,
+  ExternalActionIntentResolver,
+  ExternalActionProbe,
+} from '../task/action-reconciliation.js'
+import {
+  externalActionProbeById,
+  externalActionProbeTimeoutForBudget,
+  reconcileExternalActionWithDeadline,
+  requiresDurableActionJournal,
+  unresolvedActionEntries,
+} from '../task/action-reconciliation.js'
+import {
+  persistExternalActionReconciliationAttempt,
+  verifyExternalActionReceipt,
+} from '../task/action-reconciliation-artifact.js'
 import {
   assembleRuntimeProfile,
   type RuntimeAssembly,
@@ -102,6 +118,21 @@ export interface WebTaskExecutionHost {
   persistenceSanitizer?: (value: unknown) => unknown
   memoryContextProvider?: (input: WebTaskMemoryContextRequest) => Promise<ContextItem[]>
   automaticMemorySink?: AutomaticMemorySink
+  externalActionBindingResolver?: ExternalActionBindingResolver
+  externalActionIntentResolver?: ExternalActionIntentResolver
+  externalActionProbes?: readonly ExternalActionProbe[]
+  requireExternalActionReconciliation?: boolean
+  /** Query authoritative state before a newly proposed external action. */
+  preflightExternalActions?: boolean
+  /** Trusted host capability; execution still requires an exact approve_and_execute decision. */
+  allowFinalSubmitExecution?: boolean
+  /**
+   * Separate isolated-host capability for any v2-reconciled external effect.
+   * It does not prove a cross-Run claim; the owner-scoped Service keeps this disabled until v3.
+   */
+  allowExternalActionExecution?: boolean
+  externalActionProbeTimeoutMs?: number
+  externalActionRecoveryBudgetMs?: number
   asyncTaskRuntimeFactory?: (input: WebTaskAsyncRuntimeFactoryInput) => AsyncTaskRuntime | Promise<AsyncTaskRuntime>
 }
 
@@ -421,9 +452,11 @@ async function executeGenericWebTask(
     let session: SessionRecorder | undefined
     let sessionRef = executionContext?.sessionRef ?? request.input.sessionRef
     let restoredMessages: ReturnType<typeof sanitizeRestoredMessagesForResume> | undefined
-    const actionLedger = host.restoredSession?.actionLedgerEntries?.length
-      ? ActionLedger.restore(host.restoredSession.actionLedgerEntries)
-      : new ActionLedger()
+    let currentRestoredSession = host.restoredSession
+    let recoveredActionArtifacts = structuredClone(host.restoredSession?.externalActionReceiptArtifacts ?? [])
+    // Recovery must rebuild the ledger from the current durable session, not
+    // from the caller's potentially stale restored snapshot.
+    let actionLedger = new ActionLedger()
     const monitoredActionKinds = request.input.contract.criteria.flatMap((criterion) => (
       criterion.kind === 'action_boundary' ? criterion.actionKinds : []
     ))
@@ -473,6 +506,33 @@ async function executeGenericWebTask(
             throw new Error('Generic recovery session is missing or changed.')
           }
           const restored = await restoreSessionState({ session: current })
+          currentRestoredSession = restored
+          recoveredActionArtifacts = structuredClone(restored.externalActionReceiptArtifacts)
+          actionLedger = restored.actionLedgerEntries.length
+            ? ActionLedger.restore(restored.actionLedgerEntries)
+            : new ActionLedger()
+          for (const artifact of restored.externalActionReceiptArtifacts) {
+            const storageRef = restored.externalActionReceiptStorageRefs.find(
+              (candidate) => candidate.artifactId === artifact.id,
+            )
+            const action = restored.actionLedgerEntries.find(
+              (candidate) => candidate.sequence === artifact.binding.actionSeq,
+            )
+            const verdict = restored.externalActionReconciliationVerdicts.find(
+              (candidate) => candidate.actionId === action?.actionId,
+            )
+            if (!storageRef || !action || !verdict) {
+              throw new Error(`External action receipt ${artifact.id} is missing its durable storage/action/verdict binding.`)
+            }
+            await verifyExternalActionReceipt({
+              store: artifactStore,
+              artifact,
+              storageRef,
+              sessionId,
+              action,
+              verdict,
+            })
+          }
           restoredMessages = sanitizeRestoredMessagesForResume(restored.restoredMessages)
           const reopened = await store.update(sessionId, {
             status: 'created',
@@ -514,7 +574,7 @@ async function executeGenericWebTask(
       }
       let runtimeContextItems = [...request.contextItems]
       const recoveryStartUrl = executionContext?.recoveryMode === 'continuation_reobserve/v1'
-        ? host.restoredSession?.latestResumeCapsule?.previousUrl ?? request.input.startUrl
+        ? currentRestoredSession?.latestResumeCapsule?.previousUrl ?? request.input.startUrl
         : request.input.startUrl
       if (recoveryStartUrl) {
         const actionId = `runtime-bootstrap:navigate:${request.input.runId}:attempt-${executionContext?.attempt ?? 1}`
@@ -566,6 +626,135 @@ async function executeGenericWebTask(
           itemCount: memoryItems.length,
         })
       }
+      const recoveryStartedAtMs = Date.now()
+      const bootstrapActions = unresolvedActionEntries(actionLedger.snapshot())
+      for (const [index, action] of bootstrapActions.entries()) {
+        const binding = action.externalBinding
+        if (!binding) {
+          if (requiresDurableActionJournal(action.actionKind)) {
+            trace.agentTrace?.recordEvent('external_action_reconciliation_skipped', {
+              actionId: action.actionId,
+              actionKind: action.actionKind,
+              status: action.status,
+              reason: 'binding_unavailable',
+            })
+            if (host.requireExternalActionReconciliation) {
+              throw new Error(
+                `EXTERNAL_ACTION_BINDING_REQUIRED: strict reconciliation mode cannot continue ${action.actionId} without a durable binding.`,
+              )
+            }
+          }
+          continue
+        }
+        const probe = externalActionProbeById(host.externalActionProbes, binding.probeId)
+        if (!probe) {
+          trace.agentTrace?.recordEvent('external_action_reconciliation_skipped', {
+            actionId: action.actionId,
+            actionKind: action.actionKind,
+            businessKey: binding.businessKey,
+            probeId: binding.probeId,
+            status: action.status,
+            reason: 'probe_unavailable',
+          })
+          if (host.requireExternalActionReconciliation) {
+            throw new Error(
+              `EXTERNAL_ACTION_PROBE_REQUIRED: strict reconciliation mode cannot continue ${action.actionId} without ${binding.probeId}.`,
+            )
+          }
+          continue
+        }
+        const timeoutMs = externalActionProbeTimeoutForBudget({
+          perActionTimeoutMs: host.externalActionProbeTimeoutMs ?? 10_000,
+          recoveryBudgetMs: host.externalActionRecoveryBudgetMs ?? 30_000,
+          startedAtMs: recoveryStartedAtMs,
+          nowMs: Date.now(),
+        })
+        if (timeoutMs === undefined) {
+          trace.agentTrace?.recordEvent('external_action_reconciliation_skipped', {
+            reason: 'recovery_budget_exhausted',
+            recoveryBudgetMs: host.externalActionRecoveryBudgetMs ?? 30_000,
+            remainingActionCount: bootstrapActions.length - index,
+          })
+          break
+        }
+        const attempt = await reconcileExternalActionWithDeadline({
+          ledger: actionLedger,
+          actionId: action.actionId,
+          probe,
+          timeoutMs,
+        })
+        if (!attempt.ledgerEntry) continue
+        const receipt = await persistExternalActionReconciliationAttempt({
+          store: artifactStore,
+          runId: request.input.runId,
+          revision: request.input.revision,
+          sessionId,
+          action: attempt.ledgerEntry,
+          verdict: attempt.verdict,
+          persistLedgerEvent: async (materialized) => {
+            trace.agentTrace?.recordEvent('action_ledger_updated', {
+              entry: attempt.ledgerEntry,
+              ...(attempt.verdict ? { reconciliation: attempt.verdict } : {}),
+              ...(materialized ? {
+                receiptArtifact: materialized.artifact,
+                receiptStorageRef: materialized.storageRef,
+              } : {}),
+            })
+            await session?.eventDurably({
+              type: 'action_ledger_updated',
+              toolCallId: attempt.ledgerEntry!.actionId,
+              message: `${attempt.ledgerEntry!.actionKind}: ${attempt.ledgerEntry!.status}`,
+              data: {
+                entry: attempt.ledgerEntry,
+                ...(attempt.verdict ? { reconciliation: attempt.verdict } : {}),
+                ...(materialized ? {
+                  receiptArtifact: materialized.artifact,
+                  receiptStorageRef: materialized.storageRef,
+                } : {}),
+              },
+            })
+          },
+        })
+        if (receipt
+          && !recoveredActionArtifacts.some((artifact) => artifact.id === receipt.artifact.id)) {
+          recoveredActionArtifacts.push(receipt.artifact)
+        }
+      }
+      const unresolvedAfterBootstrap = unresolvedActionEntries(actionLedger.snapshot())
+      if (host.requireExternalActionReconciliation && unresolvedAfterBootstrap.length > 0) {
+        const summary = [
+          'Strict external-action recovery is blocked because',
+          `${unresolvedAfterBootstrap.length} durable action(s) remain in doubt after authoritative reconciliation.`,
+          'Resolve them through owner-scoped human verification before the model can create more external effects.',
+        ].join(' ')
+        trace.record({ phase: 'boot', action: summary, status: 'blocked' })
+        await session?.updateStatus('blocked', {
+          blockedReason: summary,
+          error: undefined,
+        })
+        return finishGenericRuntimeOutcome({
+          trace,
+          config,
+          request,
+          artifactStore,
+          sessionId,
+          status: 'blocked',
+          summary,
+          evidence: [],
+          artifacts: recoveredActionArtifacts.map((artifact) => ({
+            ...artifact,
+            ...(request.input.ownerScope
+              ? { ownerScope: structuredClone(request.input.ownerScope) }
+              : {}),
+            binding: {
+              ...artifact.binding,
+              ...(sessionRef ? { sessionRef } : {}),
+            },
+          })),
+          actions: actionLedger.outcomes(monitoredActionKinds),
+          sessionRef,
+        })
+      }
       if (!hasModelKey(config)) {
         const summary = 'Generic runtime is blocked because no model key is configured.'
         trace.record({ phase: 'boot', action: summary, status: 'blocked' })
@@ -582,7 +771,16 @@ async function executeGenericWebTask(
           status: 'blocked',
           summary,
           evidence: [],
-          artifacts: [],
+          artifacts: recoveredActionArtifacts.map((artifact) => ({
+            ...artifact,
+            ...(request.input.ownerScope
+              ? { ownerScope: structuredClone(request.input.ownerScope) }
+              : {}),
+            binding: {
+              ...artifact.binding,
+              ...(sessionRef ? { sessionRef } : {}),
+            },
+          })),
           actions: actionLedger.outcomes(monitoredActionKinds),
           sessionRef,
         })
@@ -636,13 +834,23 @@ async function executeGenericWebTask(
         permissionMode: config.human.permissionMode,
         permissionEngine: new PermissionEngine({
           permissionMode: config.human.permissionMode,
-          allowFinalSubmit: false,
+          allowFinalSubmit: host.allowFinalSubmitExecution ?? false,
           persistentRules: persistentPermissionRules,
         }),
-        allowFinalSubmit: false,
+        allowFinalSubmit: host.allowFinalSubmitExecution ?? false,
+        allowExternalActionExecution: host.allowExternalActionExecution ?? false,
         taskType: runtimeAssembly.taskType,
         toolOrchestration: runtimeAssembly.toolOrchestration,
         actionLedger,
+        initialCompletionArtifacts: recoveredActionArtifacts,
+        externalActionBindingResolver: host.externalActionBindingResolver,
+        externalActionIntentResolver: host.externalActionIntentResolver,
+        externalActionProbes: host.externalActionProbes,
+        requireExternalActionReconciliation: host.requireExternalActionReconciliation,
+        preflightExternalActions: host.preflightExternalActions,
+        externalActionProbeTimeoutMs: host.externalActionProbeTimeoutMs,
+        externalActionRecoveryBudgetMs: host.externalActionRecoveryBudgetMs,
+        externalActionBootstrapReconciled: true,
         toolResultStore: artifactStore,
         ...(host.automaticMemorySink ? { automaticMemorySink: host.automaticMemorySink } : {}),
         ...(request.input.goal.scenario ? { automaticMemoryWorkflow: request.input.goal.scenario } : {}),
@@ -652,8 +860,9 @@ async function executeGenericWebTask(
           memdir: { path: config.memory.memdirPath },
         } : {}),
         session,
+        ...(sessionRef ? { sessionRef } : {}),
         restoredMessages,
-        restoredAsyncTaskPromptAttachments: host.restoredSession?.asyncTaskPromptAttachments,
+        restoredAsyncTaskPromptAttachments: currentRestoredSession?.asyncTaskPromptAttachments,
         abortSignal: host.controller?.signal,
         shouldPause: () => host.controller?.pauseRequested ?? false,
         persistenceSanitizer: host.persistenceSanitizer,
@@ -673,6 +882,9 @@ async function executeGenericWebTask(
       }))
       const artifacts = (loop.artifacts ?? []).map((item) => ({
         ...item,
+        ...(request.input.ownerScope
+          ? { ownerScope: structuredClone(request.input.ownerScope) }
+          : {}),
         binding: {
           ...item.binding,
           ...(sessionRef ? { sessionRef } : {}),

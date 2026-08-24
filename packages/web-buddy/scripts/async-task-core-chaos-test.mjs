@@ -390,9 +390,16 @@ async function testSidechainBoundaries() {
   let turn = 0
   const runner = new ReadOnlyLlmSubagentRunner({
     sidechainOutputDir: outputDir, artifactReader: { read: async () => artifactBytes },
-    llm: { chatWithTools: async () => ++turn === 1
-      ? { content: '', toolCalls: [{ id: 'call-a9', name: 'artifact_read_text', arguments: { artifactId: 'artifact_trace_001' } }] }
-      : { content: JSON.stringify({ summary: 'Trace evidence reviewed.', recommendations: ['Main Agent verifies current state.'], evidenceRefs: [{ kind: 'context_item', contextItemId: 'ctx_trace_001' }], uncertainties: ['No live page access.'] }), toolCalls: [] } },
+    llm: { chatWithTools: async (_messages, options) => {
+      turn += 1
+      return options?.toolChoice === 'none'
+        ? {
+          content: `\`\`\`json\n${JSON.stringify({ summary: 'Trace evidence reviewed.', recommendations: ['Main Agent verifies current state.'], evidenceRefs: [{ kind: 'context_item', contextItemId: 'ctx_trace_001' }], uncertainties: ['No live page access.'] })}\n\`\`\``,
+          toolCalls: [],
+          usage: { outputTokens: 120 },
+        }
+        : { content: '', toolCalls: [{ id: `call-a9-${turn}`, name: 'artifact_read_text', arguments: { artifactId: 'artifact_trace_001' } }] }
+    } },
   })
   try {
     const outcome = await runner.run({ schemaVersion: 'agent-task-run-input/v1', runnerKind: 'read_only_llm', runIdentity: identity, runnerId: runner.runnerId, runnerVersion: runner.runnerVersion, graphRevision: 2, task: running, limits: { maxTurns: 3, maxToolCalls: 2, maxInputTokens: 8_000, maxOutputTokens: 2_000, perRequestTimeoutMs: 500, overallTimeoutMs: 2_000 }, contextEnvelope: envelope }, { abortSignal: new AbortController().signal, reportProgress: async () => {} })
@@ -402,7 +409,7 @@ async function testSidechainBoundaries() {
     const entries = (await readFile(transcriptPath, 'utf8')).trim().split('\n').map(JSON.parse)
     const calls = entries.filter((entry) => entry.type === 'sidechain_tool_call')
     const results = entries.filter((entry) => entry.type === 'sidechain_tool_result')
-    assert.equal(calls.length, 1); assert.equal(results.length, 1)
+    assert.equal(calls.length, 2); assert.equal(results.length, 2)
     assert.equal(calls[0].data.toolCallId, results[0].data.toolCallId)
     assert(entries.some((entry) => entry.type === 'sidechain_completed'))
     assert.equal(entries.some((entry) => JSON.stringify(entry).includes('parent ReAct')), false)

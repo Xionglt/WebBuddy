@@ -36,8 +36,9 @@ http://localhost:5178/poc/invoice-portal
 1. 导入 6 张发票，先隔离 1 张重复和 1 张金额异常。
 2. 代办助手填写 4 张安全发票，在客户必填字段缺失时暂停。
 3. 用户补充服务期间；此时仍没有任何最终提交。
-4. 页面给出金额、附件、目标门户和精确授权范围，等待明确批准。
-5. 批准后依次提交 4 张发票，保存门户确认号与回读证据。
+4. 页面给出金额、附件、目标门户和精确四项范围，等待 POC harness 的受控批准。
+5. 批准后 harness 依次提交 4 张发票，保存门户确认号与回读证据；这不代表通用
+   BatchApprovalBinding 已实现。
 6. 将成功路径保存为“待审核 Recipe”，未来仍不会自动扩大权限。
 
 自动验收：
@@ -48,8 +49,21 @@ npm run test:invoice-portal-poc
 
 ## 从 POC 到真实产品
 
+### 首要可靠性边界：提交后崩溃
+
+真实门户接入前，必须先处理“门户已创建发票记录，但本地在保存确认号前崩溃”的故障窗。
+恢复时不能根据缺失的本地 `ToolResult` 再次点击，而要按发票业务键查询门户回执；只有独立
+确认号才能证明成功，安全性未知时转人工。
+
+状态机、故障注入、指标定义和面试讲法见
+[`EXTERNAL_ACTION_RECONCILIATION.md`](EXTERNAL_ACTION_RECONCILIATION.md)。
+
 现有 `POST /api/runs`、事件流、approval、cancel、trace 与 artifact API 可以直接复用。
-POC 的前端状态机下一步替换为这些 API，不需要为发票场景新增一套服务端协议。
+POC 的前端状态机下一步替换为这些 API。本地通用 Agent Loop 的单动作已有独立的
+`approval-binding/v2 + approve_and_execute`：旧 approve 对已对账外部副作用只表示知晓，
+`upload/send/publish/submit/payment` 都只消费精确、同语义且可审阅的 v2 执行授权。
+owner-scoped Service 在 v3 owner binding 前仍拒绝机器
+提交；四项共享一次批准也仍需正式 BatchApprovalBinding。
 
 浏览器执行层应收敛成内部 `BrowserSessionPort`：
 

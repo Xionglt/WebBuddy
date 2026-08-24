@@ -34,6 +34,37 @@ const researchSnapshot = sdk.snapshotWebTaskInput(research)
 assert.equal(researchSnapshot.schemaVersion, 'web-task-input-snapshot/v1')
 assert.equal('driver' in (research.runtime ?? {}), false)
 assert.deepEqual(research.contract.requiredEvidence?.[0]?.origins, ['web'])
+assert.deepEqual(
+  research.policy.rules.find((rule) => rule.id === 'starter-allow-read-only-navigation'),
+  {
+    id: 'starter-allow-read-only-navigation',
+    actionKinds: ['navigate'],
+    decision: 'allow',
+    destinationOrigins: ['https://example.com'],
+    requireApprovalBinding: false,
+  },
+)
+assert(research.policy.rules.some((rule) => rule.id === 'starter-deny-write-actions' && rule.decision === 'deny'))
+
+const crossOriginResearch = sdk.createResearchStarter({
+  schemaVersion: 'research-starter/v1',
+  goal: 'Compare bounded sources.',
+  startUrl: 'https://example.com/',
+  allowedNavigationOrigins: ['https://example.com', 'https://www.iana.org'],
+})
+assert.deepEqual(crossOriginResearch.policy.rules[0].destinationOrigins, [
+  'https://example.com',
+  'https://www.iana.org',
+])
+assert.throws(
+  () => sdk.createResearchStarter({
+    schemaVersion: 'research-starter/v1',
+    goal: 'Reject an unbounded origin shape.',
+    startUrl: 'https://example.com/',
+    allowedNavigationOrigins: ['https://www.iana.org/domains'],
+  }),
+  /exact HTTP\(S\) origin/,
+)
 
 const comparison = sdk.createComparisonStarter({
   schemaVersion: 'comparison-starter/v1',

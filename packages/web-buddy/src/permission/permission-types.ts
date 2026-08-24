@@ -78,6 +78,11 @@ export interface PermissionRequest {
     sinkActionId?: string
     sinkDestinationOrigin?: string
     sinkContractRevision?: number
+    externalBusinessKey?: string
+    externalEffectDigest?: string
+    externalProbeId?: string
+    externalActionKind?: string
+    externalEffectPreview?: string
   }
 }
 

@@ -90,6 +90,13 @@ export class ApprovalQueue {
     }
 
     const resolutionPatch = { ...normalizeResolveResult(result), ...patch }
+    const decision = normalizeDecision(resolutionPatch.decision)
+    if (decision && !current.allowedDecisions.includes(decision)) {
+      throw new ApprovalQueueError(
+        'invalid_resolution',
+        `Approval decision ${resolutionPatch.decision} is not allowed for ${approvalId}.`,
+      )
+    }
     const status = resolutionPatch.status ?? statusForDecision(resolutionPatch.decision)
     if (!status) {
       throw new ApprovalQueueError(
@@ -97,9 +104,21 @@ export class ApprovalQueue {
         `Approval resolution requires a terminal status or gate decision: ${approvalId}`,
       )
     }
+    if ((status === 'approved' || status === 'denied') && !decision) {
+      throw new ApprovalQueueError(
+        'invalid_resolution',
+        `Approval status ${status} requires an explicit gate decision: ${approvalId}`,
+      )
+    }
+    const decisionStatus = statusForDecision(decision)
+    if (decisionStatus && decisionStatus !== status) {
+      throw new ApprovalQueueError(
+        'invalid_resolution',
+        `Approval status ${status} conflicts with decision ${decision}: ${approvalId}`,
+      )
+    }
 
     const resolvedAt = resolutionPatch.resolvedAt ?? this.now()
-    const decision = normalizeDecision(resolutionPatch.decision)
     const resolution: ApprovalResolution = {
       schemaVersion: 'approval-resolution/v1',
       id: approvalId,
@@ -229,7 +248,11 @@ function isResolvedStatus(value: string): value is ApprovalResolvedStatus {
 }
 
 function isDecision(value: string): value is ApprovalResolveDecision {
-  return value === 'approve' || value === 'decline' || value === 'takeover' || value === 'deny'
+  return value === 'approve'
+    || value === 'approve_and_execute'
+    || value === 'decline'
+    || value === 'takeover'
+    || value === 'deny'
 }
 
 function normalizeDecision(decision: ApprovalResolveDecision | undefined): GateDecision | undefined {
@@ -238,7 +261,7 @@ function normalizeDecision(decision: ApprovalResolveDecision | undefined): GateD
 }
 
 function statusForDecision(decision: ApprovalResolveDecision | undefined): ApprovalResolvedStatus | undefined {
-  if (decision === 'approve') return 'approved'
+  if (decision === 'approve' || decision === 'approve_and_execute') return 'approved'
   if (decision === 'decline' || decision === 'deny') return 'denied'
   if (decision === 'takeover') return 'cancelled'
   return undefined

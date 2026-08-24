@@ -51,6 +51,7 @@ const control = createWebControlServer({
       maximum: fixture.quota.runsPerWindow,
       windowMs: fixture.quota.windowMs,
     }],
+    clock: () => new Date('2026-07-18T00:00:30.000Z'),
     auditSink: {
       async append(event) {
         auditEvents.push(structuredClone(event))
@@ -245,6 +246,12 @@ try {
   })
 
   const approvalId = 'm5-approval-tenant-b'
+  await control.runService.start(runBControl.runId, 'm5-start-b-control', { ownerScope: ownerScopeB })
+  await control.runService.transition(runBControl.runId, {
+    to: 'blocked_on_human',
+    idempotencyKey: 'm5-block-b-control',
+    reason: 'Waiting for an exact owner-scoped approval.',
+  }, { ownerScope: ownerScopeB })
   await seedApproval(control, runBControl.runId, approvalId, ownerScopeB)
   await check('approval id guessing cannot resolve a foreign approval', async () => {
     const response = await authenticatedFetch(
@@ -268,6 +275,104 @@ try {
     assert.equal(approval?.status, 'pending', 'foreign request mutated approval')
   })
 
+  await check('owner cannot invent an unoffered approve_and_execute decision', async () => {
+    const response = await authenticatedFetch(
+      base,
+      `/api/approvals/${encodeURIComponent(approvalId)}/resolve`,
+      fixture.principals.tenantB,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'm5-unoffered-execution-approval',
+        },
+        body: JSON.stringify({
+          decision: 'approved_and_execute',
+          expectedRevision: 0,
+          expectedRecordRevision: 0,
+        }),
+      },
+    )
+    assert.equal(response.status, 409)
+    assert.match(await response.text(), /not allowed|BINDING_MISMATCH/i)
+    const approval = await control.approvalService.get(approvalId, { ownerScope: ownerScopeB })
+    assert.equal(approval?.status, 'pending', 'unoffered execution decision mutated approval')
+  })
+
+  await check('durable store rejects unreviewable machine-execution offers', async () => {
+    for (const [suffix, externalEffectPreview] of [
+      ['missing-preview', undefined],
+      ['secret-preview', '{"apiToken":"must-not-render","operation":"submit_invoice"}'],
+    ]) {
+      const unsafeApprovalId = `m5-unsafe-execution-${suffix}`
+      await assert.rejects(
+        seedApproval(control, runBControl.runId, unsafeApprovalId, ownerScopeB, {
+          actionId: `m5-submit-${suffix}`,
+          allowedDecisions: ['approved', 'approved_and_execute', 'denied'],
+          externalBusinessKey: `opaque:m5-tenant-b:invoice:${suffix}`,
+          externalEffectDigest: 'e'.repeat(64),
+          externalProbeId: 'm5-read-only-probe/v1',
+          externalActionKind: 'submit',
+          ...(externalEffectPreview ? { externalEffectPreview } : {}),
+          idempotencyKey: `m5-enqueue-${suffix}`,
+        }),
+        /review preview|secret-bearing/i,
+      )
+      assert.equal(
+        await control.approvalService.get(unsafeApprovalId, { ownerScope: ownerScopeB }),
+        undefined,
+      )
+    }
+  })
+
+  await check('owner can resolve an explicitly offered exact execution decision', async () => {
+    const executionApprovalId = 'm5-execution-approval-tenant-b'
+    await seedApproval(control, runBControl.runId, executionApprovalId, ownerScopeB, {
+      actionId: 'm5-submit-execute-b',
+      allowedDecisions: ['approved', 'approved_and_execute', 'denied'],
+      externalBusinessKey: 'opaque:m5-tenant-b:invoice:execute-1',
+      externalEffectDigest: 'e'.repeat(64),
+      externalProbeId: 'm5-read-only-probe/v1',
+      externalActionKind: 'submit',
+      externalEffectPreview: '{"amount":48600,"operation":"submit_invoice"}',
+      idempotencyKey: 'm5-enqueue-execution-approval-b',
+    })
+    const response = await authenticatedFetch(
+      base,
+      `/api/approvals/${encodeURIComponent(executionApprovalId)}/resolve`,
+      fixture.principals.tenantB,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': 'm5-exact-execution-approval',
+        },
+        body: JSON.stringify({
+          decision: 'approved_and_execute',
+          expectedRevision: 0,
+          expectedRecordRevision: 0,
+        }),
+      },
+    )
+    assert.equal(response.status, 200)
+    const projected = await response.json()
+    assert.deepEqual(projected.allowedDecisions, ['approved', 'approved_and_execute', 'denied'])
+    assert.equal(projected.action.externalBusinessKey, 'opaque:m5-tenant-b:invoice:execute-1')
+    assert.equal(projected.action.externalEffectDigest, 'e'.repeat(64))
+    assert.equal(projected.action.externalProbeId, 'm5-read-only-probe/v1')
+    assert.equal(projected.action.externalActionKind, 'submit')
+    assert.equal(projected.action.externalEffectPreview, '{"amount":48600,"operation":"submit_invoice"}')
+    const approval = await control.approvalService.get(executionApprovalId, { ownerScope: ownerScopeB })
+    assert.equal(approval?.status, 'approved')
+    assert.equal(approval?.resolution?.schemaVersion, 'approval-binding/v2')
+    assert.equal(approval?.resolution?.decision, 'approved_and_execute')
+    assert.equal(
+      (await control.runService.get(runBControl.runId, { ownerScope: ownerScopeB }))?.state,
+      'failed',
+      'a test service with no live Agent Loop must not strand or replay the durable execution decision',
+    )
+  })
+
   await check('tenant A cannot cancel or otherwise control tenant B run', async () => {
     const response = await authenticatedFetch(
       base,
@@ -285,7 +390,8 @@ try {
     assertCrossTenantDenied(response)
     assert.equal(
       (await control.runService.get(runBControl.runId, { ownerScope: ownerScopeB }))?.state,
-      'queued',
+      'failed',
+      'foreign cancel mutated the owner run',
     )
   })
 
@@ -489,7 +595,7 @@ async function seedTrace(rootDir, runId, secret) {
   )
 }
 
-async function seedApproval(controlValue, runId, approvalId, approvalOwnerScope) {
+async function seedApproval(controlValue, runId, approvalId, approvalOwnerScope, options = {}) {
   const requestedAt = '2026-07-18T00:00:00.000Z'
   await controlValue.approvalService.enqueue({
     approvalId,
@@ -503,20 +609,25 @@ async function seedApproval(controlValue, runId, approvalId, approvalOwnerScope)
       contractId: 'm5-security-contract',
       contractRevision: 0,
       runId,
-      actionId: 'm5-submit-b',
+      actionId: options.actionId ?? 'm5-submit-b',
       toolName: 'browser_click',
       argsSha256: 'b'.repeat(64),
       sourceContentIds: ['m5-page-b'],
       sourceSensitiveClasses: [],
       sourceOrigin: 'https://source.example',
       destinationOrigin: 'https://destination.example',
+      ...(options.externalBusinessKey ? { externalBusinessKey: options.externalBusinessKey } : {}),
+      ...(options.externalEffectDigest ? { externalEffectDigest: options.externalEffectDigest } : {}),
+      ...(options.externalProbeId ? { externalProbeId: options.externalProbeId } : {}),
+      ...(options.externalActionKind ? { externalActionKind: options.externalActionKind } : {}),
+      ...(options.externalEffectPreview ? { externalEffectPreview: options.externalEffectPreview } : {}),
       actionSeq: 1,
       expiresAt: '2030-01-01T00:00:00.000Z',
     },
-    allowedDecisions: ['approved', 'denied'],
+    allowedDecisions: options.allowedDecisions ?? ['approved', 'denied'],
     requestedAt,
     expiresAt: '2030-01-01T00:00:00.000Z',
-  }, 'm5-enqueue-approval-b')
+  }, options.idempotencyKey ?? 'm5-enqueue-approval-b')
 }
 
 function listen(server) {

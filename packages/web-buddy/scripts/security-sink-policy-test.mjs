@@ -74,6 +74,136 @@ const allowed = evaluateSinkPolicy({ ...base, approvalBinding: approval, consume
 assert.equal(allowed.action, 'allow')
 assert.equal(allowed.consumedApproval?.consumedAt, now.toISOString())
 assert.equal(evaluateSinkPolicy({ ...base, approvalBinding: approval, consumedApprovalNonces: nonces }).action, 'deny', 'approval is single-use')
+const awarenessOnlySubmit = evaluateSinkPolicy({
+  ...base,
+  actionKind: 'submit',
+  approvalBinding: { ...approval, nonce: 'submit-awareness-only' },
+  consumedApprovalNonces: new Set(),
+})
+assert.equal(
+  awarenessOnlySubmit.action,
+  'deny',
+  'ordinary approved awareness must not authorize an irreversible submit sink',
+)
+assert.match(awarenessOnlySubmit.reason, /semantic kind|external identity/)
+const explicitlyExecutableSubmit = evaluateSinkPolicy({
+  ...base,
+  actionKind: 'submit',
+  approvalBinding: {
+    ...approval,
+    schemaVersion: 'approval-binding/v2',
+    decision: 'approved_and_execute',
+    nonce: 'submit-execute-once',
+  },
+  consumedApprovalNonces: new Set(),
+})
+assert.equal(
+  explicitlyExecutableSubmit.action,
+  'deny',
+  'an execution decision cannot reuse a type_or_paste binding for submit',
+)
+assert.match(explicitlyExecutableSubmit.reason, /semantic kind|external identity/)
+const exactSubmitAction = createSinkActionBinding({
+  contractId: 'contract-sink',
+  revision: 4,
+  runId: 'run-sink',
+  actionId: 'submit-invoice',
+  toolName: 'browser_click',
+  args: { ref: 'e1', text: 'person@example.test' },
+  sourceItems,
+  sourceOrigin: 'https://source.example.test',
+  destinationOrigin: 'https://target.example.test',
+  externalBusinessKey: 'portal:tenant-a:invoice:INV-1',
+  externalEffectDigest: 'e'.repeat(64),
+  externalProbeId: 'invoice-query/v1',
+  externalActionKind: 'submit',
+  externalEffectPreview: '{"invoiceId":"INV-1","operation":"submit_invoice"}',
+  actionSeq: 4,
+  expiresAt: '2026-07-17T03:00:00.000Z',
+})
+const exactSubmitApproval = {
+  ...approval,
+  schemaVersion: 'approval-binding/v2',
+  actionBindingSha256: digestCanonicalJson(exactSubmitAction),
+  decision: 'approved_and_execute',
+  nonce: 'exact-submit-execute-once',
+}
+const exactAwarenessOnlySubmit = evaluateSinkPolicy({
+  ...base,
+  actionKind: 'submit',
+  actionBinding: exactSubmitAction,
+  approvalBinding: {
+    ...approval,
+    actionBindingSha256: digestCanonicalJson(exactSubmitAction),
+    nonce: 'exact-submit-awareness-only',
+  },
+  consumedApprovalNonces: new Set(),
+})
+assert.equal(exactAwarenessOnlySubmit.action, 'deny')
+assert.match(exactAwarenessOnlySubmit.reason, /approved_and_execute/)
+assert.equal(
+  evaluateSinkPolicy({
+    ...base,
+    actionKind: 'submit',
+    actionBinding: exactSubmitAction,
+    approvalBinding: exactSubmitApproval,
+    consumedApprovalNonces: new Set(),
+  }).action,
+  'allow',
+  'a same-kind, reviewable, exact single-use approved_and_execute binding may authorize submit',
+)
+const exactSendAction = createSinkActionBinding({
+  contractId: 'contract-sink',
+  revision: 4,
+  runId: 'run-sink',
+  actionId: 'send-invoice',
+  toolName: 'browser_click',
+  args: { ref: 'e2', invoiceId: 'INV-2' },
+  sourceItems,
+  sourceOrigin: 'https://source.example.test',
+  destinationOrigin: 'https://target.example.test',
+  externalBusinessKey: 'portal:tenant-a:invoice:INV-2',
+  externalEffectDigest: 'f'.repeat(64),
+  externalProbeId: 'invoice-query/v1',
+  externalActionKind: 'send',
+  externalEffectPreview: '{"invoiceId":"INV-2","operation":"send_invoice"}',
+  actionSeq: 5,
+  expiresAt: '2026-07-17T03:00:00.000Z',
+})
+const exactSendBase = {
+  ...base,
+  actionKind: 'send',
+  payload: { ref: 'e2', invoiceId: 'INV-2' },
+  actionBinding: exactSendAction,
+}
+assert.equal(
+  evaluateSinkPolicy({
+    ...exactSendBase,
+    approvalBinding: {
+      ...approval,
+      actionBindingSha256: digestCanonicalJson(exactSendAction),
+      nonce: 'exact-send-awareness-only',
+    },
+    consumedApprovalNonces: new Set(),
+  }).action,
+  'deny',
+  'ordinary awareness approval must not authorize a reconciled send effect',
+)
+assert.equal(
+  evaluateSinkPolicy({
+    ...exactSendBase,
+    approvalBinding: {
+      ...approval,
+      schemaVersion: 'approval-binding/v2',
+      actionBindingSha256: digestCanonicalJson(exactSendAction),
+      decision: 'approved_and_execute',
+      nonce: 'exact-send-execute-once',
+    },
+    consumedApprovalNonces: new Set(),
+  }).action,
+  'allow',
+  'an exact reconciled send effect requires and accepts only explicit machine execution',
+)
 assert.equal(
   evaluateSinkPolicy({
     ...base,
@@ -85,6 +215,32 @@ assert.equal(
   'approval cannot move across origins',
 )
 assert.equal(evaluateSinkPolicy({ ...base, actionKind: 'payment' }).reasonCode, 'policy_denied')
+
+const readOnlyNavigation = evaluateSinkPolicy({
+  actionKind: 'navigate',
+  runId: 'run-research',
+  revision: 0,
+  policy: {
+    schemaVersion: 'task-policy/v1',
+    defaultSensitiveAction: 'deny',
+    rules: [{
+      id: 'allow-research-navigation',
+      actionKinds: ['navigate'],
+      decision: 'allow',
+      requireApprovalBinding: false,
+    }],
+  },
+  payload: { url: 'https://second-source.example.test/docs' },
+  destinationOrigin: 'https://second-source.example.test',
+})
+assert.equal(readOnlyNavigation.action, 'allow')
+assert.equal(readOnlyNavigation.reasonCode, 'not_sensitive')
+
+const personalNavigation = evaluateSinkPolicy({
+  ...readOnlyNavigationInput(),
+  sourceItems: [{ id: 'profile', origin: 'user', trust: 'user_authorized', sensitivity: 'personal' }],
+})
+assert.equal(personalNavigation.action, 'ask', 'navigation carrying personal data must retain an exact approval gate')
 
 const secret = evaluateSinkPolicy({
   ...base,
@@ -170,6 +326,26 @@ function memoryRecord() {
     title: 'Preferred language',
     body: 'The user explicitly chose Chinese.',
     topics: ['preference'],
+  }
+}
+
+function readOnlyNavigationInput() {
+  return {
+    actionKind: 'navigate',
+    runId: 'run-research',
+    revision: 0,
+    policy: {
+      schemaVersion: 'task-policy/v1',
+      defaultSensitiveAction: 'deny',
+      rules: [{
+        id: 'allow-research-navigation',
+        actionKinds: ['navigate'],
+        decision: 'allow',
+        requireApprovalBinding: false,
+      }],
+    },
+    payload: { url: 'https://second-source.example.test/docs' },
+    destinationOrigin: 'https://second-source.example.test',
   }
 }
 

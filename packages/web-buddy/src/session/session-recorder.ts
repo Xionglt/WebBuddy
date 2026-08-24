@@ -15,6 +15,8 @@ export interface SessionRecorder {
   readonly session: AgentSession
   readonly durability: 'durable' | 'none'
   event(event: EventInput): Promise<void>
+  /** Bypasses best-effort swallowing and fsyncs before returning when supported. */
+  eventDurably(event: EventInput): Promise<void>
   transcript(entry: TranscriptInput): Promise<void>
   /** Bypasses best-effort swallowing for effects that must be durable before acknowledgement. */
   transcriptDurably(entry: TranscriptInput): Promise<void>
@@ -55,6 +57,21 @@ export class FileSessionRecorder implements SessionRecorder {
     })
   }
 
+  async eventDurably(event: EventInput): Promise<void> {
+    const value = {
+      version: 1 as const,
+      sessionId: this.session.sessionId,
+      runId: this.session.runId,
+      ts: new Date().toISOString(),
+      ...event,
+    }
+    if (this.store.appendEventDurably) {
+      await this.store.appendEventDurably(value)
+    } else {
+      await this.store.appendEvent(value)
+    }
+  }
+
   async transcript(entry: TranscriptInput): Promise<void> {
     await this.run('transcript', async () => {
       await this.appendTranscript(entry)
@@ -62,7 +79,12 @@ export class FileSessionRecorder implements SessionRecorder {
   }
 
   async transcriptDurably(entry: TranscriptInput): Promise<void> {
-    await this.appendTranscript(entry)
+    const value = this.transcriptEntry(entry)
+    if (this.store.appendTranscriptDurably) {
+      await this.store.appendTranscriptDurably(value)
+    } else {
+      await this.store.appendTranscript(value)
+    }
   }
 
   async workflow(workflowState: unknown): Promise<void> {
@@ -93,14 +115,18 @@ export class FileSessionRecorder implements SessionRecorder {
   }
 
   private async appendTranscript(entry: TranscriptInput): Promise<void> {
-    await this.store.appendTranscript({
+    await this.store.appendTranscript(this.transcriptEntry(entry))
+  }
+
+  private transcriptEntry(entry: TranscriptInput): TranscriptEntry {
+    return {
       version: 1,
       sessionId: this.session.sessionId,
       runId: this.session.runId,
       entryId: createTranscriptEntryId(entry.type),
       ts: new Date().toISOString(),
       ...entry,
-    } as TranscriptEntry)
+    } as TranscriptEntry
   }
 }
 
@@ -122,6 +148,7 @@ export class NoopSessionRecorder implements SessionRecorder {
   }
 
   async event(): Promise<void> {}
+  async eventDurably(): Promise<void> {}
   async transcript(): Promise<void> {}
   async transcriptDurably(): Promise<void> {}
   async workflow(): Promise<void> {}

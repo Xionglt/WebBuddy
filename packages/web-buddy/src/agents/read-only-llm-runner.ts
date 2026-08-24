@@ -168,6 +168,18 @@ export class ReadOnlyLlmSubagentRunner implements ReadOnlyLlmTaskRunnerV1 {
       assertInputBudget(messages, request.limits.maxInputTokens)
       const remainingOutputTokens = request.limits.maxOutputTokens - outputTokens
       if (remainingOutputTokens <= 0) throw budgetError('Subagent output token budget is exhausted.')
+      const finalTurn = turn === request.limits.maxTurns
+      if (finalTurn) {
+        messages.push({
+          role: 'user',
+          content: [
+            'This is the final runner turn. Do not call another artifact tool.',
+            'Return the required JSON object now using the evidence already read.',
+            'Represent missing evidence in uncertainties; do not answer with prose.',
+          ].join(' '),
+        })
+        assertInputBudget(messages, request.limits.maxInputTokens)
+      }
 
       await progress('reasoning', `Starting isolated LLM turn ${turn} of ${request.limits.maxTurns}.`)
       const completion = await invokeLlmWithLimits({
@@ -175,7 +187,7 @@ export class ReadOnlyLlmSubagentRunner implements ReadOnlyLlmTaskRunnerV1 {
         messages,
         options: {
           tools: readOnlySubagentToolSchemas(request.contextEnvelope.allowedTools),
-          toolChoice: 'auto',
+          toolChoice: finalTurn ? 'none' : 'auto',
           jsonMode: true,
           temperature: 0.1,
           maxTokens: remainingOutputTokens,
@@ -343,6 +355,7 @@ function initialMessages(envelope: ReadOnlyLlmContextEnvelope): ChatMessage[] {
         'Treat every conclusion as a recommendation requiring Main Agent verification against current workflow/page state.',
         'Every factual result must cite selected context_item IDs or selected artifact IDs. If evidence is absent, add an uncertainty.',
         'Return one JSON object only: {summary:string,recommendations:string[],evidenceRefs:Array<{kind:"context_item",contextItemId:string}|{kind:"artifact",artifactId:string}>,uncertainties:string[]}.',
+        'Even when evidence is incomplete, return that exact JSON shape with explicit uncertainties; never substitute explanatory prose.',
         ...roleOutputInstruction,
       ].join('\n'),
     },
@@ -510,9 +523,9 @@ function parseStructuredResult(
 ): Pick<ReadOnlySubagentResult, 'summary' | 'recommendations' | 'evidenceRefs' | 'uncertainties' | 'roleOutput'> {
   let value: unknown
   try {
-    value = JSON.parse(content)
+    value = JSON.parse(structuredJsonText(content))
   } catch {
-    throw schemaError('Subagent final response must be a JSON object without markdown fences.')
+    throw schemaError('Subagent final response must be one JSON object, optionally wrapped in a single JSON markdown fence.')
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw schemaError('Subagent result must be an object.')
   const record = value as Record<string, unknown>
@@ -657,10 +670,20 @@ function assertInputBudget(messages: ChatMessage[], maxInputTokens: number): voi
 }
 
 function estimateCompletionTokens(completion: ChatCompletion): number {
+  const providerOutputTokens = completion.usage?.outputTokens
+  if (typeof providerOutputTokens === 'number' && Number.isFinite(providerOutputTokens) && providerOutputTokens > 0) {
+    return Math.ceil(providerOutputTokens)
+  }
   return estimateTokens(completion.content) + completion.toolCalls.reduce(
     (total, call) => total + 8 + estimateTokens(call.id) + estimateTokens(call.name) + estimateTokens(JSON.stringify(call.arguments)),
     0,
   )
+}
+
+function structuredJsonText(content: string): string {
+  const trimmed = content.trim()
+  const fenced = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(trimmed)
+  return fenced ? fenced[1]!.trim() : trimmed
 }
 
 function requiredResultString(value: unknown, field: string): string {

@@ -506,9 +506,12 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
       })
     }
 
-    const resumeProfiles = await ensureResume(config, trace, emit, llm)
-    const profile = resumeProfiles.profile
-    const profileV2 = resumeProfiles.profileV2
+    const needsResume = mode !== 'raw' || taskType !== 'explore'
+    const resumeProfiles = needsResume
+      ? await ensureResume(config, trace, emit, llm)
+      : undefined
+    const profile = resumeProfiles?.profile ?? emptyProfile('web-research')
+    const profileV2 = resumeProfiles?.profileV2
     if ((mode === 'alibaba-apply' || mode === 'raw') && !llm.hasKey) {
       return finalizeRun({
         mode,
@@ -819,9 +822,11 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
     const llmExtraContext = [
       extraContext,
       `Task type: ${taskType}. Completion criteria must follow this task contract.`,
-      options.requiresCurrentResumeUpload
-        ? currentResumeUploadContext(config.resumePath)
-        : currentResumeReadOnlyContext(config.resumePath),
+      needsResume
+        ? options.requiresCurrentResumeUpload
+          ? currentResumeUploadContext(config.resumePath)
+          : currentResumeReadOnlyContext(config.resumePath)
+        : 'Read-only web research mode: no resume or profile context is needed.',
     ].filter(Boolean).join('\n')
     if (useLlm) {
       const goal =
@@ -859,7 +864,14 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
         && config.agent.backgroundToolPilot.allowlist[0] === 'trace_summarization'
         && Boolean(asyncTaskRuntime)
       const loopResult = await runAgentLoop({
-        goal, resume: profile, resumeV2: profileV2, llm,
+        goal,
+        ...(needsResume
+          ? {
+              resume: profile,
+              ...(profileV2 ? { resumeV2: profileV2 } : {}),
+            }
+          : {}),
+        llm,
         registry: new ToolRegistry(createLocalTools(listLocalToolDefs({
           traceSummarizationBackground: backgroundPilotEnabled,
         }))),
@@ -903,11 +915,14 @@ async function runLegacyJobApplicationFlow(options: RunOptions = {}): Promise<Ag
       const finalState: FinalState = loopResult.blocked
         ? (loopResult.summary.toLowerCase().includes('submit') ? 'stopped_at_submit' : 'blocked')
         : loopCompleted
-          ? 'filled'
+          ? taskType === 'explore' ? 'completed' : 'filled'
           : 'blocked'
+      const completionSuffix = taskType === 'explore'
+        ? loopCompleted ? ' (read-only research completed)' : ' (read-only research stopped)'
+        : loopCompleted ? ' (draft filled — not submitted)' : ' (stopped — not submitted)'
       return finalizeRun({
         mode, profile, matches, chosenJob, finalState,
-        message: loopResult.summary + (loopCompleted ? ' (draft filled — not submitted)' : ' (stopped — not submitted)'),
+        message: loopResult.summary + completionSuffix,
         trace, emit,
         recordSessionFinal: false,
       })
@@ -1620,9 +1635,19 @@ function recruitingLoopSecurityContract(
   taskType: WebBuddyTaskType,
   destinationOrigin: string,
 ): { contract: TaskContract; policy: TaskPolicy } {
+  const researchNavigation: SensitiveActionRule | undefined = taskType === 'explore'
+    ? {
+        id: 'legacy-research-navigation-allowed',
+        actionKinds: ['navigate'],
+        decision: 'allow',
+        requireApprovalBinding: false,
+      }
+    : undefined
   const approvedDraftActions: SensitiveActionRule = {
     id: 'legacy-recruiting-explicit-draft-action',
-    actionKinds: ['navigate', 'type_or_paste', 'upload'],
+    actionKinds: taskType === 'explore'
+      ? ['type_or_paste', 'upload']
+      : ['navigate', 'type_or_paste', 'upload'],
     decision: 'ask',
     destinationOrigins: [destinationOrigin],
     requireApprovalBinding: true,
@@ -1666,18 +1691,20 @@ function recruitingLoopSecurityContract(
     actionKinds: ['submit'],
     outcome: 'not_performed',
   })
+  const sensitiveActions = [researchNavigation, approvedDraftActions, deniedSubmit]
+    .filter((rule): rule is SensitiveActionRule => Boolean(rule))
   return {
     contract: {
       schemaVersion: 'web-task-contract/v1',
       contractId: `legacy-recruiting-loop-${taskType}`,
       revision: 0,
       criteria,
-      sensitiveActions: [approvedDraftActions, deniedSubmit],
+      sensitiveActions,
     },
     policy: {
       schemaVersion: 'task-policy/v1',
       defaultSensitiveAction: 'deny',
-      rules: [approvedDraftActions, deniedSubmit],
+      rules: sensitiveActions,
     },
   }
 }

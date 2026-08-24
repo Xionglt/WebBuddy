@@ -7,6 +7,25 @@ import { FileSessionRecorder, FileSessionStore, migrateTranscriptEntry, readJson
 
 const root = mkdtempSync(join(tmpdir(), 'mfa-session-store-'))
 
+class DelayedMetadataSessionStore extends FileSessionStore {
+  #delayFirstLookup = false
+  #lookupCount = 0
+
+  armFirstLookupDelay() {
+    this.#delayFirstLookup = true
+    this.#lookupCount = 0
+  }
+
+  async get(sessionId) {
+    if (this.#delayFirstLookup) {
+      const lookup = this.#lookupCount++
+      if (lookup === 0) await new Promise((resolve) => setTimeout(resolve, 30))
+      else this.#delayFirstLookup = false
+    }
+    return super.get(sessionId)
+  }
+}
+
 try {
   const store = new FileSessionStore({ rootDir: root })
   const session = await store.create({
@@ -165,6 +184,19 @@ try {
   assert.equal(listed.length, 1)
   assert.equal(listed[0].sessionId, session.sessionId)
 
+  const orderingStore = new DelayedMetadataSessionStore({ rootDir: root })
+  orderingStore.armFirstLookupDelay()
+  await Promise.all([
+    orderingStore.appendEventDurably(eventFor(session, 'append-order-1')),
+    orderingStore.appendEvent(eventFor(session, 'append-order-2')),
+  ])
+  const orderedEvents = await readJsonLines(session.eventsPath)
+  assert.deepEqual(
+    orderedEvents.slice(-2).map((event) => event.message),
+    ['append-order-1', 'append-order-2'],
+    'same-process append calls must preserve invocation order across FileSessionStore instances',
+  )
+
   const frozenFiles = {
     session: readFileSync(join(session.outputDir, 'session.json'), 'utf8'),
     transcript: readFileSync(session.transcriptPath, 'utf8'),
@@ -190,7 +222,43 @@ try {
     workflow: readFileSync(session.workflowPath, 'utf8'),
   }, frozenFiles, 'a duplicate create must not overwrite transcript or workflow state')
 
+  await assert.rejects(
+    store.create({
+      sessionId: '../session-store-escape',
+      runId: 'safe-run',
+      source: 'test',
+      goal: 'Must not escape the session root.',
+    }),
+    /UNSAFE_STORAGE_IDENTITY/,
+  )
+  await assert.rejects(
+    store.get('../session-store-escape'),
+    /UNSAFE_STORAGE_IDENTITY/,
+  )
+
+  const originalSessionFile = readFileSync(join(session.outputDir, 'session.json'), 'utf8')
+  const forgedSession = JSON.parse(originalSessionFile)
+  forgedSession.eventsPath = join(root, '..', 'foreign-events.jsonl')
+  writeFileSync(join(session.outputDir, 'session.json'), `${JSON.stringify(forgedSession, null, 2)}\n`)
+  await assert.rejects(
+    store.get(session.sessionId),
+    /SESSION_STORAGE_BINDING_MISMATCH/,
+    'stored absolute paths must remain bound to the configured session root',
+  )
+  writeFileSync(join(session.outputDir, 'session.json'), originalSessionFile)
+
   console.log('session-store-test: PASS')
 } finally {
   rmSync(root, { recursive: true, force: true })
+}
+
+function eventFor(session, message) {
+  return {
+    version: 1,
+    type: 'session_started',
+    sessionId: session.sessionId,
+    runId: session.runId,
+    ts: '2026-06-28T00:00:02.000Z',
+    message,
+  }
 }

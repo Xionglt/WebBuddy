@@ -73,6 +73,8 @@ export interface WebServiceSecurityOptions {
   quotaLimits?: QuotaLimit[]
   auditSink?: ServiceAuditSink
   secretProvider?: ServiceSecretProvider
+  /** Trusted process-level clock dependency; primarily used for deterministic quota verification. */
+  clock?: () => Date
 }
 
 export interface QuotaReservation {
@@ -107,6 +109,7 @@ export class WebServiceSecurityBoundary {
   private readonly auditFile: string
   private readonly auditSink?: ServiceAuditSink
   private readonly authenticateOverride?: WebServiceSecurityOptions['authenticate']
+  private readonly clock: () => Date
   private readonly environmentAuthenticator: EnvironmentTokenAuthenticator
 
   constructor(input: {
@@ -123,6 +126,7 @@ export class WebServiceSecurityBoundary {
     this.auditFile = join(input.rootDir, 'service-security', 'audit.jsonl')
     this.auditSink = input.options?.auditSink
     this.authenticateOverride = input.options?.authenticate
+    this.clock = input.options?.clock ?? (() => new Date())
     this.environmentAuthenticator = new EnvironmentTokenAuthenticator()
   }
 
@@ -174,7 +178,7 @@ export class WebServiceSecurityBoundary {
         limits,
         idempotencyKey: input.idempotencyKey,
         requestDigest: input.requestDigest,
-        now: input.requestedAt ?? new Date(),
+        now: input.requestedAt ?? this.clock(),
       })
     } catch {
       return { decision: 'deny', replayed: false, reasonCode: 'quota_store_failed' }

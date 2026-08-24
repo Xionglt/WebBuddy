@@ -109,6 +109,15 @@ export interface AsyncTaskConfig {
   maxConcurrentReadOnlyLlmTasks: number
   maxConcurrentDeterministicTasks: number
   notificationWaitMs: number
+  /** Isolated Subagent runner limits. These are deliberately separate from the Main Agent budget. */
+  maxTurns?: number
+  maxToolCalls?: number
+  maxInputTokens?: number
+  maxOutputTokens?: number
+  perRequestTimeoutMs?: number
+  overallTimeoutMs?: number
+  /** Open the session circuit after this many matching never-retry failures for one built-in role. */
+  maxRepeatedNeverRetryFailures?: number
 }
 
 /**
@@ -405,6 +414,20 @@ export function loadConfig(overrides: AgentConfigOverrides = {}): AgentConfig {
           ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_DETERMINISTIC', 4),
         notificationWaitMs: overrides.agent?.asyncTasks?.notificationWaitMs
           ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_WAIT_MS', 15_000),
+        maxTurns: overrides.agent?.asyncTasks?.maxTurns
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_TURNS', 6),
+        maxToolCalls: overrides.agent?.asyncTasks?.maxToolCalls
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_TOOL_CALLS', 16),
+        maxInputTokens: overrides.agent?.asyncTasks?.maxInputTokens
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_INPUT_TOKENS', 12_000),
+        maxOutputTokens: overrides.agent?.asyncTasks?.maxOutputTokens
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_MAX_OUTPUT_TOKENS', 4_000),
+        perRequestTimeoutMs: overrides.agent?.asyncTasks?.perRequestTimeoutMs
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_REQUEST_TIMEOUT_MS', 60_000),
+        overallTimeoutMs: overrides.agent?.asyncTasks?.overallTimeoutMs
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_OVERALL_TIMEOUT_MS', 180_000),
+        maxRepeatedNeverRetryFailures: overrides.agent?.asyncTasks?.maxRepeatedNeverRetryFailures
+          ?? numEnv(env, 'WEB_BUDDY_ASYNC_TASK_NEVER_RETRY_CIRCUIT_THRESHOLD', 2),
       },
       toolOrchestration: {
         mode: overrides.agent?.toolOrchestration?.mode ?? toolOrchestrationModeEnv(env),
